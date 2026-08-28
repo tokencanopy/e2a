@@ -2,15 +2,518 @@ package identity_test
 
 import (
 	"context"
+	"errors"
+	"io/fs"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/migrations"
 )
+
+func TestEmbeddedMigrationNumbersAreUniqueFrom108(t *testing.T) {
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+
+	seen := make(map[int]string, len(entries))
+	lastNumber := 107
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		if len(name) < 5 || name[3] != '_' {
+			t.Fatalf("migration %q must start with a three-digit numeric slot", name)
+		}
+		number, err := strconv.Atoi(name[:3])
+		if err != nil {
+			t.Fatalf("migration %q has invalid numeric slot: %v", name, err)
+		}
+		// Historical migrations contain intentionally retained duplicate slots.
+		// Enforce uniqueness for the current train and every future migration.
+		if number < 108 {
+			continue
+		}
+		if previous, ok := seen[number]; ok {
+			t.Fatalf("migration slot %03d is used by both %q and %q", number, previous, name)
+		}
+		if number <= lastNumber {
+			t.Fatalf("migration %q slot %03d is not after slot %03d", name, number, lastNumber)
+		}
+		seen[number] = name
+		lastNumber = number
+	}
+}
+
+func TestMigrationsRewriteLegacySendingJobsWithImmutableAttribution(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate River schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `
+			DELETE FROM river_job WHERE kind IN ('outbound_send','hitl_notify','webhook_notify');
+			DELETE FROM sending_provider_operations WHERE source_account_ref='usr_legacy_jobs';
+			DELETE FROM messages WHERE agent_id='agent_legacy_jobs';
+			ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_sent_as_check;
+			ALTER TABLE messages ADD CONSTRAINT messages_sent_as_check
+			    CHECK (sent_as IS NULL OR sent_as IN ('own_address','relay'));
+		`)
+	})
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM river_job WHERE kind IN ('outbound_send','hitl_notify','webhook_notify');
+		DELETE FROM sending_provider_operations WHERE source_account_ref='usr_legacy_jobs';
+		DELETE FROM messages WHERE agent_id='agent_legacy_jobs';
+		ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_sent_as_check;
+	`); err != nil {
+		t.Fatalf("clear River fixtures: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id,email,name,google_subject) VALUES ('usr_legacy_jobs','owner@legacy-jobs.test','Owner','sub-legacy-jobs');
+		INSERT INTO domains (domain,user_id,verified) VALUES ('legacy-jobs.test','usr_legacy_jobs',true);
+		INSERT INTO agent_identities (id,registered_domain,user_id,name) VALUES ('agent_legacy_jobs','legacy-jobs.test','usr_legacy_jobs','Legacy');
+		INSERT INTO messages (id,agent_id,direction,sender,recipient,subject,delivery_status,sent_as,scheduled_at) VALUES
+		  ('msg_legacy_outbound','agent_legacy_jobs','outbound','sender@legacy-jobs.test','recipient@example.test','Outbound','accepted','relay',NULL),
+		  ('msg_legacy_outbound_own','agent_legacy_jobs','outbound','sender@legacy-jobs.test','recipient@example.test','Outbound own identity','accepted','own_address',NULL),
+		  ('msg_legacy_scheduled','agent_legacy_jobs','outbound','sender@legacy-jobs.test','recipient@example.test','Scheduled','accepted','relay',transaction_timestamp()+interval '90 days'),
+		  ('msg_legacy_hitl','agent_legacy_jobs','outbound','sender@legacy-jobs.test','recipient@example.test','HITL','accepted','own_address',NULL),
+		  ('msg_legacy_null_sent_as','agent_legacy_jobs','outbound','sender@legacy-jobs.test','recipient@example.test','NULL sent_as','accepted',NULL,NULL),
+		  ('msg_legacy_invalid_sent_as','agent_legacy_jobs','outbound','sender@legacy-jobs.test','recipient@example.test','Invalid sent_as','accepted','unexpected',NULL),
+		  ('msg_legacy_inbound','agent_legacy_jobs','inbound','sender@example.test','recipient@legacy-jobs.test','Inbound mismatch','accepted','relay',NULL);
+		INSERT INTO webhooks (id,user_id,url,description,events,filters,signing_secret) VALUES
+		  ('wh_legacy_jobs','usr_legacy_jobs','https://hooks.example.test/health','Legacy health',ARRAY['email.received'],'{}','synthetic-secret');
+	`); err != nil {
+		t.Fatalf("seed legacy sources: %v", err)
+	}
+	var scheduledAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT scheduled_at FROM messages WHERE id='msg_legacy_scheduled'`).Scan(&scheduledAt); err != nil {
+		t.Fatalf("read scheduled fixture time: %v", err)
+	}
+
+	type fixture struct {
+		kind string
+		args string
+	}
+	fixtures := []fixture{
+		{"outbound_send", `{"message_id":"msg_legacy_outbound"}`},
+		{"outbound_send", `{"message_id":"msg_legacy_outbound_own"}`},
+		{"outbound_send", `{"message_id":"msg_legacy_scheduled"}`},
+		{"hitl_notify", `{"message_id":"msg_legacy_hitl"}`},
+		{"webhook_notify", `{"webhook_id":"wh_legacy_jobs","kind":"warning"}`},
+		{"outbound_send", `{"message_id":"msg_orphan_legacy"}`},
+		{"webhook_notify", `{}`},
+		{"outbound_send", `{"message_id":"msg_legacy_null_sent_as"}`},
+		{"outbound_send", `{"message_id":"msg_legacy_invalid_sent_as"}`},
+		{"outbound_send", `{"message_id":"msg_legacy_inbound"}`},
+	}
+	jobIDs := make([]int64, 0, len(fixtures))
+	for _, f := range fixtures {
+		var id int64
+		if err := pool.QueryRow(ctx, `INSERT INTO river_job (args,kind,max_attempts) VALUES ($1::jsonb,$2,3) RETURNING id`, f.args, f.kind).Scan(&id); err != nil {
+			t.Fatalf("insert %s legacy job: %v", f.kind, err)
+		}
+		jobIDs = append(jobIDs, id)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE river_job SET state='scheduled',scheduled_at=$2 WHERE id=$1`, jobIDs[2], scheduledAt); err != nil {
+		t.Fatalf("schedule legacy job: %v", err)
+	}
+
+	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	if err != nil {
+		t.Fatalf("read sending budget migration: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration)); err != nil {
+		t.Fatalf("apply sending budget migration to legacy fixtures: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(migration)); err != nil {
+		t.Fatalf("reapply sending budget migration: %v", err)
+	}
+
+	for i, want := range []struct {
+		purpose string
+		shared  bool
+		source  string
+	}{
+		{"customer_message", true, "message_id"},
+		{"customer_message", false, "message_id"},
+		{"customer_message", true, "message_id"},
+		{"customer_notification", true, "message_id"},
+		{"customer_notification", true, "webhook_id"},
+	} {
+		var operationID, purpose, sourceAccount, policySubject, sourceValue string
+		var shared bool
+		var expiresAt time.Time
+		if err := pool.QueryRow(ctx, `
+			SELECT j.args->'operation_ref'->>'id',o.purpose,o.shared_reputation,
+			       o.source_account_ref,o.policy_subject_ref,j.args->>$2,o.expires_at
+			FROM river_job j JOIN sending_provider_operations o ON o.operation_id=j.args->'operation_ref'->>'id'
+			WHERE j.id=$1`, jobIDs[i], want.source,
+		).Scan(&operationID, &purpose, &shared, &sourceAccount, &policySubject, &sourceValue, &expiresAt); err != nil {
+			t.Fatalf("read rewritten job %d: %v", i, err)
+		}
+		if operationID == "" || purpose != want.purpose || shared != want.shared || sourceAccount != "usr_legacy_jobs" || policySubject != "usr_legacy_jobs" || sourceValue == "" {
+			t.Fatalf("rewritten job %d = op=%q purpose=%q shared=%v source=%q subject=%q legacy=%q", i, operationID, purpose, shared, sourceAccount, policySubject, sourceValue)
+		}
+		if i < 3 && operationID != sourceValue {
+			t.Fatalf("outbound operation id=%q, want retained message id %q", operationID, sourceValue)
+		}
+		if i == 2 && expiresAt.Before(scheduledAt.Add(30*24*time.Hour)) {
+			t.Errorf("scheduled operation expires_at=%s, want at least scheduled_at+30d=%s", expiresAt, scheduledAt.Add(30*24*time.Hour))
+		}
+	}
+
+	for i, jobID := range jobIDs[5:] {
+		var unavailableState string
+		var unavailableFinalized bool
+		var unavailableHasRef bool
+		if err := pool.QueryRow(ctx, `SELECT state::text,finalized_at IS NOT NULL,args ? 'operation_ref' FROM river_job WHERE id=$1`, jobID).Scan(&unavailableState, &unavailableFinalized, &unavailableHasRef); err != nil {
+			t.Fatalf("read unavailable disposition %d: %v", i, err)
+		}
+		if unavailableState != "discarded" || !unavailableFinalized || unavailableHasRef {
+			t.Errorf("unavailable disposition %d state=%q finalized=%v operation_ref=%v", i, unavailableState, unavailableFinalized, unavailableHasRef)
+		}
+	}
+
+	var operations int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sending_provider_operations WHERE source_account_ref='usr_legacy_jobs'`).Scan(&operations); err != nil || operations != 5 {
+		t.Fatalf("legacy operation count=%d err=%v", operations, err)
+	}
+	var controls int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM account_sending_controls WHERE user_id='usr_legacy_jobs' AND state='active' AND outcome_epoch=1`).Scan(&controls); err != nil || controls != 1 {
+		t.Fatalf("bootstrapped account controls=%d err=%v", controls, err)
+	}
+}
+
+func TestSendingBudgetMigrationDoesNotDeadlockSourceFirstJobCancellation(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate River schema: %v", err)
+	}
+	client, err := jobs.New(pool, jobs.Config{})
+	if err != nil {
+		t.Fatalf("build real River cancellation client: %v", err)
+	}
+	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupData := func() {
+		_, _ = pool.Exec(context.Background(), `
+			DELETE FROM river_job
+			WHERE kind IN ('outbound_send','hitl_notify','webhook_notify');
+			DELETE FROM sending_provider_operations
+			WHERE source_account_ref='usr_source_first_race';
+			DELETE FROM users WHERE id='usr_source_first_race';
+		`)
+	}
+	cleanupData()
+	if _, err := pool.Exec(ctx, `DROP TABLE account_sending_controls`); err != nil {
+		t.Fatalf("remove controls/FK for true first-apply race: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupData()
+		if _, err := pool.Exec(context.Background(), string(migration)); err != nil {
+			t.Errorf("restore budget migration after source-first race: %v", err)
+		}
+	})
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id,email,name,google_subject)
+		VALUES ('usr_source_first_race','owner@source-first-race.test','Owner','sub-source-first-race');
+		INSERT INTO domains (domain,user_id,verified)
+		VALUES ('source-first-race.test','usr_source_first_race',true);
+		INSERT INTO agent_identities (id,registered_domain,user_id,name)
+		VALUES ('agent_source_first_race','source-first-race.test','usr_source_first_race','Race');
+		INSERT INTO messages
+		    (id,agent_id,direction,sender,recipient,subject,delivery_status,sent_as)
+		VALUES ('msg_source_first_race','agent_source_first_race','outbound',
+		        'sender@source-first-race.test','recipient@example.test','Source first',
+		        'accepted','relay');
+	`); err != nil {
+		t.Fatalf("seed source-first race: %v", err)
+	}
+	var jobID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO river_job (args,kind,max_attempts)
+		VALUES ('{"message_id":"msg_source_first_race"}'::jsonb,'outbound_send',3)
+		RETURNING id
+	`).Scan(&jobID); err != nil {
+		t.Fatalf("insert source-first River job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE messages SET send_job_id=$2 WHERE id=$1
+	`, "msg_source_first_race", jobID); err != nil {
+		t.Fatalf("link source-first River job: %v", err)
+	}
+
+	deletionConn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deletionConn.Release()
+	deletionTx, err := deletionConn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletionOpen := true
+	defer func() {
+		if deletionOpen {
+			_ = deletionTx.Rollback(context.Background())
+		}
+	}()
+	if _, err := deletionTx.Exec(ctx, `
+		SELECT id FROM agent_identities
+		WHERE id='agent_source_first_race' FOR UPDATE;
+		SELECT send_job_id FROM messages
+		WHERE id='msg_source_first_race' FOR UPDATE;
+	`); err != nil {
+		t.Fatalf("hold production source-first locks: %v", err)
+	}
+
+	migrator, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrator.Release()
+	var migratorPID int
+	if err := migrator.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&migratorPID); err != nil {
+		t.Fatal(err)
+	}
+	migrationCtx, cancelMigration := context.WithTimeout(ctx, 8*time.Second)
+	defer cancelMigration()
+	migrationErrCh := make(chan error, 1)
+	go func() {
+		_, execErr := migrator.Exec(migrationCtx, string(migration))
+		migrationErrCh <- execErr
+	}()
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelWait()
+	waitingOnSource := false
+	for !waitingOnSource {
+		if err := pool.QueryRow(waitCtx, `
+			SELECT COALESCE(wait_event_type='Lock',false)
+			FROM pg_stat_activity WHERE pid=$1
+		`, migratorPID).Scan(&waitingOnSource); err != nil {
+			t.Fatalf("observe migration source wait: %v", err)
+		}
+		if !waitingOnSource {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	jobProbe, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, jobProbeErr := jobProbe.Exec(ctx, `
+		SELECT id FROM river_job WHERE id=$1 FOR UPDATE NOWAIT
+	`, jobID)
+	_ = jobProbe.Rollback(ctx)
+
+	cancelErr := client.CancelTx(ctx, deletionTx, jobID)
+	if cancelErr == nil {
+		_, cancelErr = deletionTx.Exec(ctx, `DELETE FROM users WHERE id='usr_source_first_race'`)
+	}
+	if cancelErr == nil {
+		cancelErr = deletionTx.Commit(ctx)
+	} else {
+		_ = deletionTx.Rollback(ctx)
+	}
+	deletionOpen = false
+	migrationErr := <-migrationErrCh
+
+	for name, got := range map[string]error{"migration": migrationErr, "cancellation": cancelErr} {
+		var pgErr *pgconn.PgError
+		if errors.As(got, &pgErr) && pgErr.Code == "40P01" {
+			t.Errorf("%s hit source/job lock-order deadlock: %v", name, got)
+		} else if got != nil {
+			t.Errorf("%s failed: %v", name, got)
+		}
+	}
+	var probePgErr *pgconn.PgError
+	if errors.As(jobProbeErr, &probePgErr) && probePgErr.Code == "55P03" && migrationErr == nil && cancelErr == nil {
+		t.Error("migration held the River job while waiting on its source")
+	} else if jobProbeErr != nil && !(errors.As(jobProbeErr, &probePgErr) && probePgErr.Code == "55P03") {
+		t.Fatalf("probe migration River lock: %v", jobProbeErr)
+	}
+
+	releaseProbe, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseProbe.Exec(ctx, `
+		SELECT id FROM river_job WHERE id=$1 FOR UPDATE NOWAIT
+	`, jobID); err != nil {
+		_ = releaseProbe.Rollback(ctx)
+		t.Fatalf("race left River job lock behind: %v", err)
+	}
+	if err := releaseProbe.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSendingBudgetMigrationLeavesPostSnapshotLegacyJobForResolver(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate River schema: %v", err)
+	}
+
+	const advisoryKey int64 = 6_104_112
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS sending_snapshot_barrier ON river_job;
+			DROP FUNCTION IF EXISTS sending_snapshot_barrier();
+			DELETE FROM river_job WHERE args->>'message_id'='msg_snapshot_late' OR args->>'webhook_id'='wh_snapshot_barrier';
+			DELETE FROM sending_provider_operations WHERE source_account_ref='usr_snapshot_test';
+			DELETE FROM users WHERE id='usr_snapshot_test';
+		`)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id,email,name,google_subject)
+		VALUES ('usr_snapshot_test','owner@snapshot.test','Owner','sub-snapshot-test');
+		INSERT INTO domains (domain,user_id,verified)
+		VALUES ('snapshot.test','usr_snapshot_test',true);
+		INSERT INTO agent_identities (id,registered_domain,user_id,name)
+		VALUES ('agent_snapshot_test','snapshot.test','usr_snapshot_test','Snapshot');
+		INSERT INTO messages
+		    (id,agent_id,direction,sender,recipient,subject,delivery_status,sent_as)
+		VALUES
+		    ('msg_snapshot_late','agent_snapshot_test','outbound','sender@snapshot.test',
+		     'recipient@example.test','Late snapshot job','accepted','relay');
+		INSERT INTO webhooks (id,user_id,url,description,events,filters,signing_secret)
+		VALUES ('wh_snapshot_barrier','usr_snapshot_test','https://hooks.snapshot.test/health',
+		        'Snapshot barrier',ARRAY['email.received'],'{}','synthetic-secret');
+	`); err != nil {
+		t.Fatalf("seed snapshot sources: %v", err)
+	}
+
+	var barrierJobID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO river_job (args,kind,max_attempts)
+		VALUES ('{"webhook_id":"wh_snapshot_barrier","kind":"warning"}'::jsonb,'webhook_notify',3)
+		RETURNING id
+	`).Scan(&barrierJobID); err != nil {
+		t.Fatalf("insert snapshot barrier job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION sending_snapshot_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF OLD.id = `+strconv.FormatInt(barrierJobID, 10)+` AND NEW.args ? 'operation_ref' THEN
+				PERFORM pg_advisory_xact_lock(`+strconv.FormatInt(advisoryKey, 10)+`);
+			END IF;
+			RETURN NEW;
+		END
+		$$;
+		CREATE TRIGGER sending_snapshot_barrier
+		BEFORE UPDATE OF args ON river_job
+		FOR EACH ROW EXECUTE FUNCTION sending_snapshot_barrier();
+	`); err != nil {
+		t.Fatalf("install snapshot barrier: %v", err)
+	}
+
+	blocker, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire advisory blocker: %v", err)
+	}
+	defer blocker.Release()
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryKey); err != nil {
+		t.Fatalf("hold snapshot barrier: %v", err)
+	}
+	barrierHeld := true
+	defer func() {
+		if barrierHeld {
+			_, _ = blocker.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, advisoryKey)
+		}
+	}()
+
+	migrationConn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire migration connection: %v", err)
+	}
+	defer migrationConn.Release()
+	var migrationPID int
+	if err := migrationConn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&migrationPID); err != nil {
+		t.Fatalf("read migration backend pid: %v", err)
+	}
+	migration, err := migrations.FS.ReadFile("110_sending_budget_ledger.sql")
+	if err != nil {
+		t.Fatalf("read sending budget migration: %v", err)
+	}
+	migrationErr := make(chan error, 1)
+	go func() {
+		_, execErr := migrationConn.Exec(context.Background(), string(migration))
+		migrationErr <- execErr
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_locks
+				WHERE pid=$1 AND locktype='advisory' AND NOT granted
+			)
+		`, migrationPID).Scan(&waiting); err != nil {
+			t.Fatalf("observe snapshot barrier: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("migration did not reach the post-snapshot rewrite barrier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var lateJobID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO river_job (args,kind,max_attempts)
+		VALUES ('{"message_id":"msg_snapshot_late"}'::jsonb,'outbound_send',3)
+		RETURNING id
+	`).Scan(&lateJobID); err != nil {
+		t.Fatalf("insert post-snapshot legacy job: %v", err)
+	}
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_unlock($1)`, advisoryKey); err != nil {
+		t.Fatalf("release snapshot barrier: %v", err)
+	}
+	barrierHeld = false
+	if err := <-migrationErr; err != nil {
+		t.Fatalf("apply sending budget migration: %v", err)
+	}
+
+	var state string
+	var finalized, hasOperationRef bool
+	if err := pool.QueryRow(ctx, `
+		SELECT state::text,finalized_at IS NOT NULL,args ? 'operation_ref'
+		FROM river_job WHERE id=$1
+	`, lateJobID).Scan(&state, &finalized, &hasOperationRef); err != nil {
+		t.Fatalf("read post-snapshot job: %v", err)
+	}
+	if state != "available" || finalized || hasOperationRef {
+		t.Fatalf("post-snapshot job state=%q finalized=%v operation_ref=%v, want untouched old-format available job", state, finalized, hasOperationRef)
+	}
+	var lateOperations int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sending_provider_operations WHERE operation_id='msg_snapshot_late'`).Scan(&lateOperations); err != nil || lateOperations != 0 {
+		t.Fatalf("post-snapshot operations=%d err=%v, want 0", lateOperations, err)
+	}
+}
 
 func TestMessagesFailureReasonCodeMigrationIsNullableAndIdempotent(t *testing.T) {
 	ctx := context.Background()

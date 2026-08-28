@@ -300,6 +300,12 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 //     (the "insert must be new" assertions saw the previous run's rows).
 //   - sender_identity_managed_domains: deliberately survives domain deletion
 //     until asynchronous provider teardown is confirmed.
+//   - sending-protection security ledgers: provider operations, budget rows,
+//     control audit, notice outbox, and feedback provenance deliberately have no
+//     customer-tree FK so account/message deletion cannot erase them.
+//   - sending-protection policy state: the event/marker tables have no FK, while
+//     the runtime-policy and attestation singletons must be restored to their
+//     migration-owned generation-zero sentinels between tests.
 //
 // Use DELETE for FK-less tables instead of adding them to TRUNCATE. The test suite
 // calls this helper hundreds of times; repeatedly truncating inbound_intake also
@@ -325,6 +331,41 @@ func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 
 		DELETE FROM inbound_intake;
 		DELETE FROM sender_identity_managed_domains;
+		DELETE FROM sending_protection_notice_deliveries;
+		DELETE FROM sending_protection_notice_events;
+		DELETE FROM sending_feedback_recipients;
+		DELETE FROM sending_feedback_events;
+		DELETE FROM sending_feedback_correlations;
+		DELETE FROM sending_budget_reservations;
+		DELETE FROM sending_budget_counters;
+		DELETE FROM sending_provider_operations;
+		DELETE FROM account_sending_control_events;
+		DELETE FROM sending_protection_policy_events;
+		DELETE FROM sending_ramp_grandfathering;
+
+		-- This registry is append-only in application/migration use; its
+		-- unconditional trigger intentionally rejects DELETE. The disposable
+		-- test database bypasses user triggers for this one row-lock-scoped
+		-- cleanup instead of using TRUNCATE's ACCESS EXCLUSIVE table lock.
+		SET LOCAL session_replication_role = replica;
+		DELETE FROM sending_operator_recipient_versions;
+		SET LOCAL session_replication_role = origin;
+
+		DELETE FROM sending_protection_runtime_policy;
+		INSERT INTO sending_protection_runtime_policy
+		    (singleton, generation, schema_version, policy, policy_sha256, activated_at, activated_by)
+		VALUES (
+		    true, 0, 1,
+		    '{"all_customer_global_daily_recipients":5000,"bounce_min_outcomes":50,"bounce_pause_basis_points":400,"budget_hold_max_days":7,"budget_mode":"disabled","complaint_pause_basis_points":8,"critical_operational_daily_recipients":100,"daily_unlimited_plan_codes":["starter","pro","scale"],"default_account_daily_recipients":100,"detector_interval_seconds":300,"detector_mode":"disabled","detector_window_days":7,"operator_notice_recipient_version":1,"probation_global_daily_recipients":150,"ramp_days":30,"ramp_enabled":false,"ramp_start_daily":150,"ramp_target_daily":2000,"sending_control_audit_retention_days":90,"sending_feedback_post_account_retention_days":30,"shared_domain_account_daily_recipients":50,"shared_reputation_bounce_min_outcomes":1,"tenant_header_canary_account_ids":[],"tenant_header_mode":"disabled","tenant_provisioning_mode":"disabled","tenant_suppression_sync_mode":"disabled","violation_operational_daily_recipients":100}'::jsonb,
+		    '198d8cfb3220b6094a3b8dfe13cb0e2ff97c512ad87ae14609e580ae335c9ce6',
+		    now(), 'migration'
+		);
+
+		DELETE FROM sending_protection_runtime_attestation;
+		INSERT INTO sending_protection_runtime_attestation
+		    (singleton, revision, active_billing_digest, active_billing_contract,
+		     rollback_billing_digest, rollback_billing_contract, updated_by)
+		VALUES (true, 0, '', 0, '', 0, 'migration');
 
 		TRUNCATE oauth_pkce_requests, oauth_refresh_tokens, oauth_access_tokens,
 		         oauth_auth_codes, oauth_clients,
