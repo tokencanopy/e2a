@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -869,6 +870,12 @@ func (s *Server) requirePrincipal(ctx context.Context) (*identity.Principal, err
 	}
 	p, err := s.resolvePrincipal(r)
 	if err != nil {
+		// Availability failures (delegated verifier not ready, identity
+		// store outage) are 503, not 401: the credential was never judged,
+		// so no challenge fires (the challenge wrapper keys on 401 alone).
+		if errors.Is(err, identity.ErrAuthUnavailable) {
+			return nil, NewError(http.StatusServiceUnavailable, "internal_error", "authentication temporarily unavailable")
+		}
 		return nil, NewError(http.StatusUnauthorized, "unauthorized", "authentication required")
 	}
 	return p, nil

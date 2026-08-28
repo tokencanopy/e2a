@@ -25,6 +25,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/contactdue"
+	"github.com/tokencanopy/e2a/internal/delegated"
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
@@ -750,6 +751,40 @@ func main() {
 	// through a higher-level abstraction.
 	api.SetPoolForEvents(pool)
 	api.SetMetrics(metrics)
+
+	// Delegated access-token verification (config delegated:). The issuer
+	// is wired independently of enablement so the external-principal
+	// attach endpoint can populate mappings ahead of flipping the
+	// verifier on. Construction is static-only (config.Validate already
+	// vetted the policy); issuer discovery runs in the background with
+	// retry, so an unreachable issuer degrades delegated auth to 503
+	// without touching startup or any other credential path.
+	api.SetDelegatedIssuer(cfg.Delegated.IssuerURL)
+	if cfg.Delegated.Enabled {
+		requiredClaims := make([]delegated.RequiredClaim, 0, len(cfg.Delegated.RequiredClaims))
+		for _, rc := range cfg.Delegated.RequiredClaims {
+			requiredClaims = append(requiredClaims, delegated.RequiredClaim{
+				Name:          rc.Name,
+				AllowedValues: rc.AllowedValues,
+			})
+		}
+		delegatedVerifier, err := delegated.NewVerifier(ctx, delegated.Config{
+			IssuerURL:         cfg.Delegated.IssuerURL,
+			Audience:          cfg.Delegated.Audience,
+			AuthorizedParty:   cfg.Delegated.AuthorizedParty,
+			RequiredScope:     cfg.Delegated.RequiredScope,
+			AllowedAlgorithms: cfg.Delegated.AllowedAlgorithms,
+			MaxTokenLifetime:  time.Duration(cfg.Delegated.MaxTokenLifetimeSeconds) * time.Second,
+			ClockSkew:         time.Duration(cfg.Delegated.ClockSkewSeconds) * time.Second,
+			RequiredClaims:    requiredClaims,
+			ForbiddenClaims:   cfg.Delegated.ForbiddenClaims,
+		}, metrics)
+		if err != nil {
+			log.Fatalf("Failed to initialize delegated verifier: %v", err)
+		}
+		api.SetDelegatedVerifier(delegatedVerifier)
+		log.Printf("[delegated] verifier enabled (issuer=%s); discovering issuer in the background", cfg.Delegated.IssuerURL)
+	}
 
 	api.RegisterRoutes(router)
 

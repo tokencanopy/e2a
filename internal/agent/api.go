@@ -25,6 +25,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/agentauth"
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
+	"github.com/tokencanopy/e2a/internal/delegated"
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -219,6 +220,7 @@ type API struct {
 	provisioningEnabled   bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
 	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
 	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
+	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
 	billingHookURL        string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
@@ -827,6 +829,16 @@ func (a *API) authenticatePrincipal(r *http.Request) (*identity.Principal, error
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" {
 		bearer := stripBearerScheme(authHeader)
+		// Token-kind dispatch, first check: a compact JWT whose protected
+		// header says typ "at+jwt" is delegated-owned. The classification is
+		// parse-only (header bytes under exact size limits, no signature or
+		// network) and deliberately unconditional — disabled, unavailable,
+		// malformed, or invalid delegated tokens never fall through to the
+		// agent-JWT, OAuth, or API-key paths. Everything not positively
+		// classified keeps today's precedence exactly.
+		if delegated.Classify(len(authHeader), bearer) {
+			return a.principalFromDelegatedToken(r, bearer)
+		}
 		// auth.md agent access token (Slice 5b-2): an RS256 JWT we minted,
 		// resolving to an agent-scoped principal. Checked before the API-key
 		// path since a JWT is never a valid API key. A bearer that looks like
@@ -959,6 +971,13 @@ func (a *API) principalFromOAuthToken(r *http.Request, bearer string) (*identity
 // metadata document lands, add `resource_metadata="<url>"` here so MCP
 // clients can auto-discover the authorization server.
 func (a *API) writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	// Availability failures (delegated verifier not ready, identity-store
+	// outage) are 503, not 401 — they say nothing about the credential, so
+	// no Bearer challenge is advertised.
+	if errors.Is(err, identity.ErrAuthUnavailable) {
+		http.Error(w, "authentication temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("WWW-Authenticate", a.authChallenge(r, err))
 	http.Error(w, "authentication required", http.StatusUnauthorized)
 }
