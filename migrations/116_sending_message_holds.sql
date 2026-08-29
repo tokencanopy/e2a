@@ -1,4 +1,4 @@
--- 113_sending_message_holds.sql
+-- 116_sending_message_holds.sql
 --
 -- Keep this bounded transaction limited to the unavoidable messages metadata
 -- lock. It follows the account FK transactions so it cannot invert the
