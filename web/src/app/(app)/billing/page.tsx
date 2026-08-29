@@ -854,8 +854,9 @@ export default function BillingPage() {
                   Each one adds {formatNumber(planData.addon.per_unit.max_agents)}{" "}
                   inbox{planData.addon.per_unit.max_agents === 1 ? "" : "es"} and{" "}
                   {formatNumber(planData.addon.per_unit.max_messages_month)} sends
-                  / mo to your account&apos;s shared pool. Adjust anytime; charges
-                  are prorated.
+                  / mo to your account&apos;s shared pool. Add anytime (charged
+                  prorated); reduce anytime — reductions apply immediately with
+                  no partial-month refund.
                 </div>
                 {/* The free tier is identified structurally (price 0),
                     like ctaFor does — never by a hardcoded plan code. */}
