@@ -159,7 +159,7 @@ describe("BillingPage — post-checkout reconciliation", () => {
     // the user the upgrade is being finalized rather than silently
     // showing them the plan they just paid to leave.
     await waitFor(() =>
-      expect(screen.getByText(/Finalizing your upgrade/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Finalizing your purchase/i)).toBeInTheDocument(),
     );
     const callsAfterMount = countCallsTo(PLAN_URL);
 
@@ -177,7 +177,7 @@ describe("BillingPage — post-checkout reconciliation", () => {
     });
 
     await waitFor(() => expect(screen.getByText("Current")).toBeInTheDocument());
-    expect(screen.queryByText(/Finalizing your upgrade/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Finalizing your purchase/i)).not.toBeInTheDocument();
 
     // And it stops once resolved — no unbounded polling of the sidecar.
     const callsAfterResolve = countCallsTo(PLAN_URL);
@@ -206,7 +206,7 @@ describe("BillingPage — post-checkout reconciliation", () => {
     renderPage();
 
     await waitFor(() =>
-      expect(screen.getByText(/Finalizing your upgrade/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Finalizing your purchase/i)).toBeInTheDocument(),
     );
 
     // Just inside the window, after many poll ticks and the re-renders
@@ -214,7 +214,7 @@ describe("BillingPage — post-checkout reconciliation", () => {
     await act(async () => {
       await jest.advanceTimersByTimeAsync(19000);
     });
-    expect(screen.getByText(/Finalizing your upgrade/i)).toBeInTheDocument();
+    expect(screen.getByText(/Finalizing your purchase/i)).toBeInTheDocument();
     expect(screen.queryByText(/hasn't appeared yet/i)).not.toBeInTheDocument();
 
     // Just past it — given up, on schedule rather than whenever the effect
@@ -232,7 +232,7 @@ describe("BillingPage — post-checkout reconciliation", () => {
     renderPage();
 
     await waitFor(() =>
-      expect(screen.getByText(/Finalizing your upgrade/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Finalizing your purchase/i)).toBeInTheDocument(),
     );
 
     // Past the reconcile window with the sidecar still reporting free.
@@ -243,7 +243,7 @@ describe("BillingPage — post-checkout reconciliation", () => {
     await waitFor(() =>
       expect(screen.getByText(/hasn't appeared yet/i)).toBeInTheDocument(),
     );
-    expect(screen.queryByText(/Finalizing your upgrade/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Finalizing your purchase/i)).not.toBeInTheDocument();
 
     // Stopped polling rather than hammering the sidecar forever.
     const callsAfterGiveUp = countCallsTo(PLAN_URL);
@@ -258,7 +258,7 @@ describe("BillingPage — post-checkout reconciliation", () => {
     await waitFor(() => expect(screen.getByText("Plans")).toBeInTheDocument());
     const callsAfterMount = countCallsTo(PLAN_URL);
 
-    expect(screen.queryByText(/Finalizing your upgrade/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Finalizing your purchase/i)).not.toBeInTheDocument();
 
     // Well inside the 30s background cadence: nothing extra should fire.
     await act(async () => {

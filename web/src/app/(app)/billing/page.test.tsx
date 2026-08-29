@@ -112,7 +112,7 @@ describe("BillingPage", () => {
     // Post-checkout reconciliation waits on the sidecar's plan read to
     // report an active subscription. With no sidecar there is no such
     // read, so a stray ?status=success must not park the page on a
-    // "finalizing your upgrade" notice that can never resolve — a
+    // "Finalizing your purchase" notice that can never resolve — a
     // self-host install has no checkout to come back from.
     window.history.replaceState({}, "", "/billing?status=success");
     stageLimits({
@@ -124,7 +124,7 @@ describe("BillingPage", () => {
     renderPage();
 
     await waitFor(() => screen.getByText(/Default/i));
-    expect(screen.queryByText(/Finalizing your upgrade/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Finalizing your purchase/i)).not.toBeInTheDocument();
   });
 
   it("renders error state when the API returns non-2xx", async () => {
