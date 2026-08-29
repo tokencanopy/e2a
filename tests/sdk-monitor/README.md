@@ -30,8 +30,8 @@ of five interfaces:
 | `api` | raw HTTP against the server's `/v1/agents/{email}/messages` (and `.../reply`) endpoints — no SDK. Catches a server-contract break distinct from an SDK break. | python (stdlib `urllib`) |
 | `python_sdk` | the published `e2a` PyPI package | python |
 | `mcp` | the deployed MCP streamable-HTTP server's `send_message` / `reply_to_message` tools | python (hand-rolled JSON-RPC over `urllib`) |
-| `ts_sdk` | the published `@e2a/sdk` npm package (v5.4.0) | node, shelled out from python |
-| `cli` | the published `@e2a/cli` npm package (v2.1.0, bin `e2a`) | node, shelled out from python |
+| `ts_sdk` | the published `@e2a/sdk` npm package | node, shelled out from python |
+| `cli` | the published `@e2a/cli` npm package (bin `e2a`) | node, shelled out from python |
 
 Anything that breaks any of those — a bad publish, a wire-contract drift, a
 packaging regression, an MCP transport change — stops that interface's
@@ -300,8 +300,8 @@ signal, not something to work around.
 ## SDK / package version bump policy
 
 `requirements.txt` pins an exact published Python SDK version (currently
-**5.4.0**); `package.json` pins exact published `@e2a/sdk` (**5.4.0**) and
-`@e2a/cli` (**2.1.0**) versions. None of these is ever a path or workspace
+**5.8.0**); `package.json` pins exact published `@e2a/sdk` (**5.8.0**) and
+`@e2a/cli` (**2.5.0**) versions. None of these is ever a path or workspace
 dependency on the corresponding source directory — installing from local
 source would defeat the entire purpose by hiding a broken publish.
 
