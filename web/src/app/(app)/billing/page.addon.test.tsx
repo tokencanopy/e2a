@@ -403,3 +403,45 @@ describe("BillingPage — add-on provisioning sync", () => {
     expect(screen.queryByText(/Updating your add-ons/)).not.toBeInTheDocument();
   });
 });
+
+describe("BillingPage — owned add-on visibility", () => {
+  it("shows a prominent owned-state strip and a plan-banner badge", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(3);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    // The card leads with what the user owns, not just an editable number.
+    expect(screen.getByText("You have 3 add-ons")).toBeInTheDocument();
+    // The strip attributes what those add-ons grant, priced from the catalog.
+    expect(
+      screen.getByText(/\+3 inboxes, \+9,000 sends \/ mo · \$6\/mo/),
+    ).toBeInTheDocument();
+    // The current-plan banner carries the ownership badge too — visible
+    // without scrolling to the card.
+    expect(screen.getByText("+ 3 inbox add-ons · $6/mo")).toBeInTheDocument();
+  });
+
+  it("uses singular wording for one add-on", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(1);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    expect(screen.getByText("You have 1 add-on")).toBeInTheDocument();
+    expect(
+      screen.getByText(/\+1 inbox, \+3,000 sends \/ mo · \$2\/mo/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("+ 1 inbox add-on · $2/mo")).toBeInTheDocument();
+  });
+
+  it("shows neither strip nor badge when the account owns none", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(0);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    expect(screen.queryByText(/You have/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/inbox add-on ·/)).not.toBeInTheDocument();
+  });
+});

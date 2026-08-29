@@ -739,8 +739,23 @@ export default function BillingPage() {
                 <div className="text-xs uppercase tracking-wide text-muted">
                   Current plan
                 </div>
-                <div className="text-lg font-semibold text-foreground mt-1">
-                  {currentPlanLabel}
+                <div className="text-lg font-semibold text-foreground mt-1 flex items-baseline gap-2 flex-wrap">
+                  <span>{currentPlanLabel}</span>
+                  {/* Owned add-ons surface at the very top of the page,
+                      not only down in the purchase card — the count and
+                      its monthly cost are part of "what plan am I on". */}
+                  {BILLING_API && planData?.addon && addonServerQty > 0 && (
+                    <span
+                      className="text-xs font-medium rounded px-1.5 py-0.5 border"
+                      style={{ borderColor: "var(--accent)", color: "var(--fg)" }}
+                    >
+                      + {formatNumber(addonServerQty)} inbox add-on
+                      {addonServerQty === 1 ? "" : "s"} ·{" "}
+                      {formatPrice(
+                        addonServerQty * planData.addon.monthly_price_cents_per_unit,
+                      )}
+                    </span>
+                  )}
                 </div>
               </div>
               {BILLING_API && data.upgrade_url && (
@@ -852,6 +867,39 @@ export default function BillingPage() {
                     </div>
                   )}
               </div>
+
+              {/* What the account owns, stated as a sentence with the
+                  grants and cost attributed — the stepper below is only
+                  the editor, and its number can be a staged edit. */}
+              {addonServerQty > 0 && (
+                <div
+                  className="rounded-lg border px-4 py-3 flex items-baseline justify-between gap-3 flex-wrap"
+                  style={{
+                    borderColor: "var(--accent)",
+                    background: "var(--bg-elev)",
+                  }}
+                >
+                  <span className="text-sm font-semibold text-foreground">
+                    You have {formatNumber(addonServerQty)} add-on
+                    {addonServerQty === 1 ? "" : "s"}
+                  </span>
+                  <span className="text-sm text-muted">
+                    +{formatNumber(addonServerQty * planData.addon.per_unit.max_agents)}{" "}
+                    inbox
+                    {addonServerQty * planData.addon.per_unit.max_agents === 1
+                      ? ""
+                      : "es"}
+                    , +
+                    {formatNumber(
+                      addonServerQty * planData.addon.per_unit.max_messages_month,
+                    )}{" "}
+                    sends / mo ·{" "}
+                    {formatPrice(
+                      addonServerQty * planData.addon.monthly_price_cents_per_unit,
+                    )}
+                  </span>
+                </div>
+              )}
 
               {addonEditConflict && (
                 <div
@@ -993,14 +1041,6 @@ export default function BillingPage() {
                   </span>
                 )}
 
-                {addonServerQty > 0 && (
-                  <span className="text-xs text-muted">
-                    Currently {formatNumber(addonServerQty)} — {" "}
-                    {formatPrice(
-                      addonServerQty * planData.addon.monthly_price_cents_per_unit,
-                    )}
-                  </span>
-                )}
               </div>
             </section>
           )}
