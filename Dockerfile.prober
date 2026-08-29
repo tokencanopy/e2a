@@ -7,7 +7,7 @@
 #
 # Mirrors ./Dockerfile: native-arch builder + CGO-free cross-compile, alpine
 # runtime, non-root user.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 ARG TARGETOS TARGETARCH
 
 WORKDIR /app

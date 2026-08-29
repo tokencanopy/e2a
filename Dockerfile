@@ -4,7 +4,7 @@
 # from any host — TARGETOS/TARGETARCH pick the output's arch. The runtime
 # stage below uses the default platform (set per-target by buildx) so the
 # alpine layer matches the binary.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 ARG TARGETOS TARGETARCH
 
 WORKDIR /app
