@@ -86,6 +86,22 @@ const e2aMigrationLockID int64 = 0x65325F4D49475200
 // this directive (the CONCURRENTLY statement).
 const noTransactionDirective = "e2a:no-transaction"
 
+// migrationFilenameAliases preserves upgrade and rollback compatibility for
+// migrations that were merged with colliding numeric slots. The map is
+// current filename -> legacy filename. Existing databases keep the legacy
+// tracker row and treat the current filename as applied in memory; fresh
+// databases record both names so an older binary does not replay the legacy
+// file after rollback.
+var migrationFilenameAliases = map[string]string{
+	"112_sending_protection_policy.sql":               "109_sending_protection_policy.sql",
+	"113_sending_budget_ledger.sql":                   "110_sending_budget_ledger.sql",
+	"114_sending_feedback_provenance.sql":             "111_sending_feedback_provenance.sql",
+	"115_sending_controls_foreign_key.sql":            "112_sending_controls_foreign_key.sql",
+	"116_sending_message_holds.sql":                   "113_sending_message_holds.sql",
+	"117_sending_suppression_provenance.sql":          "114_sending_suppression_provenance.sql",
+	"118_sending_protection_validate_constraints.sql": "115_sending_protection_validate_constraints.sql",
+}
+
 var (
 	createConcurrentIndexMarker = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b`)
 	createConcurrentIndexTarget = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"(?:[^"]|"")*"|[a-z_][a-z0-9_$]*)(?:\.(?:"(?:[^"]|"")*"|[a-z_][a-z0-9_$]*))?)`)
@@ -158,6 +174,8 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS, 
 	if err != nil {
 		return fmt.Errorf("load applied migrations: %w", err)
 	}
+	compatibilityRepairs := migrationFilenameCompatibilityRepairs(applied, files)
+	recognizeMigrationFilenameAliases(applied, files)
 
 	// Defensive: warn about migrations recorded in schema_migrations
 	// that no longer exist in the embedded FS (rename/delete since
@@ -170,6 +188,21 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS, 
 		if !applied[f] {
 			pending = append(pending, f)
 		}
+	}
+	if mode == ModeVerify && len(compatibilityRepairs) > 0 {
+		return fmt.Errorf(
+			"verify mode: rollback compatibility repair pending for %s — set E2A_MIGRATION_MODE=auto to record the legacy filename marker(s) without replaying migration SQL",
+			strings.Join(compatibilityRepairs, ", "),
+		)
+	}
+	if len(compatibilityRepairs) > 0 {
+		if err := recordMigrationFilenames(ctx, conn, compatibilityRepairs); err != nil {
+			return fmt.Errorf("repair rollback compatibility migration markers: %w", err)
+		}
+		for _, legacy := range compatibilityRepairs {
+			applied[legacy] = true
+		}
+		log.Printf("[migrate] repaired %d rollback compatibility migration marker(s)", len(compatibilityRepairs))
 	}
 
 	if len(pending) == 0 {
@@ -244,10 +277,88 @@ func warnOrphans(applied map[string]bool, files []string) {
 		fileSet[f] = true
 	}
 	for name := range applied {
+		if current, ok := currentMigrationFilenameForLegacy(name); ok && fileSet[current] {
+			continue
+		}
 		if !fileSet[name] {
 			log.Printf("[migrate] WARN: %s recorded in schema_migrations but not in embedded migrations/ — possible rename or deletion", name)
 		}
 	}
+}
+
+func recognizeMigrationFilenameAliases(applied map[string]bool, files []string) {
+	fileSet := make(map[string]bool, len(files))
+	for _, name := range files {
+		fileSet[name] = true
+	}
+	for current, legacy := range migrationFilenameAliases {
+		if fileSet[current] && applied[legacy] {
+			applied[current] = true
+		}
+	}
+}
+
+// migrationFilenameCompatibilityRepairs returns legacy tracker names that are
+// missing even though their current aliases are already recorded. The current
+// record proves the migration body ran; inserting only the legacy marker makes
+// a rollback binary skip the same body without replaying any SQL.
+func migrationFilenameCompatibilityRepairs(applied map[string]bool, files []string) []string {
+	repairs := make([]string, 0, len(migrationFilenameAliases))
+	for _, current := range files {
+		legacy, ok := migrationFilenameAliases[current]
+		if ok && applied[current] && !applied[legacy] {
+			repairs = append(repairs, legacy)
+		}
+	}
+	return repairs
+}
+
+func currentMigrationFilenameForLegacy(legacy string) (string, bool) {
+	for current, candidate := range migrationFilenameAliases {
+		if candidate == legacy {
+			return current, true
+		}
+	}
+	return "", false
+}
+
+// EquivalentMigrationFilenames returns every tracker filename that proves the
+// given current migration has run. The current name is always first; a legacy
+// alias follows when a previously released binary used a different filename.
+// Callers receive a new slice and may modify it safely.
+func EquivalentMigrationFilenames(current string) []string {
+	legacy, ok := migrationFilenameAliases[current]
+	if !ok {
+		return []string{current}
+	}
+	return []string{current, legacy}
+}
+
+func recordMigrationFilenames(ctx context.Context, conn *pgxpool.Conn, filenames []string) error {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tracker tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := recordMigrationFilenamesTx(ctx, tx, filenames); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit tracker tx: %w", err)
+	}
+	return nil
+}
+
+func recordMigrationFilenamesTx(ctx context.Context, tx pgx.Tx, filenames []string) error {
+	for _, filename := range filenames {
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
+			filename,
+		); err != nil {
+			return fmt.Errorf("record migration %s: %w", filename, err)
+		}
+	}
+	return nil
 }
 
 // hasNoTransactionDirective scans the leading comment block of a
@@ -410,13 +521,7 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 		if err := validateConcurrentIndexPostcondition(ctx, conn, string(body)); err != nil {
 			return fmt.Errorf("verify migration %s: %w", name, err)
 		}
-		if _, err := conn.Exec(ctx,
-			"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
-			name,
-		); err != nil {
-			return fmt.Errorf("record migration: %w", err)
-		}
-		return nil
+		return recordMigrationFilenames(ctx, conn, EquivalentMigrationFilenames(name))
 	}
 
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
@@ -428,11 +533,8 @@ func applyOne(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, name string) 
 	if _, err := tx.Exec(ctx, string(body)); err != nil {
 		return fmt.Errorf("exec migration: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		"INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING",
-		name,
-	); err != nil {
-		return fmt.Errorf("record migration: %w", err)
+	if err := recordMigrationFilenamesTx(ctx, tx, EquivalentMigrationFilenames(name)); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
