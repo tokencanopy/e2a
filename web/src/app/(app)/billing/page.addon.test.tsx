@@ -183,6 +183,11 @@ describe("BillingPage — inbox add-on", () => {
     // Price and per-unit adds come from the payload, never hardcoded.
     expect(screen.getByText(/\$2\/mo each/)).toBeInTheDocument();
     expect(screen.getByText(/adds 1 inbox and 3,000 sends/)).toBeInTheDocument();
+    // The refund policy is asymmetric (ops#348): increases prorate,
+    // decreases carry no partial-month refund — the card must say so
+    // and must not claim blanket proration.
+    expect(screen.getByText(/no partial-month refund/)).toBeInTheDocument();
+    expect(screen.queryByText(/charges are prorated/)).not.toBeInTheDocument();
     // Free plan + lifts_free_daily_cap → the daily-cap hint shows.
     expect(screen.getByText(/daily send cap/)).toBeInTheDocument();
   });
