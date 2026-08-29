@@ -471,3 +471,110 @@ func TestRegisterOperatorRecipientsRejectsChangedIdentity(t *testing.T) {
 		})
 	}
 }
+
+// --- One-shot ramp grandfathering ------------------------------------------
+
+// TestGrandfatherFlipsOnlyVerifiedInactiveDomains covers the phase-3 snapshot:
+// the policy CAS and the domain flip commit together, only currently
+// sending-verified + ramp-inactive domains are exempted, and a second attempt
+// is rejected by the marker with zero writes.
+func TestGrandfatherFlipsOnlyVerifiedInactiveDomains(t *testing.T) {
+	ctx := context.Background()
+	m, pool := newModule(t)
+
+	const userID = "gf-user-1"
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO users (id, email, google_subject) VALUES ($1, $2, $3)
+		 ON CONFLICT (id) DO NOTHING`,
+		userID, "gf-owner@example.test", "gf-subject-1"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	seed := func(domain, sendingStatus, rampStatus string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO domains (domain, user_id, verified, sending_status, sending_ramp_status)
+			 VALUES ($1, $2, true, $3, $4)`,
+			domain, userID, sendingStatus, rampStatus); err != nil {
+			t.Fatalf("seed domain %s: %v", domain, err)
+		}
+	}
+	seed("gf-flip.example.test", "verified", "inactive")     // the one that must flip
+	seed("gf-pending.example.test", "pending", "inactive")   // not sender-verified: untouched
+	seed("gf-ramping.example.test", "verified", "ramping")   // already ramping: untouched
+	seed("gf-complete.example.test", "verified", "complete") // finished: untouched
+
+	before := mustInspect(t, m)
+	next := before.Policy
+	next.RampEnabled = true
+
+	after, err := m.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration:               before.Generation,
+		Policy:                           next,
+		Actor:                            "integration-test",
+		Reason:                           "one-shot grandfather activation",
+		GrandfatherCurrentSendingDomains: true,
+	})
+	if err != nil {
+		t.Fatalf("grandfathering activation: %v", err)
+	}
+
+	wantStatus := map[string]string{
+		"gf-flip.example.test":     "exempt",
+		"gf-pending.example.test":  "inactive",
+		"gf-ramping.example.test":  "ramping",
+		"gf-complete.example.test": "complete",
+	}
+	for domain, want := range wantStatus {
+		var got string
+		if err := pool.QueryRow(ctx,
+			`SELECT sending_ramp_status FROM domains WHERE domain = $1`, domain).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", domain, err)
+		}
+		if got != want {
+			t.Errorf("%s: ramp status = %s, want %s", domain, got, want)
+		}
+	}
+
+	// The marker records the generation activated WITH the snapshot and the
+	// requesting actor -- not the outgoing row's provenance.
+	var markerGeneration int64
+	var markerActor string
+	if err := pool.QueryRow(ctx,
+		`SELECT policy_generation, completed_by FROM sending_ramp_grandfathering WHERE singleton`,
+	).Scan(&markerGeneration, &markerActor); err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if markerGeneration != after.Generation {
+		t.Errorf("marker generation = %d, want the activated generation %d", markerGeneration, after.Generation)
+	}
+	if markerActor != "integration-test" {
+		t.Errorf("marker actor = %s", markerActor)
+	}
+
+	// Retry: a later domain must never be widened into the set, and the
+	// rejected activation must not advance the policy either.
+	seed("gf-late.example.test", "verified", "inactive")
+	retry := after.Policy
+	retry.DetectorIntervalSeconds++
+	_, err = m.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration:               after.Generation,
+		Policy:                           retry,
+		Actor:                            "integration-test",
+		Reason:                           "retry must be rejected",
+		GrandfatherCurrentSendingDomains: true,
+	})
+	if !errors.Is(err, sendingpolicy.ErrAlreadyGrandfathered) {
+		t.Fatalf("expected ErrAlreadyGrandfathered, got %v", err)
+	}
+	var lateStatus string
+	if err := pool.QueryRow(ctx,
+		`SELECT sending_ramp_status FROM domains WHERE domain = 'gf-late.example.test'`).Scan(&lateStatus); err != nil {
+		t.Fatalf("read late domain: %v", err)
+	}
+	if lateStatus != "inactive" {
+		t.Errorf("a rejected retry widened the grandfathered set: %s", lateStatus)
+	}
+	if current := mustInspect(t, m); current.Generation != after.Generation {
+		t.Errorf("a rejected grandfather retry advanced the policy: %d -> %d", after.Generation, current.Generation)
+	}
+}

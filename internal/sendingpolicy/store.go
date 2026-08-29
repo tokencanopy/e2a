@@ -31,6 +31,10 @@ var (
 	// with a different key identity or commitment. Append-only history is
 	// never rewritten, so this is always zero writes.
 	ErrRegistryConflict = errors.New("sendingpolicy: operator recipient registry conflict")
+	// ErrAlreadyGrandfathered means the one-shot ramp-grandfathering marker
+	// already exists. The retry is a documented no-op: it can never widen the
+	// grandfathered set, so it performs zero writes.
+	ErrAlreadyGrandfathered = errors.New("sendingpolicy: sending domains were already grandfathered")
 )
 
 // Module is the single concrete owner of sending-protection policy state. Later
@@ -62,6 +66,18 @@ type ActivationRequest struct {
 	Policy             RuntimePolicy
 	Actor              string
 	Reason             string
+
+	// GrandfatherCurrentSendingDomains performs the one-shot phase-3 snapshot
+	// in the same transaction as the policy CAS: insert the singleton marker,
+	// lock the domains table against concurrent sender transitions, and flip
+	// every currently sending-verified, ramp-inactive domain to exempt. A
+	// second attempt fails with ErrAlreadyGrandfathered and writes nothing.
+	GrandfatherCurrentSendingDomains bool
+}
+
+// GrandfatherResult reports what the one-shot snapshot did.
+type GrandfatherResult struct {
+	DomainsExempted int64
 }
 
 // RuntimeAttestation records which billing images the deployment has verified,
@@ -225,6 +241,11 @@ func (m *Module) ActivatePolicy(ctx context.Context, req ActivationRequest) (Pol
 	}
 
 	next := current.Generation + 1
+	if req.GrandfatherCurrentSendingDomains {
+		if _, err := m.grandfatherLocked(ctx, tx, next, req.Actor); err != nil {
+			return PolicySnapshot{}, err
+		}
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO sending_protection_policy_events
 			(generation, prior_generation, prior_policy_sha256, new_policy_sha256, actor, reason)
@@ -258,6 +279,47 @@ func (m *Module) ActivatePolicy(ctx context.Context, req ActivationRequest) (Pol
 		ActivatedAt:   activatedAt,
 		ActivatedBy:   req.Actor,
 	}, nil
+}
+
+// grandfatherLocked runs the one-shot snapshot inside the caller's activation
+// transaction, which already holds the policy row lock at the expected
+// generation.
+//
+// Ordering matters and mirrors the design: LOCK TABLE domains IN SHARE ROW
+// EXCLUSIVE MODE conflicts with the ROW EXCLUSIVE writes of a concurrent
+// pending->verified sender transition, so any such transition linearizes
+// either before this transaction (and is grandfathered) or after it (and
+// meets the active ramp as inactive). The marker insert gates the UPDATE:
+// only the transaction that creates the marker may flip domains, so a retry
+// that finds it existing is a no-op that can never widen the set. The check
+// deliberately reads sending_status, not domains.verified_at -- verified_at
+// records inbound ownership verification, not the later sender transition.
+func (m *Module) grandfatherLocked(ctx context.Context, tx pgx.Tx, generation int64, actor string) (GrandfatherResult, error) {
+	if _, err := tx.Exec(ctx, `LOCK TABLE domains IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return GrandfatherResult{}, fmt.Errorf("sendingpolicy: lock domains for grandfathering: %w", err)
+	}
+
+	// The marker records the generation being activated WITH this snapshot and
+	// the actor who requested it -- not the outgoing row's generation, whose
+	// activated_by may still read 'migration'.
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO sending_ramp_grandfathering (singleton, policy_generation, completed_at, completed_by)
+		 VALUES (true, $1, now(), $2)
+		 ON CONFLICT (singleton) DO NOTHING`, generation, actor)
+	if err != nil {
+		return GrandfatherResult{}, fmt.Errorf("sendingpolicy: insert grandfathering marker: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return GrandfatherResult{}, ErrAlreadyGrandfathered
+	}
+
+	updated, err := tx.Exec(ctx,
+		`UPDATE domains SET sending_ramp_status = 'exempt'
+		  WHERE sending_status = 'verified' AND sending_ramp_status = 'inactive'`)
+	if err != nil {
+		return GrandfatherResult{}, fmt.Errorf("sendingpolicy: grandfather verified domains: %w", err)
+	}
+	return GrandfatherResult{DomainsExempted: updated.RowsAffected()}, nil
 }
 
 const attestationSelect = `SELECT revision, active_billing_digest, active_billing_contract,

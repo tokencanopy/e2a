@@ -41,6 +41,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/relay"
 	"github.com/tokencanopy/e2a/internal/senderidentity"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 	"github.com/tokencanopy/e2a/internal/sendrate"
 	"github.com/tokencanopy/e2a/internal/telemetry"
@@ -104,11 +105,46 @@ func main() {
 
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	bootstrapEmail := flag.String("bootstrap-email", "", "create a user with this email and print a fresh API key, then exit (for self-host first-run)")
+
+	// Sending-protection local operator commands (Task 2). Each runs after
+	// migrations and exits without starting the server.
+	var spFlags sendingProtectionFlags
+	flag.BoolVar(&spFlags.inspect, "sending-protection-policy", false, "print the stored runtime policy state and the hash this config's policy would activate, then exit")
+	flag.BoolVar(&spFlags.activate, "activate-sending-protection-policy", false, "CAS-activate this config's sending-protection policy (requires -expected-generation, -expected-policy-sha256, -reason), then exit")
+	flag.Int64Var(&spFlags.expectedGeneration, "expected-generation", -1, "policy generation the operator reviewed (activation CAS)")
+	flag.StringVar(&spFlags.expectedPolicySHA, "expected-policy-sha256", "", "reviewed canonical policy hash (activation CAS)")
+	flag.BoolVar(&spFlags.grandfather, "grandfather-current-sending-domains", false, "one-shot: exempt currently sending-verified domains in the same transaction as the activation")
+	flag.BoolVar(&spFlags.register, "register-sending-protection-operator-recipients", false, "append-only-register the local operator recipient map's commitments (requires -reason), then exit")
+	flag.BoolVar(&spFlags.attest, "attest-sending-protection-runtime", false, "CAS-write the billing runtime attestation (requires the expected revision/hash, digests, contracts, -reason), then exit")
+	flag.Int64Var(&spFlags.expectedAttestationRevision, "expected-attestation-revision", -1, "attestation revision the operator reviewed (attestation CAS)")
+	flag.StringVar(&spFlags.expectedAttestationSHA, "expected-attestation-sha256", "", "reviewed canonical four-field attestation hash (attestation CAS)")
+	flag.StringVar(&spFlags.activeBillingDigest, "active-billing-digest", "", "verified active billing image digest")
+	flag.IntVar(&spFlags.activeBillingContract, "active-billing-contract", -1, "verified active billing contract level")
+	flag.StringVar(&spFlags.rollbackBillingDigest, "rollback-billing-digest", "", "verified rollback billing image digest")
+	flag.IntVar(&spFlags.rollbackBillingContract, "rollback-billing-contract", -1, "verified rollback billing contract level")
+	flag.BoolVar(&spFlags.capabilities, "print-capabilities", false, "print the machine-readable capability marker (contract level, policy source, operator commitments), then exit")
+	flag.StringVar(&spFlags.reason, "reason", "", "nonblank reason recorded in the audit row of a sending-protection mutation")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Sending-protection trust roots, validated before anything else runs.
+	// The typed policy owns the invariants; the secret loaders reject a
+	// malformed value without printing it. Fail closed at boot: a deployment
+	// that cannot express its own policy must not serve mail.
+	spPolicy, err := sendingpolicy.FromConfig(cfg)
+	if err != nil {
+		log.Fatalf("Sending protection config invalid: %v", err)
+	}
+	spSource, err := sendingpolicy.SourceFromConfig(cfg)
+	if err != nil {
+		log.Fatalf("Sending protection config invalid: %v", err)
+	}
+	if _, err := sendingpolicy.LoadSecretsFromEnv(spSource, spPolicy); err != nil {
+		log.Fatalf("Sending protection startup validation failed: %v", err)
 	}
 
 	// Trash retention (trash.retention_days / E2A_TRASH_RETENTION_DAYS,
@@ -148,6 +184,15 @@ func main() {
 	// that registers on the shared client.
 	if err := jobs.Migrate(ctx, pool); err != nil {
 		log.Fatalf("River schema migration failed: %v", err)
+	}
+
+	// Sending-protection operator command mode: run the selected command and
+	// exit. Placed after migrations so the singleton rows exist.
+	if spFlags.commandRequested() {
+		if err := runSendingProtectionCommand(ctx, cfg, pool, &spFlags, os.Stdout); err != nil {
+			log.Fatalf("Sending protection command failed: %v", err)
+		}
+		return
 	}
 
 	// Bootstrap mode: create a user + API key and exit. Used by self-host

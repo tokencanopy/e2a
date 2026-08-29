@@ -300,6 +300,41 @@ sending_ramp:
   target_daily: 2000
   ramp_days: 30
 
+# Sending protection (abuse prevention). Every control ships DISABLED; this
+# block existing changes nothing until a control is deliberately enabled. The
+# ramp schedule above stays the custom-domain schedule SSOT and is not
+# duplicated here. runtime_policy_source selects where the server reads its
+# policy: "config" (this file — the default, right for self-host) or
+# "database" (hosted deployments, where activation is an audited CAS via
+# `e2a -activate-sending-protection-policy` instead of a redeploy). The two
+# secrets (E2A_SENDING_FEEDBACK_HMAC_KEYS, E2A_SENDING_PROTECTION_OPERATOR_EMAILS)
+# are required only for database source or when any control below is enabled.
+sending_protection:
+  runtime_policy_source: config
+  budget_mode: disabled            # disabled | shadow | enforce
+  detector_mode: disabled          # disabled | shadow | enforce
+  tenant_header_mode: disabled     # disabled | canary | enforce
+  tenant_provisioning_mode: disabled     # disabled | enforce
+  tenant_suppression_sync_mode: disabled # disabled | enforce
+  tenant_header_canary_account_ids: []
+  default_account_daily_recipients: 100
+  shared_domain_account_daily_recipients: 50
+  probation_global_daily_recipients: 150
+  all_customer_global_daily_recipients: 5000
+  critical_operational_daily_recipients: 100
+  violation_operational_daily_recipients: 100
+  daily_unlimited_plan_codes: ["starter", "pro", "scale"]
+  budget_hold_max_days: 7
+  bounce_pause_basis_points: 400      # pause strictly above 4% hard bounce
+  complaint_pause_basis_points: 8     # pause strictly above 0.08% complaints
+  bounce_min_outcomes: 50             # minimum terminal outcomes before the all-path rate can pause
+  shared_reputation_bounce_min_outcomes: 1
+  detector_interval_seconds: 300
+  detector_window_days: 7
+  sending_control_audit_retention_days: 90
+  sending_feedback_post_account_retention_days: 30
+  operator_notice_recipient_version: 1
+
 # Outbound delivery feedback (decision 9 / Slice 4b). When ses_configuration_set
 # is set, outbound mail is tagged with X-SES-CONFIGURATION-SET so SES publishes
 # delivery/bounce/complaint events to an SNS topic; e2a's public endpoint
