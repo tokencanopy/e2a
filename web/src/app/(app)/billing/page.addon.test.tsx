@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SWRConfig } from "swr";
 
@@ -56,12 +56,13 @@ const CATALOG = [
 
 // Mirrors the sidecar's AddOnEntry (plans.InboxAddOn): $2.00/mo per
 // unit, each unit adds 1 inbox + 3,000 sends/mo, any quantity lifts the
-// Free daily cap.
+// Free daily cap. max_quantity is deliberately SMALL so the ceiling is
+// reachable in one or two clicks (prod's is 1000).
 const ADDON = {
   code: "addon_inbox",
   display_name: "Inbox add-on",
   monthly_price_cents_per_unit: 200,
-  max_quantity: 1000,
+  max_quantity: 3,
   per_unit: { max_agents: 1, max_messages_month: 3000 },
   lifts_free_daily_cap: true,
 };
@@ -87,37 +88,45 @@ const PRO_LIMITS = {
     max_storage_bytes: 10 * (1 << 30),
   },
   usage: { agents: 4, domains: 2, messages_month: 9000, storage_bytes: 2048 },
+  // upgrade_url present == active subscription; it is also the portal POST target.
   upgrade_url: PORTAL_URL,
 };
 
+function proPlan(addonQuantity: number) {
+  return {
+    catalog: CATALOG,
+    addon: ADDON,
+    current: {
+      code: "pro",
+      status: "active",
+      has_stripe_customer: true,
+      addon_quantity: addonQuantity,
+    },
+  };
+}
+
 const mockFetch = jest.fn();
+// The plan payload is a mutable `let` so sync tests can flip it
+// mid-flight and watch the page's polling pick the change up — the
+// same pattern page.refresh.test.tsx uses.
+let planPayload: unknown;
+let limitsPayload: unknown;
+let addonResponse: { url?: string; updated?: boolean };
+let addonFails: { status: number; body: string } | null;
+
 beforeEach(() => {
   mockFetch.mockReset();
-  global.fetch = mockFetch;
-});
-
-beforeAll(() => {
-  window.alert = jest.fn();
-});
-
-type StageOpts = {
-  limits: unknown;
-  plan: unknown;
-  // Response for POST /api/billing/addon. Default: a checkout redirect.
-  addonResponse?: { url?: string; updated?: boolean };
-  addonFails?: { status: number; body: string };
-};
-
-function stage(opts: StageOpts) {
+  addonResponse = { url: "https://stripe.test/checkout" };
+  addonFails = null;
   mockFetch.mockImplementation((url: string, init?: RequestInit) => {
     if (url === "/v1/account") {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(opts.limits) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(limitsPayload) });
     }
     if (url === PLAN_URL) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(opts.plan) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(planPayload) });
     }
     if (url === ADDON_URL && init?.method === "POST") {
-      const failure = opts.addonFails;
+      const failure = addonFails;
       if (failure) {
         return Promise.resolve({
           ok: false,
@@ -125,15 +134,26 @@ function stage(opts: StageOpts) {
           text: () => Promise.resolve(failure.body),
         });
       }
-      return Promise.resolve({
-        ok: true,
-        json: () =>
-          Promise.resolve(opts.addonResponse ?? { url: "https://stripe.test/checkout" }),
-      });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(addonResponse) });
     }
     return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("404") });
   });
-}
+  global.fetch = mockFetch;
+});
+
+beforeAll(() => {
+  window.alert = jest.fn();
+  // In-place increases ask for confirmation before charging; default to
+  // accepting so most tests exercise the post path. The decline test
+  // overrides per-call.
+  window.confirm = jest.fn(() => true);
+});
+
+beforeEach(() => {
+  (window.alert as jest.Mock).mockClear();
+  (window.confirm as jest.Mock).mockClear();
+  (window.confirm as jest.Mock).mockImplementation(() => true);
+});
 
 function renderPage() {
   return render(
@@ -143,24 +163,20 @@ function renderPage() {
   );
 }
 
-function addonPost(): { quantity: number } | null {
-  const call = mockFetch.mock.calls.find(
-    ([u, init]: [string, RequestInit?]) => u === ADDON_URL && init?.method === "POST",
-  );
-  if (!call) return null;
-  return JSON.parse((call[1] as RequestInit).body as string);
+function addonPosts(): { quantity: number }[] {
+  return mockFetch.mock.calls
+    .filter(([u, init]: [string, RequestInit?]) => u === ADDON_URL && init?.method === "POST")
+    .map(([, init]: [string, RequestInit]) => JSON.parse(init.body as string));
 }
 
 describe("BillingPage — inbox add-on", () => {
   it("renders the add-on card from the catalog payload", async () => {
-    stage({
-      limits: FREE_LIMITS,
-      plan: {
-        catalog: CATALOG,
-        addon: ADDON,
-        current: { code: "free", status: "inactive", has_stripe_customer: false, addon_quantity: 0 },
-      },
-    });
+    limitsPayload = FREE_LIMITS;
+    planPayload = {
+      catalog: CATALOG,
+      addon: ADDON,
+      current: { code: "free", status: "inactive", has_stripe_customer: false, addon_quantity: 0 },
+    };
     renderPage();
 
     await waitFor(() => expect(screen.getByText("Inbox add-on")).toBeInTheDocument());
@@ -171,14 +187,21 @@ describe("BillingPage — inbox add-on", () => {
     expect(screen.getByText(/daily send cap/)).toBeInTheDocument();
   });
 
+  it("omits the daily-cap hint on a paid plan", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(0);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    expect(screen.queryByText(/daily send cap/)).not.toBeInTheDocument();
+  });
+
   it("hides the card when the sidecar payload has no addon entry", async () => {
-    stage({
-      limits: FREE_LIMITS,
-      plan: {
-        catalog: CATALOG,
-        current: { code: "free", status: "inactive", has_stripe_customer: false },
-      },
-    });
+    limitsPayload = FREE_LIMITS;
+    planPayload = {
+      catalog: CATALOG,
+      current: { code: "free", status: "inactive", has_stripe_customer: false },
+    };
     renderPage();
 
     await waitFor(() => expect(screen.getByText("Plans")).toBeInTheDocument());
@@ -186,37 +209,34 @@ describe("BillingPage — inbox add-on", () => {
   });
 
   it("buys add-ons via Checkout for a user with no subscription", async () => {
-    stage({
-      limits: FREE_LIMITS,
-      plan: {
-        catalog: CATALOG,
-        addon: ADDON,
-        current: { code: "free", status: "inactive", has_stripe_customer: false, addon_quantity: 0 },
-      },
-      addonResponse: { url: "https://stripe.test/checkout" },
-    });
+    limitsPayload = FREE_LIMITS;
+    planPayload = {
+      catalog: CATALOG,
+      addon: ADDON,
+      current: { code: "free", status: "inactive", has_stripe_customer: false, addon_quantity: 0 },
+    };
     renderPage();
 
     await screen.findByText("Inbox add-on");
-    // Step 0 → 2, then buy.
+    // Step 0 → 2, then buy. The proposed total shows before commit.
     const inc = screen.getByRole("button", { name: "Increase add-on quantity" });
     await userEvent.click(inc);
     await userEvent.click(inc);
+    expect(screen.getByText(/New total:/)).toHaveTextContent("$4/mo");
     await userEvent.click(screen.getByRole("button", { name: "Buy add-ons" }));
 
-    await waitFor(() => expect(addonPost()).toEqual({ quantity: 2 }));
+    await waitFor(() => expect(addonPosts()).toEqual([{ quantity: 2 }]));
+    // Took the redirect branch: no in-place provisioning notice, no
+    // confirm dialog (Stripe's page shows the price), no error.
+    expect(screen.queryByText(/Updating your add-ons/)).not.toBeInTheDocument();
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(window.alert).not.toHaveBeenCalled();
   });
 
-  it("updates quantity in place for a subscriber and reports pending provisioning", async () => {
-    stage({
-      limits: PRO_LIMITS,
-      plan: {
-        catalog: CATALOG,
-        addon: ADDON,
-        current: { code: "pro", status: "active", has_stripe_customer: true, addon_quantity: 1 },
-      },
-      addonResponse: { updated: true },
-    });
+  it("updates quantity in place for a subscriber after confirmation", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(1);
+    addonResponse = { updated: true };
     renderPage();
 
     await screen.findByText("Inbox add-on");
@@ -226,50 +246,160 @@ describe("BillingPage — inbox add-on", () => {
     await userEvent.click(screen.getByRole("button", { name: "Increase add-on quantity" }));
     await userEvent.click(screen.getByRole("button", { name: "Update add-ons" }));
 
-    await waitFor(() => expect(addonPost()).toEqual({ quantity: 2 }));
-    // In-place update → no redirect; the page reports the webhook is
-    // provisioning the new caps.
+    // An in-place increase charges immediately → the confirm carries the
+    // new total.
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("$4/mo"));
+    await waitFor(() => expect(addonPosts()).toEqual([{ quantity: 2 }]));
+    // No redirect; the page reports the webhook is provisioning and the
+    // action is locked for the whole pending window — a live button here
+    // is how duplicate charges happen.
     await waitFor(() =>
       expect(screen.getByText(/Updating your add-ons/)).toBeInTheDocument(),
     );
+    expect(screen.getByRole("button", { name: "Updating…" })).toBeDisabled();
   });
 
-  it("disables the action when the desired quantity equals the current one", async () => {
-    stage({
-      limits: PRO_LIMITS,
-      plan: {
-        catalog: CATALOG,
-        addon: ADDON,
-        current: { code: "pro", status: "active", has_stripe_customer: true, addon_quantity: 3 },
-      },
-    });
-    renderPage();
-
-    await screen.findByText("Inbox add-on");
-    expect(screen.getByRole("button", { name: "Update add-ons" })).toBeDisabled();
-    // Quantity can't go below zero either.
-    expect(screen.getByLabelText("Add-on quantity")).toHaveValue(3);
-  });
-
-  it("surfaces an error and re-enables the button when the POST fails", async () => {
-    stage({
-      limits: PRO_LIMITS,
-      plan: {
-        catalog: CATALOG,
-        addon: ADDON,
-        current: { code: "pro", status: "active", has_stripe_customer: true, addon_quantity: 0 },
-      },
-      addonFails: { status: 503, body: "add-on not available" },
-    });
+  it("declining the confirmation sends nothing", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(1);
+    (window.confirm as jest.Mock).mockImplementation(() => false);
     renderPage();
 
     await screen.findByText("Inbox add-on");
     await userEvent.click(screen.getByRole("button", { name: "Increase add-on quantity" }));
-    const apply = screen.getByRole("button", { name: "Update add-ons" });
-    await userEvent.click(apply);
+    await userEvent.click(screen.getByRole("button", { name: "Update add-ons" }));
+
+    expect(window.confirm).toHaveBeenCalled();
+    expect(addonPosts()).toEqual([]);
+    // Declining leaves the page interactive.
+    expect(screen.getByRole("button", { name: "Update add-ons" })).not.toBeDisabled();
+  });
+
+  it("disables the action when the desired quantity equals the current one", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(3);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    expect(screen.getByRole("button", { name: "Update add-ons" })).toBeDisabled();
+    expect(screen.getByLabelText("Add-on quantity")).toHaveValue(3);
+  });
+
+  it("clamps the stepper to the catalog ceiling and the zero floor", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(2);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    const inc = screen.getByRole("button", { name: "Increase add-on quantity" });
+    const dec = screen.getByRole("button", { name: "Decrease add-on quantity" });
+
+    // 2 → 3 = max_quantity → + disables.
+    await userEvent.click(inc);
+    expect(screen.getByLabelText("Add-on quantity")).toHaveValue(3);
+    expect(inc).toBeDisabled();
+
+    // Down to the floor: 3 → 0 → − disables.
+    await userEvent.click(dec);
+    await userEvent.click(dec);
+    await userEvent.click(dec);
+    expect(screen.getByLabelText("Add-on quantity")).toHaveValue(0);
+    expect(dec).toBeDisabled();
+
+    // Typing past the ceiling clamps too.
+    const input = screen.getByLabelText("Add-on quantity");
+    fireEvent.change(input, { target: { value: "999" } });
+    expect(input).toHaveValue(3);
+  });
+
+  it("does not stage a cancel-everything when the input is cleared mid-retype", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(2);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    const input = screen.getByLabelText("Add-on quantity");
+    // Backspacing to empty must hold the previous value rather than
+    // arming a one-click "set to 0".
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input).toHaveValue(2);
+    expect(screen.getByRole("button", { name: "Update add-ons" })).toBeDisabled();
+    expect(addonPosts()).toEqual([]);
+  });
+
+  it("surfaces an error and re-enables the button when the POST fails", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(1);
+    addonFails = { status: 502, body: "add-on change failed" };
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    await userEvent.click(screen.getByRole("button", { name: "Decrease add-on quantity" }));
+    await userEvent.click(screen.getByRole("button", { name: "Update add-ons" }));
 
     await waitFor(() => expect(window.alert).toHaveBeenCalled());
     // Failure clears the in-flight state so the user can retry.
     expect(screen.getByRole("button", { name: "Update add-ons" })).not.toBeDisabled();
+  });
+});
+
+describe("BillingPage — add-on provisioning sync", () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  async function stageAndApply(user: ReturnType<typeof userEvent.setup>) {
+    await screen.findByText("Inbox add-on");
+    await user.click(screen.getByRole("button", { name: "Increase add-on quantity" }));
+    await user.click(screen.getByRole("button", { name: "Update add-ons" }));
+    await waitFor(() =>
+      expect(screen.getByText(/Updating your add-ons/)).toBeInTheDocument(),
+    );
+  }
+
+  it("polls until the webhook lands, then unlocks and tracks the server", async () => {
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(1);
+    addonResponse = { updated: true };
+    renderPage();
+
+    await stageAndApply(user);
+
+    // Webhook lands between polls: the stored quantity reaches the target.
+    planPayload = proPlan(2);
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(2000);
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByText(/Updating your add-ons/)).not.toBeInTheDocument(),
+    );
+    // Input tracks the server again and the action re-locks as a no-op.
+    expect(screen.getByLabelText("Add-on quantity")).toHaveValue(2);
+    expect(screen.getByRole("button", { name: "Update add-ons" })).toBeDisabled();
+  });
+
+  it("shows the timeout notice when provisioning outlasts the window", async () => {
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(1);
+    addonResponse = { updated: true };
+    renderPage();
+
+    await stageAndApply(user);
+
+    // The webhook never lands; the deadline passes.
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(21000);
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText(/haven't appeared yet|hasn't|keeps checking/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/Updating your add-ons/)).not.toBeInTheDocument();
   });
 });

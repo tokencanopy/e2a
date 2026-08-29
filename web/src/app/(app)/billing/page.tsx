@@ -362,6 +362,11 @@ export default function BillingPage() {
   useEffect(() => {
     const onShow = (e: PageTransitionEvent) => {
       if (e.persisted) {
+        // A bfcache restore also resurrects any pre-navigation
+        // actionPending (postBilling/applyAddon deliberately leave it
+        // set through the redirect) — without this reset every billing
+        // control on the restored page stays disabled forever.
+        setActionPending(null);
         void mutate();
         void mutatePlan();
       }
@@ -444,6 +449,14 @@ export default function BillingPage() {
   // (another tab, a portal edit) isn't clobbered by a stale local copy.
   const [addonDesired, setAddonDesired] = useState<number | null>(null);
 
+  // The server quantity the current edit started from. When the server
+  // moves away from it mid-edit (another tab, the Stripe portal), the
+  // card surfaces a notice instead of letting a stale total silently
+  // downgrade the newer value — the classic lost-update on a money
+  // path. A ref is enough: it only needs reading on renders that a
+  // server change already triggers.
+  const addonEditBaseRef = useRef<number>(0);
+
   // In-place quantity updates return {updated:true} and the caps land
   // via the webhook a moment later — the same race as post-Checkout
   // reconciliation, so this mirrors that machinery: poll fast until the
@@ -470,16 +483,29 @@ export default function BillingPage() {
   }, [addonSync, mutate, mutatePlan]);
 
   // The webhook landed: stored quantity now matches the request. Clear
-  // the local edit too so the input goes back to tracking the server.
+  // the local edit too so the input goes back to tracking the server —
+  // but only if the user hasn't already staged a NEWER quantity during
+  // the pending window; that edit is theirs to keep.
   useEffect(() => {
     if (
       addonSync !== "idle" &&
-      planData?.current.addon_quantity === addonTargetRef.current
+      (planData?.current.addon_quantity ?? 0) === addonTargetRef.current
     ) {
       setAddonSync("idle");
-      setAddonDesired(null);
+      // The server now sits at the resolved target; rebase any kept
+      // edit on it so the change we just made isn't reported as
+      // "changed elsewhere".
+      addonEditBaseRef.current = addonTargetRef.current ?? addonEditBaseRef.current;
+      setAddonDesired((d) => (d === addonTargetRef.current ? null : d));
     }
   }, [addonSync, planData]);
+
+  // stageAddonQty is the single entry point for edits: the first edit
+  // snapshots the server quantity it started from (see addonEditBaseRef).
+  function stageAddonQty(n: number) {
+    if (addonDesired === null) addonEditBaseRef.current = addonServerQty;
+    setAddonDesired(n);
+  }
 
   // applyAddon sets the account's TOTAL desired quantity (not a delta).
   // Response routing mirrors the sidecar: {url} → hosted Checkout (user
@@ -487,6 +513,21 @@ export default function BillingPage() {
   // {updated:true} → the existing subscription was mutated in place and
   // the webhook will provision the caps shortly.
   async function applyAddon(target: number) {
+    const addon = planData?.addon;
+    if (!addon) return;
+    // In-place increases charge the subscription immediately (prorated
+    // by Stripe) with no hosted page in between — the one money action
+    // on this page without a Stripe-owned review step. Make the total
+    // explicit and get a confirmation before committing. Checkout-path
+    // purchases (and decreases) skip this: Stripe's page shows the
+    // price, and a reduction never charges.
+    if (target > addonServerQty && addonInPlace) {
+      const total = formatPrice(target * addon.monthly_price_cents_per_unit);
+      const ok = window.confirm(
+        `Set inbox add-ons to ${target} (${total} total)? The prorated difference is charged to your subscription immediately.`,
+      );
+      if (!ok) return;
+    }
     setActionPending("addon");
     try {
       const res = await fetch(`${BILLING_API}/api/billing/addon`, {
@@ -496,6 +537,11 @@ export default function BillingPage() {
         body: JSON.stringify({ quantity: target }),
       });
       if (!res.ok) {
+        // Translate the sidecar's documented refusals; fall through to
+        // the raw status for anything unexpected.
+        if (res.status === 503) {
+          throw new Error("the add-on isn't available on this deployment");
+        }
         const text = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
       }
@@ -507,13 +553,19 @@ export default function BillingPage() {
       }
       if (json.updated) {
         addonTargetRef.current = target;
+        // Stamp a FRESH deadline here rather than relying on the sync
+        // effect's `??=`: a second update issued while the first is
+        // still pending doesn't re-run that effect (the "pending" set
+        // is a no-op), and inheriting the first update's deadline would
+        // truncate — or instantly expire — the second one's window.
+        addonDeadlineRef.current = Date.now() + RECONCILE_TIMEOUT_MS;
         setAddonSync("pending");
         setActionPending(null);
         void mutate();
         void mutatePlan();
         return;
       }
-      throw new Error("billing endpoint returned no url");
+      throw new Error("add-on endpoint returned neither url nor updated");
     } catch (err) {
       setActionPending(null);
       alert(
@@ -583,13 +635,29 @@ export default function BillingPage() {
   // desired total differs from what's already provisioned.
   const addonServerQty = planData?.current.addon_quantity ?? 0;
   const addonQty = addonDesired ?? addonServerQty;
-  // Live-for-caps subscription statuses get an in-place mutation
-  // ("Update"); anyone else is routed to Checkout ("Buy"). Mirrors the
-  // sidecar's hasReusableSubscription routing closely enough for a
-  // label — the response shape, not this flag, decides what happens.
-  const addonInPlace = ["active", "trialing", "past_due"].includes(
-    planData?.current.status ?? "",
-  );
+  // Statuses whose subscription the sidecar mutates in place ("Update",
+  // charged immediately) versus routing to Checkout ("Buy", Stripe
+  // shows the price first). This mirrors the sidecar's
+  // hasReusableSubscription list EXACTLY — including the pending/
+  // incomplete bring-up windows — because the label is the difference
+  // between "you'll review the price on Stripe" and "you were just
+  // charged"; the response shape still decides what actually happens.
+  const addonInPlace = [
+    "active",
+    "trialing",
+    "past_due",
+    "pending_subscription_event",
+    "incomplete",
+  ].includes(planData?.current.status ?? "");
+  // The user's server quantity moved out from under an in-progress edit
+  // (another tab, the Stripe portal). Surfaced as a notice so applying
+  // the stale total is an informed act, not a silent downgrade.
+  const addonEditConflict =
+    addonDesired !== null &&
+    addonSync === "idle" &&
+    addonServerQty !== addonEditBaseRef.current;
+
+  const currentTierEntry = planData?.catalog.find((p) => p.code === currentCode);
 
   // Human label for the current plan in the banner. "default" is the
   // operator-configured self-host plan (not a catalog tier); otherwise
@@ -597,9 +665,7 @@ export default function BillingPage() {
   const currentPlanLabel =
     data?.plan_code === "default"
       ? "Default (operator-configured)"
-      : planData?.catalog.find((p) => p.code === currentCode)?.display_name ??
-        data?.plan_code ??
-        "";
+      : currentTierEntry?.display_name ?? data?.plan_code ?? "";
 
   return (
     <PageShell
@@ -635,7 +701,7 @@ export default function BillingPage() {
           }}
           role="status"
         >
-          Finalizing your upgrade… your new plan will appear here in a moment.
+          Finalizing your purchase… your new plan and limits will appear here in a moment.
         </div>
       )}
       {reconcile === "timeout" && planData?.current.status !== "active" && (
@@ -648,7 +714,7 @@ export default function BillingPage() {
           }}
           role="status"
         >
-          Your payment went through, but the new plan hasn&apos;t appeared yet.
+          Your payment went through, but the change hasn&apos;t appeared yet.
           It usually lands within a minute — this page keeps checking, or use
           Refresh below.
         </div>
@@ -776,12 +842,32 @@ export default function BillingPage() {
                   / mo to your account&apos;s shared pool. Adjust anytime; charges
                   are prorated.
                 </div>
-                {planData.addon.lifts_free_daily_cap && currentCode === "free" && (
-                  <div className="text-sm text-muted mt-1">
-                    Any add-on also removes the Free plan&apos;s daily send cap.
-                  </div>
-                )}
+                {/* The free tier is identified structurally (price 0),
+                    like ctaFor does — never by a hardcoded plan code. */}
+                {planData.addon.lifts_free_daily_cap &&
+                  currentTierEntry &&
+                  currentTierEntry.monthly_price_cents <= 0 && (
+                    <div className="text-sm text-muted mt-1">
+                      Any add-on also removes the Free plan&apos;s daily send cap.
+                    </div>
+                  )}
               </div>
+
+              {addonEditConflict && (
+                <div
+                  className="rounded-lg border px-4 py-3 text-sm"
+                  style={{
+                    borderColor: "var(--border)",
+                    background: "var(--bg-elev)",
+                    color: "var(--fg-muted)",
+                  }}
+                  role="status"
+                >
+                  Your add-on quantity changed elsewhere — the account now has{" "}
+                  {formatNumber(addonServerQty)}. Applying will set the total to
+                  the number shown here.
+                </div>
+              )}
 
               {addonSync === "pending" && (
                 <div
@@ -815,6 +901,8 @@ export default function BillingPage() {
 
               <div className="flex items-center gap-3 flex-wrap">
                 <div
+                  role="group"
+                  aria-label="Add-on quantity stepper"
                   className="flex items-center rounded-md border overflow-hidden"
                   style={{ borderColor: "var(--border)" }}
                 >
@@ -822,13 +910,14 @@ export default function BillingPage() {
                     type="button"
                     aria-label="Decrease add-on quantity"
                     disabled={actionPending !== null || addonQty <= 0}
-                    onClick={() => setAddonDesired(Math.max(0, addonQty - 1))}
+                    onClick={() => stageAddonQty(Math.max(0, addonQty - 1))}
                     className="px-3 py-1.5 text-sm hover:bg-background transition disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     −
                   </button>
                   <input
                     type="number"
+                    inputMode="numeric"
                     aria-label="Add-on quantity"
                     min={0}
                     max={planData.addon.max_quantity}
@@ -836,11 +925,11 @@ export default function BillingPage() {
                     disabled={actionPending !== null}
                     onChange={(e) => {
                       const n = Number.parseInt(e.target.value, 10);
-                      if (Number.isNaN(n)) {
-                        setAddonDesired(0);
-                        return;
-                      }
-                      setAddonDesired(
+                      // A cleared field mid-retype must NOT stage 0 —
+                      // that would arm a one-click cancel-everything.
+                      // Hold the previous value until a digit arrives.
+                      if (Number.isNaN(n)) return;
+                      stageAddonQty(
                         Math.min(planData.addon!.max_quantity, Math.max(0, n)),
                       );
                     }}
@@ -855,7 +944,7 @@ export default function BillingPage() {
                       addonQty >= planData.addon.max_quantity
                     }
                     onClick={() =>
-                      setAddonDesired(
+                      stageAddonQty(
                         Math.min(planData.addon!.max_quantity, addonQty + 1),
                       )
                     }
@@ -865,18 +954,44 @@ export default function BillingPage() {
                   </button>
                 </div>
 
+                {/* The action is also disabled through the whole `pending`
+                    window: the previous change is still provisioning, and
+                    the button being live then is how duplicate money
+                    POSTs happen. */}
                 <button
                   type="button"
-                  disabled={actionPending !== null || addonQty === addonServerQty}
+                  disabled={
+                    actionPending !== null ||
+                    addonSync === "pending" ||
+                    addonQty === addonServerQty
+                  }
                   onClick={() => applyAddon(addonQty)}
                   className="px-3 py-1.5 rounded-md text-sm font-medium bg-accent text-white hover:bg-accent/90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {actionPending === "addon"
-                    ? "Opening…"
+                    ? addonInPlace
+                      ? "Saving…"
+                      : "Opening…"
+                    : addonSync === "pending"
+                    ? "Updating…"
                     : addonInPlace
                     ? "Update add-ons"
                     : "Buy add-ons"}
                 </button>
+
+                {/* Proposed new monthly total, shown the moment the
+                    staged quantity diverges — nobody should commit to a
+                    number they haven't seen. */}
+                {addonQty !== addonServerQty && (
+                  <span className="text-xs text-foreground font-medium">
+                    New total:{" "}
+                    {addonQty === 0
+                      ? "$0/mo"
+                      : formatPrice(
+                          addonQty * planData.addon.monthly_price_cents_per_unit,
+                        )}
+                  </span>
+                )}
 
                 {addonServerQty > 0 && (
                   <span className="text-xs text-muted">
