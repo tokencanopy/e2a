@@ -948,6 +948,13 @@ export default function BillingPage() {
               )}
 
               <div className="flex items-center gap-3 flex-wrap">
+                {/* The stepper holds the desired TOTAL, not a delta — a
+                    user who owns 1 and wants one more steps to 2. Say so
+                    on screen: without the label, "2" next to an owned
+                    "1" reads as "buy 2 more". */}
+                <label className="text-xs text-muted" htmlFor="addon-quantity">
+                  Total add-ons
+                </label>
                 <div
                   role="group"
                   aria-label="Add-on quantity stepper"
@@ -964,6 +971,7 @@ export default function BillingPage() {
                     −
                   </button>
                   <input
+                    id="addon-quantity"
                     type="number"
                     inputMode="numeric"
                     aria-label="Add-on quantity"
@@ -1016,28 +1024,45 @@ export default function BillingPage() {
                   onClick={() => applyAddon(addonQty)}
                   className="px-3 py-1.5 rounded-md text-sm font-medium bg-accent text-white hover:bg-accent/90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
+                  {/* When a change is staged, the label names the TOTAL
+                      being committed ("Update to 2 add-ons"), so the
+                      action can't be misread as buying a delta. */}
                   {actionPending === "addon"
                     ? addonInPlace
                       ? "Saving…"
                       : "Opening…"
                     : addonSync === "pending"
                     ? "Updating…"
+                    : addonQty !== addonServerQty
+                    ? `${addonInPlace ? "Update to" : "Buy"} ${formatNumber(
+                        addonQty,
+                      )} add-on${addonQty === 1 ? "" : "s"}`
                     : addonInPlace
                     ? "Update add-ons"
                     : "Buy add-ons"}
                 </button>
 
-                {/* Proposed new monthly total, shown the moment the
-                    staged quantity diverges — nobody should commit to a
-                    number they haven't seen. */}
+                {/* Proposed new monthly total plus the delta from what's
+                    owned, shown the moment the staged quantity diverges —
+                    nobody should commit to a number they haven't seen,
+                    and the delta says what this click actually changes. */}
                 {addonQty !== addonServerQty && (
                   <span className="text-xs text-foreground font-medium">
-                    New total:{" "}
+                    New monthly total:{" "}
                     {addonQty === 0
                       ? "$0/mo"
                       : formatPrice(
                           addonQty * planData.addon.monthly_price_cents_per_unit,
-                        )}
+                        )}{" "}
+                    ({addonQty > addonServerQty ? "+" : "−"}
+                    {formatNumber(Math.abs(addonQty - addonServerQty))} add-on
+                    {Math.abs(addonQty - addonServerQty) === 1 ? "" : "s"},{" "}
+                    {addonQty > addonServerQty ? "+" : "−"}
+                    {formatPrice(
+                      Math.abs(addonQty - addonServerQty) *
+                        planData.addon.monthly_price_cents_per_unit,
+                    )}
+                    )
                   </span>
                 )}
 

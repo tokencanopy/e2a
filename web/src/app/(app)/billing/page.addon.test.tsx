@@ -222,8 +222,10 @@ describe("BillingPage — inbox add-on", () => {
     const inc = screen.getByRole("button", { name: "Increase add-on quantity" });
     await userEvent.click(inc);
     await userEvent.click(inc);
-    expect(screen.getByText(/New total:/)).toHaveTextContent("$4/mo");
-    await userEvent.click(screen.getByRole("button", { name: "Buy add-ons" }));
+    expect(screen.getByText(/New monthly total:/)).toHaveTextContent(
+      "$4/mo (+2 add-ons, +$4/mo)",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Buy 2 add-ons" }));
 
     await waitFor(() => expect(addonPosts()).toEqual([{ quantity: 2 }]));
     // Took the redirect branch: no in-place provisioning notice, no
@@ -244,7 +246,7 @@ describe("BillingPage — inbox add-on", () => {
     expect(screen.getByLabelText("Add-on quantity")).toHaveValue(1);
 
     await userEvent.click(screen.getByRole("button", { name: "Increase add-on quantity" }));
-    await userEvent.click(screen.getByRole("button", { name: "Update add-ons" }));
+    await userEvent.click(screen.getByRole("button", { name: "Update to 2 add-ons" }));
 
     // An in-place increase charges immediately → the confirm carries the
     // new total.
@@ -267,12 +269,14 @@ describe("BillingPage — inbox add-on", () => {
 
     await screen.findByText("Inbox add-on");
     await userEvent.click(screen.getByRole("button", { name: "Increase add-on quantity" }));
-    await userEvent.click(screen.getByRole("button", { name: "Update add-ons" }));
+    await userEvent.click(screen.getByRole("button", { name: "Update to 2 add-ons" }));
 
     expect(window.confirm).toHaveBeenCalled();
     expect(addonPosts()).toEqual([]);
-    // Declining leaves the page interactive.
-    expect(screen.getByRole("button", { name: "Update add-ons" })).not.toBeDisabled();
+    // Declining leaves the page interactive, the staged total still named.
+    expect(
+      screen.getByRole("button", { name: "Update to 2 add-ons" }),
+    ).not.toBeDisabled();
   });
 
   it("disables the action when the desired quantity equals the current one", async () => {
@@ -335,11 +339,13 @@ describe("BillingPage — inbox add-on", () => {
 
     await screen.findByText("Inbox add-on");
     await userEvent.click(screen.getByRole("button", { name: "Decrease add-on quantity" }));
-    await userEvent.click(screen.getByRole("button", { name: "Update add-ons" }));
+    await userEvent.click(screen.getByRole("button", { name: "Update to 0 add-ons" }));
 
     await waitFor(() => expect(window.alert).toHaveBeenCalled());
     // Failure clears the in-flight state so the user can retry.
-    expect(screen.getByRole("button", { name: "Update add-ons" })).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Update to 0 add-ons" }),
+    ).not.toBeDisabled();
   });
 });
 
@@ -354,7 +360,7 @@ describe("BillingPage — add-on provisioning sync", () => {
   async function stageAndApply(user: ReturnType<typeof userEvent.setup>) {
     await screen.findByText("Inbox add-on");
     await user.click(screen.getByRole("button", { name: "Increase add-on quantity" }));
-    await user.click(screen.getByRole("button", { name: "Update add-ons" }));
+    await user.click(screen.getByRole("button", { name: "Update to 2 add-ons" }));
     await waitFor(() =>
       expect(screen.getByText(/Updating your add-ons/)).toBeInTheDocument(),
     );
@@ -443,5 +449,42 @@ describe("BillingPage — owned add-on visibility", () => {
     await screen.findByText("Inbox add-on");
     expect(screen.queryByText(/You have/)).not.toBeInTheDocument();
     expect(screen.queryByText(/inbox add-on ·/)).not.toBeInTheDocument();
+  });
+});
+
+describe("BillingPage — total-vs-delta clarity", () => {
+  it("names the staged TOTAL and the delta when adding one more to an owned add-on", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(1);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    // The stepper is labeled as the account TOTAL.
+    expect(screen.getByText("Total add-ons")).toBeInTheDocument();
+
+    // Owning 1 and stepping to 2 = buying ONE more — the button and the
+    // preview both say so, so "2" can't read as "add 2 minimum".
+    await userEvent.click(screen.getByRole("button", { name: "Increase add-on quantity" }));
+    expect(
+      screen.getByRole("button", { name: "Update to 2 add-ons" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/New monthly total:/)).toHaveTextContent(
+      "$4/mo (+1 add-on, +$2/mo)",
+    );
+  });
+
+  it("shows a negative delta when reducing", async () => {
+    limitsPayload = PRO_LIMITS;
+    planPayload = proPlan(3);
+    renderPage();
+
+    await screen.findByText("Inbox add-on");
+    await userEvent.click(screen.getByRole("button", { name: "Decrease add-on quantity" }));
+    expect(
+      screen.getByRole("button", { name: "Update to 2 add-ons" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/New monthly total:/)).toHaveTextContent(
+      "$4/mo (\u22121 add-on, \u2212$2/mo)",
+    );
   });
 });
