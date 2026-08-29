@@ -28,6 +28,7 @@ subprocess.run monkeypatched to capture/replay a call — no real network
 call, no real subprocess to node/npm.
 """
 
+import calendar
 import hashlib
 import hmac
 import io
@@ -228,6 +229,44 @@ FakeEmail.subject = "hello from a real human"
 emitted.clear()
 status, payload = monitor.handle_webhook(inbound_body, sign(inbound_body))
 check("non-probe subject ignored", payload.get("ignored"), "not a probe")
+
+# Hydration is where a leg can die before it is even classified, and the two
+# failure kinds need opposite answers.
+_saved_inbound = FakeClient.inbound
+
+
+class RaisingInbound:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def from_event(self, event):
+        raise self._exc
+
+
+# not_found is terminal — the message is gone (purged by a sweep, deleted by an
+# operator) and no redelivery brings it back. 5xx here asks e2a to retry a
+# delivery that can only 404 again, turning one lost probe into an unbounded
+# retry loop against the very server under test.
+FakeClient.inbound = RaisingInbound(
+    monitor.E2ANotFoundError(code="not_found", message="message not found", status=404, retryable=False)
+)
+emitted.clear()
+status, payload = monitor.handle_webhook(inbound_body, sign(inbound_body))
+check("hydrate not_found does not ask for a retry", status, 200)
+check("hydrate not_found reports the drop", payload.get("dropped"), True)
+check("hydrate not_found logs monitor_dropped", "monitor_dropped" in emitted_events(), True)
+check("hydrate not_found claims no success", "monitor_ok" in emitted_events(), False)
+
+# Everything else may genuinely be transient (timeout, upstream 5xx). Dropping
+# those would lose a leg that would have succeeded on redelivery and
+# manufacture a false silence alert, so they keep asking for the retry.
+FakeClient.inbound = RaisingInbound(RuntimeError("connection reset"))
+emitted.clear()
+status, _ = monitor.handle_webhook(inbound_body, sign(inbound_body))
+check("hydrate transient failure still retries", status, 500)
+check("hydrate transient failure logs monitor_error", "monitor_error" in emitted_events(), True)
+
+FakeClient.inbound = _saved_inbound
 
 
 # ---------------------------------------------------------------------------
@@ -1212,6 +1251,38 @@ check(
 check("sweep bounds each page by the budget", all(f"limit={monitor.SWEEP_BUDGET}" in u for u in _sweep_lists), True)
 check("sweep's first list is live messages", "deleted=true" not in _sweep_lists[0], True)
 check("sweep's second list is the trash", "deleted=true" in _sweep_lists[1], True)
+
+# The regression this pair exists for: the sweep runs at the end of /tick, but
+# a round trip finishes LATER, on /webhook. An unscoped page is newest-first,
+# so it is the tick's own in-flight probes — the monitor purges the round trip
+# it just started, the leg 404s on hydrate or reply, and the interface goes
+# silent. That is a manufactured outage, not a detected one.
+check(
+    "sweep asks for the oldest residue first, not the newest",
+    all("sort=asc" in u for u in _sweep_lists),
+    True,
+)
+
+
+def _excludes_live_traffic(url):
+    """Whether one sweep listing is scoped past everything a round trip in
+    flight could still legitimately use. An unscoped listing is reported as
+    False rather than raising, so a regression reads as a failed check."""
+    if "until=" not in url:
+        return False
+    value = url.split("until=")[1].split("&")[0]
+    until_ms = calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) * 1000
+    return time.time() * 1000 - until_ms >= monitor.MAX_AGE_MS
+
+
+check("sweep scopes every list by an until cutoff", all("until=" in u for u in _sweep_lists), True)
+# sort=asc alone only postpones the collision until the backlog drains below
+# one page; the cutoff is what makes an in-flight probe unreachable at all.
+check(
+    "sweep's cutoff excludes everything a live round trip could still use",
+    all(_excludes_live_traffic(u) for u in _sweep_lists),
+    True,
+)
 
 
 # A delete that fails (message held for review, or provider submission still in
