@@ -16,6 +16,7 @@ import { messageSummaryViewForTool, registerMessageTools } from "../src/tools/me
 import { registerAgentTools } from "../src/tools/agents.js";
 import { registerDomainTools } from "../src/tools/domains.js";
 import { registerReviewTools } from "../src/tools/review.js";
+import { registerScheduledTools } from "../src/tools/scheduled.js";
 import { registerWebhookTools } from "../src/tools/webhooks.js";
 import { registerEventTools } from "../src/tools/events.js";
 import { registerTemplateTools } from "../src/tools/templates.js";
@@ -295,6 +296,13 @@ function makeStubClient(
       messageId: id,
       reviewStatus: "pending_review",
     })),
+    listScheduled: vi.fn(async (params: { cursor?: string; limit?: number } = {}) => ({
+      items: [
+        { id: "msg_s1", direction: "outbound", deliveryStatus: "accepted", scheduledAt: "2099-01-01T09:00:00Z" },
+        { id: "msg_s2", direction: "outbound", deliveryStatus: "accepted", scheduledAt: "2099-01-02T09:00:00Z" },
+      ],
+      next_cursor: params.cursor ? undefined : "scheduled_next",
+    })),
     approveReview: vi.fn(async () => ({ messageId: "msg_x", status: "sent" })),
     rejectReview: vi.fn(async () => ({ messageId: "msg_x", status: "rejected" })),
     // Templates (beta) — SDK-backed: list methods return a Page { items,
@@ -567,7 +575,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(78);
+    expect(frozenToolNames).toHaveLength(79);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -591,6 +599,7 @@ describe("e2a MCP server", () => {
     registerAgentTools(recorder, stub);
     registerDomainTools(recorder, stub);
     registerReviewTools(recorder, stub);
+    registerScheduledTools(recorder, stub);
     registerWebhookTools(recorder, stub);
     registerEventTools(recorder, stub);
     registerTemplateTools(recorder, stub);
@@ -600,7 +609,7 @@ describe("e2a MCP server", () => {
     registerMetricsTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(78);
+    expect(names).toHaveLength(79);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -610,14 +619,14 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
     expect(RUNTIME_TOOLS.size).toBe(21);
-    expect(ADMIN_TOOLS.size).toBe(57);
-    expect(toolNamesForScope("account").size).toBe(78);
+    expect(ADMIN_TOOLS.size).toBe(58);
+    expect(toolNamesForScope("account").size).toBe(79);
   });
 
-  it("account scope exposes all 78 canonical and compatibility tools", async () => {
+  it("account scope exposes all 79 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(78);
+    expect(tools).toHaveLength(79);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
@@ -2137,6 +2146,31 @@ describe("e2a MCP server", () => {
     expect(stub.listReviews).toHaveBeenCalledWith({});
     const content = result.content as Array<{ type: string; text: string }>;
     expect(JSON.parse(content[0]!.text)).toMatchObject({ next_cursor: "reviews_next" });
+  });
+
+  it("list_scheduled forwards pagination and returns the scheduled envelope", async () => {
+    const result = await client.callTool({
+      name: "list_scheduled",
+      arguments: { cursor: "scheduled_cursor", limit: 25 },
+    });
+    expect(stub.listScheduled).toHaveBeenCalledWith({
+      cursor: "scheduled_cursor",
+      limit: 25,
+    });
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0]!.text)).toEqual({
+      scheduled: [
+        { id: "msg_s1", direction: "outbound", delivery_status: "accepted", scheduled_at: "2099-01-01T09:00:00Z" },
+        { id: "msg_s2", direction: "outbound", delivery_status: "accepted", scheduled_at: "2099-01-02T09:00:00Z" },
+      ],
+    });
+  });
+
+  it("list_scheduled returns next_cursor only when another page exists", async () => {
+    const result = await client.callTool({ name: "list_scheduled", arguments: {} });
+    expect(stub.listScheduled).toHaveBeenCalledWith({});
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(JSON.parse(content[0]!.text)).toMatchObject({ next_cursor: "scheduled_next" });
   });
 
   it("get_review forwards the id", async () => {
