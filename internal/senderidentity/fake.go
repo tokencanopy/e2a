@@ -35,6 +35,14 @@ type FakeProvider struct {
 	// identities is the set of domains the fake "has" at the provider,
 	// for List/reaper tests. Provision adds; Deprovision removes.
 	identities map[string]bool
+	// audits backs InspectIdentity. A seeded identity with no entry here
+	// reports as UNTAGGED and not-verified — the shape of a legacy identity
+	// created before tags.go shipped, which the reclaim decision must always
+	// refuse. That default is what makes every pre-existing reaper test an
+	// implicit "never deletes an untagged identity" regression.
+	audits map[string]IdentityAudit
+	// inspectErr forces InspectIdentity to fail for a domain.
+	inspectErr map[string]error
 
 	ProvisionCalls []string
 	// ProvisionMetas is index-parallel to ProvisionCalls: the classification
@@ -45,6 +53,7 @@ type FakeProvider struct {
 	DeprovisionCalls []string
 	ListCalls        int
 	ListPageCalls    int
+	InspectCalls     []string
 }
 
 // StatusCall records one Status invocation's full argument set. Provider.Status
@@ -69,7 +78,43 @@ func NewFakeProvider() *FakeProvider {
 		notFoundOnStatus: map[string]bool{},
 		statusErr:        map[string]error{},
 		identities:       map[string]bool{},
+		audits:           map[string]IdentityAudit{},
+		inspectErr:       map[string]error{},
 	}
+}
+
+// SetIdentityAudit fixes what InspectIdentity reports for domain (the
+// classification tags + the verified-for-sending bit the reclaim decision
+// reads). Domain is filled in from the key so a test cannot seed an audit
+// whose name disagrees with the identity it describes.
+func (f *FakeProvider) SetIdentityAudit(domain string, audit IdentityAudit) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	audit.Domain = domain
+	f.audits[domain] = audit
+}
+
+// SetInspectErr makes InspectIdentity return err for domain.
+func (f *FakeProvider) SetInspectErr(domain string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inspectErr[domain] = err
+}
+
+func (f *FakeProvider) InspectIdentity(ctx context.Context, domain string) (IdentityAudit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.InspectCalls = append(f.InspectCalls, domain)
+	if err := f.inspectErr[domain]; err != nil {
+		return IdentityAudit{}, err
+	}
+	if !f.identities[domain] {
+		return IdentityAudit{}, ErrIdentityNotFound
+	}
+	if audit, ok := f.audits[domain]; ok {
+		return audit, nil
+	}
+	return IdentityAudit{Domain: domain}, nil
 }
 
 // SetStatusErr makes Status return err (a transient error, not NotFound) for

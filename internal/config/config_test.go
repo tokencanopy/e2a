@@ -1013,3 +1013,71 @@ func TestSenderIdentityFixtureTTL(t *testing.T) {
 		t.Errorf("malformed env override changed FixtureTTL to %v, want the yaml 2h", cfg.SenderIdentity.FixtureTTL)
 	}
 }
+
+// TestSenderIdentityOrphanReclaim covers the orphan-reclaim knobs. The whole
+// point of these defaults is that an operator who says nothing gets a
+// deployment that deletes nothing, so the default assertions here are the
+// safety property, not a convenience.
+func TestSenderIdentityOrphanReclaim(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	cfg, err := Load(write("default.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.ReapOrphans {
+		t.Error("orphan reclaim must default to OFF")
+	}
+	if len(cfg.SenderIdentity.ReclaimZones) != 0 {
+		t.Errorf("default ReclaimZones = %v, want empty (which reclaims nothing)", cfg.SenderIdentity.ReclaimZones)
+	}
+	if cfg.SenderIdentity.ReclaimMinAge != 168*time.Hour {
+		t.Errorf("default ReclaimMinAge = %v, want 168h", cfg.SenderIdentity.ReclaimMinAge)
+	}
+	if cfg.SenderIdentity.ReclaimMaxPerSweep != 5 {
+		t.Errorf("default ReclaimMaxPerSweep = %d, want 5", cfg.SenderIdentity.ReclaimMaxPerSweep)
+	}
+
+	// reclaim_min_age is a duration, so — like fixture_ttl — yaml.v3 decodes it
+	// from a STRING only.
+	cfg, err = Load(write("armed.yaml", "env: \"development\"\nsender_identity:\n"+
+		"  reap_orphans: true\n"+
+		"  reclaim_zones:\n    - fixtures.example.test\n    - probes.example.test\n"+
+		"  reclaim_min_age: 48h\n"+
+		"  reclaim_max_per_sweep: 3\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.SenderIdentity.ReapOrphans {
+		t.Error("reap_orphans: true was not read")
+	}
+	if len(cfg.SenderIdentity.ReclaimZones) != 2 || cfg.SenderIdentity.ReclaimZones[0] != "fixtures.example.test" {
+		t.Errorf("ReclaimZones = %v, want the two configured zones", cfg.SenderIdentity.ReclaimZones)
+	}
+	if cfg.SenderIdentity.ReclaimMinAge != 48*time.Hour {
+		t.Errorf("ReclaimMinAge = %v, want 48h", cfg.SenderIdentity.ReclaimMinAge)
+	}
+	if cfg.SenderIdentity.ReclaimMaxPerSweep != 3 {
+		t.Errorf("ReclaimMaxPerSweep = %d, want 3", cfg.SenderIdentity.ReclaimMaxPerSweep)
+	}
+
+	// An explicit zero on either bound must SURVIVE defaulting: both are read
+	// downstream as "reclaim nothing", which an operator must be able to state.
+	cfg, err = Load(write("zeroed.yaml", "env: \"development\"\nsender_identity:\n"+
+		"  reclaim_min_age: 0s\n  reclaim_max_per_sweep: 0\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.ReclaimMinAge != 0 || cfg.SenderIdentity.ReclaimMaxPerSweep != 0 {
+		t.Errorf("explicit zeros were re-defaulted: min_age=%v max_per_sweep=%d",
+			cfg.SenderIdentity.ReclaimMinAge, cfg.SenderIdentity.ReclaimMaxPerSweep)
+	}
+}

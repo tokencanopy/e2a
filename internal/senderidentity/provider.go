@@ -157,4 +157,17 @@ type Provider interface {
 	// token. The v2 orphan audit uses this so one River job never inventories
 	// the whole provider account.
 	ListPage(ctx context.Context, nextToken string, limit int) (domains []string, followingToken string, err error)
+
+	// InspectIdentity returns the facts the orphan-reclaim decision needs for
+	// one identity: its classification tags (tags.go) and whether the provider
+	// currently considers it able to SEND. Both must come from a SINGLE
+	// provider round trip — a two-call version could observe the tags before
+	// and the sending state after a change, and the decision would then be
+	// made against a state that never existed at once. Returns
+	// ErrIdentityNotFound if no identity exists for domain.
+	//
+	// Only orphan candidates are inspected (see reapProviderOrphanPage), so
+	// the per-candidate cost is bounded by how many orphans exist, not by the
+	// size of the provider account.
+	InspectIdentity(ctx context.Context, domain string) (IdentityAudit, error)
 }
