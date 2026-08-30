@@ -27,7 +27,7 @@ import (
 // one that gets deleted by mistake.
 const (
 	// managedIdentityTagKey/Value live in ses.go: they are the pre-existing
-	// OWNERSHIP anchor isMangedIdentity reads, load-bearing for adoption and
+	// OWNERSHIP anchor isManagedIdentity reads, load-bearing for adoption and
 	// for the IAM resource-tag condition, and are deliberately untouched here.
 
 	// envTagKey names the deployment that created the identity ("prod" |
