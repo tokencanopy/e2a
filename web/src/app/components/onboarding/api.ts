@@ -734,6 +734,55 @@ export async function findPendingMessage(
   }
 }
 
+// ── Scheduled sends ─────────────────────────────────────
+
+// Wire shape of a row in the scheduled-send queue (GET /v1/scheduled →
+// { items }). Mirrors ScheduledMessageView in api/openapi.yaml. Account-scoped:
+// outbound messages accepted and awaiting a future send_at. Disjoint from the
+// review queue — a held draft is not yet accepted and appears in /v1/reviews.
+type ScheduledWire = {
+  id: string;
+  agent_email: string;
+  direction: "outbound";
+  header_from: string | null;
+  to?: string[] | null;
+  subject: string;
+  conversation_id?: string;
+  delivery_status: string;
+  created_at: string;
+  scheduled_at?: string;
+};
+
+type ScheduledPageWire = {
+  items?: ScheduledWire[] | null;
+  next_cursor?: string | null;
+};
+
+function scheduledSummary(r: ScheduledWire): PendingMessageSummary {
+  return {
+    id: r.id,
+    agent_email: r.agent_email,
+    direction: r.direction,
+    from: r.header_from ?? "",
+    verified_domain: null,
+    subject: r.subject,
+    conversation_id: r.conversation_id,
+    to: r.to ?? [],
+    status: r.delivery_status,
+    created_at: r.created_at,
+    scheduled_at: r.scheduled_at,
+  };
+}
+
+// The scheduled-send queue: one account-scoped call to GET /v1/scheduled
+// returns every accepted-and-waiting future send across the account's inboxes,
+// soonest-first. Reuses PendingMessageSummary as the row shape so the Pending
+// page can render both tabs with the same summary type.
+export async function listScheduledMessages(): Promise<PendingMessageSummary[]> {
+  const page = await request<ScheduledPageWire>("/v1/scheduled");
+  return (page.items ?? []).map(scheduledSummary);
+}
+
 export type ApprovePayload = {
   subject?: string;
   text?: string;
