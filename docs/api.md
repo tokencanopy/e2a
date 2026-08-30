@@ -43,6 +43,7 @@ is currently 43 GA operations and 31 beta operations:
 | [Contacts & outreach](#contacts--outreach-v1contacts-v1agentsemailcontacts-beta) | **beta** | `createContact`, `listContacts`, `getContact`, `updateContact`, `deleteContact`, `importContacts`, `deleteImportBatch`, `listEngagements`, `getEngagement`, `upsertEngagement`, `deleteEngagement` |
 | [Templates & starter templates](#templates-v1templates-v1starter-templates-beta) | **beta** | `createTemplate`, `listTemplates`, `getTemplate`, `updateTemplate`, `deleteTemplate`, `validateTemplate`, `listStarterTemplates`, `getStarterTemplate` |
 | [Reviews (HITL queue)](#reviews-v1reviews-beta) | **beta** | `listReviews`, `getReview`, `approveReview`, `rejectReview` |
+| [Scheduled queue](#scheduled-queue-v1scheduled-beta) | **beta** | `listScheduled` |
 | Agent protection config | **beta** | `getAgentProtection`, `putAgentProtection` |
 | Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
 | [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
@@ -427,6 +428,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `listContacts` | `GET /v1/contacts` | Contacts |
 | `listEngagements` | `GET /v1/agents/{email}/contacts` | Contacts |
 | `listReviews` | `GET /v1/reviews` | Reviews |
+| `listScheduled` | `GET /v1/scheduled` | Scheduled |
 | `listStarterTemplates` | `GET /v1/starter-templates` | Starter templates |
 | `listTemplates` | `GET /v1/templates` | Templates |
 | `putAgentProtection` | `PUT /v1/agents/{email}/protection` | Protection config |
@@ -1134,6 +1136,18 @@ before they are declared stable.
   `200 OK`.
 - `POST /v1/reviews/{id}/reject` — outbound draft discarded (never sent); inbound
   hold dropped (never reaches the agent; payload retained, hidden, for forensics).
+
+### Scheduled queue (`/v1/scheduled`) (beta)
+
+The account-scoped view of outbound messages queued to send at a future time —
+`delivery_status=accepted` with a future `scheduled_at` — soonest-first. It is
+read-only and disjoint from the review queue: a held draft is not yet accepted
+and appears in `/v1/reviews` instead. A message drops off this list once it
+sends (or is canceled/trashed). This resource is beta and may change before it
+is declared stable.
+
+- `GET /v1/scheduled` — list the scheduled sends across the account's inboxes,
+  keyset-paginated (`cursor`/`limit`), ordered by `scheduled_at` ascending.
 
 ### Templates (`/v1/templates`, `/v1/starter-templates`) (beta)
 
