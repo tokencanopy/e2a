@@ -3582,6 +3582,22 @@ components:
         - next_cursor
       type: object
       x-stability-level: beta
+    PageScheduledMessageView:
+      additionalProperties: true
+      properties:
+        items:
+          items:
+            $ref: "#/components/schemas/ScheduledMessageView"
+          type: array
+        next_cursor:
+          type:
+            - string
+            - "null"
+      required:
+        - items
+        - next_cursor
+      type: object
+      x-stability-level: beta
     PageStarterTemplateView:
       additionalProperties: true
       properties:
@@ -4223,6 +4239,56 @@ components:
         - domain
         - aligned
       type: object
+    ScheduledMessageView:
+      additionalProperties: true
+      properties:
+        agent_email:
+          description: The inbox (agent address) the scheduled message belongs to.
+          type: string
+        conversation_id:
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        delivery_status:
+          description: "Always accepted while a future scheduled_at is pending: scheduling introduces no new delivery_status (migration 084). Open set; tolerate unknown values."
+          type: string
+        direction:
+          enum:
+            - outbound
+          type: string
+        header_from:
+          description: The sender identity for this outbound message; null when unavailable.
+          type:
+            - string
+            - "null"
+        id:
+          description: The scheduled message's id (msg_…). Interchangeable with the message id on GET /v1/agents/{email}/messages/{id}.
+          type: string
+        scheduled_at:
+          description: "Beta: scheduled sending may change before it is declared stable. The future instant the message is queued to be submitted. Always present and in the future for items in this queue."
+          format: date-time
+          type:
+            - string
+            - "null"
+        subject:
+          type: string
+        to:
+          items:
+            type: string
+          type: array
+      required:
+        - id
+        - agent_email
+        - direction
+        - header_from
+        - to
+        - subject
+        - delivery_status
+        - created_at
+        - scheduled_at
+      type: object
+      x-stability-level: beta
     SendEmailRequest:
       additionalProperties: false
       properties:
@@ -8452,6 +8518,54 @@ paths:
       summary: Reject a held message (beta)
       tags:
         - reviews
+      x-stability-level: beta
+  /v1/scheduled:
+    get:
+      description: "The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account's inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable."
+      operationId: listScheduled
+      parameters:
+        - description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+          explode: false
+          in: query
+          name: cursor
+          schema:
+            description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
+            type: string
+        - description: Maximum number of items to return (1-100).
+          explode: false
+          in: query
+          name: limit
+          schema:
+            default: 100
+            description: Maximum number of items to return (1-100).
+            format: int64
+            maximum: 100
+            minimum: 1
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageScheduledMessageView"
+          description: OK
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+          description: Error
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
+      security:
+        - bearer: []
+      summary: List messages awaiting a scheduled send (beta)
+      tags:
+        - scheduled
       x-stability-level: beta
   /v1/starter-templates:
     get:

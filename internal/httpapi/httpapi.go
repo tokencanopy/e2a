@@ -278,6 +278,14 @@ type Deps struct {
 	// last row (zero afterCreatedAt = first page).
 	ListReviews          func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterID string) ([]identity.ReviewListItem, error)
 	GetReviewWithContent func(ctx context.Context, userID, messageID string) (*identity.Message, error)
+
+	// Scheduled-send queue (account-scoped /v1/scheduled). ListScheduled returns
+	// outbound messages accepted and awaiting a future send_at across the user's
+	// agents, soonest-first, keyset-paginated on (scheduled_at, id): the handler
+	// passes limit+1 to detect a further page and the after-key from the previous
+	// page's last row (zero afterScheduledAt = first page). Disjoint from the
+	// review queue — held drafts never reach delivery_status='accepted'.
+	ListScheduled func(ctx context.Context, userID string, limit int, afterScheduledAt time.Time, afterID string) ([]identity.ScheduledListItem, error)
 	// ListProtectionEventsByMessage returns the per-message screening audit
 	// rows (gate + scan producers) behind a hold — the source of the detector
 	// rationale/categories shown on the review detail. Optional; when nil the
@@ -785,6 +793,7 @@ func (s *Server) registerOperations() {
 	s.registerAPIKeys()
 	s.registerOutbound()
 	s.registerReviews()
+	s.registerScheduled()
 	// Not an operation: exports the typed per-event `data` payload schemas
 	// (EmailReceivedData, …) into components.schemas for docs + codegen.
 	s.registerEventPayloadSchemas()
