@@ -12,7 +12,7 @@
   "author": {
     "name": "TokenCanopy",
     "url": "https://e2a.dev",
-    "email": "support@e2a.dev"
+    "email": "support@agents.e2a.dev"
   },
 
   "keywords": ["email", "smtp", "agents", "spf", "dkim", "inbox", "mcp", "oauth"],
