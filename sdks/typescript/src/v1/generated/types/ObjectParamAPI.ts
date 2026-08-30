@@ -97,6 +97,7 @@ import { PageEventView } from '../models/PageEventView.js';
 import { PageMessageLifecycleTransition } from '../models/PageMessageLifecycleTransition.js';
 import { PageMessageSummaryView } from '../models/PageMessageSummaryView.js';
 import { PageReviewView } from '../models/PageReviewView.js';
+import { PageScheduledMessageView } from '../models/PageScheduledMessageView.js';
 import { PageStarterTemplateView } from '../models/PageStarterTemplateView.js';
 import { PageSuppressionView } from '../models/PageSuppressionView.js';
 import { PageTemplateSummaryView } from '../models/PageTemplateSummaryView.js';
@@ -130,6 +131,7 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { ScheduledMessageView } from '../models/ScheduledMessageView.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
@@ -2589,6 +2591,55 @@ export class ObjectReviewsApi {
      */
     public rejectReview(param: ReviewsApiRejectReviewRequest, options?: ConfigurationOptions): Promise<RejectResultView> {
         return this.api.rejectReview(param.id, param.rejectRequest,  options).toPromise();
+    }
+
+}
+
+import { ObservableScheduledApi } from "./ObservableAPI.js";
+import { ScheduledApiRequestFactory, ScheduledApiResponseProcessor} from "../apis/ScheduledApi.js";
+
+export interface ScheduledApiListScheduledRequest {
+    /**
+     * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * Defaults to: undefined
+     * @type string
+     * @memberof ScheduledApilistScheduled
+     */
+    cursor?: string
+    /**
+     * Maximum number of items to return (1-100).
+     * Minimum: 1
+     * Maximum: 100
+     * Defaults to: 100
+     * @type number
+     * @memberof ScheduledApilistScheduled
+     */
+    limit?: number
+}
+
+export class ObjectScheduledApi {
+    private api: ObservableScheduledApi
+
+    public constructor(configuration: Configuration, requestFactory?: ScheduledApiRequestFactory, responseProcessor?: ScheduledApiResponseProcessor) {
+        this.api = new ObservableScheduledApi(configuration, requestFactory, responseProcessor);
+    }
+
+    /**
+     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * List messages awaiting a scheduled send (beta)
+     * @param param the request object
+     */
+    public listScheduledWithHttpInfo(param: ScheduledApiListScheduledRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<PageScheduledMessageView>> {
+        return this.api.listScheduledWithHttpInfo(param.cursor, param.limit,  options).toPromise();
+    }
+
+    /**
+     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * List messages awaiting a scheduled send (beta)
+     * @param param the request object
+     */
+    public listScheduled(param: ScheduledApiListScheduledRequest = {}, options?: ConfigurationOptions): Promise<PageScheduledMessageView> {
+        return this.api.listScheduled(param.cursor, param.limit,  options).toPromise();
     }
 
 }

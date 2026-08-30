@@ -6,6 +6,7 @@ import type {
   AttachmentView,
   MessageSummaryView,
   ReviewView,
+  ScheduledMessageView,
   SendResultView,
   RejectResultView,
   UpdateMessageResultView,
@@ -472,6 +473,11 @@ export class McpClient {
   listReviews(params: { cursor?: string; limit?: number } = {}): Promise<Page<ReviewView>> {
     const { cursor, ...rest } = params;
     return this.sdk.reviews.list(rest).page(cursor);
+  }
+
+  listScheduled(params: { cursor?: string; limit?: number } = {}): Promise<Page<ScheduledMessageView>> {
+    const { cursor, ...rest } = params;
+    return this.sdk.scheduled.list(rest).page(cursor);
   }
 
   getReview(messageId: string): Promise<MessageView> {

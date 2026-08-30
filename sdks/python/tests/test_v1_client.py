@@ -214,7 +214,7 @@ def test_explicit_base_url_beats_env(monkeypatch):
 
 def test_resources_exposed():
     c = _client()
-    for name in ("agents", "messages", "conversations", "domains", "events", "webhooks", "account", "reviews", "templates"):
+    for name in ("agents", "messages", "conversations", "domains", "events", "webhooks", "account", "reviews", "scheduled", "templates"):
         assert getattr(c, name) is not None
     assert c.account.suppressions is not None
 
@@ -706,6 +706,32 @@ async def test_reviews_list_reads_reviews_endpoint(httpx_mock):
     req = httpx_mock.get_requests()[-1]
     assert req.method == "GET"
     assert "/v1/reviews" in str(req.url)
+
+
+@pytest.mark.anyio
+async def test_scheduled_list_reads_scheduled_endpoint(httpx_mock):
+    # Full wire row (the Go server always returns complete objects). Built as a
+    # literal rather than via _valid() because ScheduledMessageView.scheduled_at
+    # is required-and-nullable, which the dummy generator can't synthesize.
+    row = {
+        "id": "msg_s1",
+        "agent_email": "bot@agents.e2a.dev",
+        "direction": "outbound",
+        "header_from": "bot@agents.e2a.dev",
+        "to": ["recipient@example.net"],
+        "subject": "later",
+        "delivery_status": "accepted",
+        "created_at": "2026-05-23T00:00:00Z",
+        "scheduled_at": "2099-01-01T09:00:00Z",
+    }
+    httpx_mock.add_response(json={"items": [row], "next_cursor": None})
+    async with _client() as c:
+        items = await c.scheduled.list().to_list(limit=50)
+    assert [m.id for m in items] == ["msg_s1"]
+    assert items[0].delivery_status == "accepted"
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "GET"
+    assert "/v1/scheduled" in str(req.url)
 
 
 @pytest.mark.anyio

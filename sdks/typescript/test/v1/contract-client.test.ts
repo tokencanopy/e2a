@@ -212,4 +212,31 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
       await client.agents.delete(email, { permanent: true });
     }
   });
+
+  it("scheduled.list surfaces an outbound send accepted for a future send_at", async () => {
+    const email = `${slug("sdkc-sched")}@agents.e2a.dev`;
+    await client.agents.create({ email });
+    try {
+      // A future sendAt is accepted immediately as status=scheduled (the
+      // contract server's outbound worker is not started, so it never fires).
+      const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const res = await client.messages.send(email, {
+        to: ["recipient@example.net"],
+        subject: "scheduled client contract",
+        text: "delivered later",
+        sendAt: future,
+      });
+      expect(res.status).toBe("scheduled");
+
+      const page = await client.scheduled.list({ limit: 100 }).page();
+      const found = page.items.find((m) => m.id === res.messageId);
+      expect(found, "scheduled send must appear in the account scheduled queue").toBeDefined();
+      expect(found?.agentEmail).toBe(email);
+      expect(found?.direction).toBe("outbound");
+      expect(found?.deliveryStatus).toBe("accepted");
+      expect(found?.scheduledAt).toBeTruthy();
+    } finally {
+      await client.agents.delete(email, { permanent: true });
+    }
+  });
 });

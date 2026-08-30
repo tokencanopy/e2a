@@ -26,6 +26,7 @@ from .generated.api.events_api import EventsApi
 from .generated.api.messages_api import MessagesApi
 from .generated.api.meta_api import MetaApi
 from .generated.api.reviews_api import ReviewsApi
+from .generated.api.scheduled_api import ScheduledApi
 from .generated.api.templates_api import TemplatesApi
 from .generated.api.contacts_api import ContactsApi
 from .generated.api.webhooks_api import WebhooksApi
@@ -71,6 +72,7 @@ from .generated.models import (
     RejectResultView,
     ReplyRequest,
     ReviewView,
+    ScheduledMessageView,
     RotateSecretResponse,
     SendEmailRequest,
     SendResultView,
@@ -358,6 +360,7 @@ class AsyncE2AClient:
         self.webhooks = WebhooksResource(WebhooksApi(self._api_client), self)
         self.account = AccountResource(AccountApi(self._api_client), self)
         self.reviews = ReviewsResource(ReviewsApi(self._api_client), self)
+        self.scheduled = ScheduledResource(ScheduledApi(self._api_client), self)
         self.templates = TemplatesResource(TemplatesApi(self._api_client), self)
         self.contacts = ContactsResource(ContactsApi(self._api_client), self)
         self._meta = MetaApi(self._api_client)
@@ -860,6 +863,26 @@ class ReviewsResource:
         return await self._c._write_unsafe(
             lambda h: self._api.reject_review(message_id, req, _headers=h)
         )
+
+
+class ScheduledResource:
+    """The account-scoped scheduled-send queue (beta): outbound messages accepted
+    and awaiting a future send_at to fire, soonest-first. Read-only — a scheduled
+    send is not a hold, so there is nothing to approve or reject here. Disjoint
+    from the review queue: a held draft is not yet accepted and appears there
+    instead. Account-scoped credentials only."""
+
+    def __init__(self, api: ScheduledApi, client: AsyncE2AClient) -> None:
+        self._api = api
+        self._c = client
+
+    def list(self, *, limit: Optional[int] = None) -> AutoPager[ScheduledMessageView]:
+        # Cursor-paginated: the AutoPager walks next_cursor to completion.
+        async def fetch(cursor: Optional[str]) -> Page:
+            resp = await self._c._read(lambda h: self._api.list_scheduled(cursor=cursor, limit=limit, _headers=h))
+            return _page(resp.items, resp.next_cursor)
+
+        return AutoPager(fetch)
 
 
 class ContactsResource:

@@ -96,6 +96,7 @@ import { PageEventView } from '../models/PageEventView.js';
 import { PageMessageLifecycleTransition } from '../models/PageMessageLifecycleTransition.js';
 import { PageMessageSummaryView } from '../models/PageMessageSummaryView.js';
 import { PageReviewView } from '../models/PageReviewView.js';
+import { PageScheduledMessageView } from '../models/PageScheduledMessageView.js';
 import { PageStarterTemplateView } from '../models/PageStarterTemplateView.js';
 import { PageSuppressionView } from '../models/PageSuppressionView.js';
 import { PageTemplateSummaryView } from '../models/PageTemplateSummaryView.js';
@@ -129,6 +130,7 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { ScheduledMessageView } from '../models/ScheduledMessageView.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
@@ -1795,6 +1797,49 @@ export class PromiseReviewsApi {
     public rejectReview(id: string, rejectRequest: RejectRequest, _options?: PromiseConfigurationOptions): Promise<RejectResultView> {
         const observableOptions = wrapOptions(_options);
         const result = this.api.rejectReview(id, rejectRequest, observableOptions);
+        return result.toPromise();
+    }
+
+
+}
+
+
+
+import { ObservableScheduledApi } from './ObservableAPI.js';
+
+import { ScheduledApiRequestFactory, ScheduledApiResponseProcessor} from "../apis/ScheduledApi.js";
+export class PromiseScheduledApi {
+    private api: ObservableScheduledApi
+
+    public constructor(
+        configuration: Configuration,
+        requestFactory?: ScheduledApiRequestFactory,
+        responseProcessor?: ScheduledApiResponseProcessor
+    ) {
+        this.api = new ObservableScheduledApi(configuration, requestFactory, responseProcessor);
+    }
+
+    /**
+     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * List messages awaiting a scheduled send (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listScheduledWithHttpInfo(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<HttpInfo<PageScheduledMessageView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.listScheduledWithHttpInfo(cursor, limit, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * List messages awaiting a scheduled send (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listScheduled(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<PageScheduledMessageView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.listScheduled(cursor, limit, observableOptions);
         return result.toPromise();
     }
 
