@@ -1,5 +1,5 @@
 import { createClient } from "../sdk.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, expandBareAddress } from "../config.js";
 import { EXIT, fail } from "../exit.js";
 import { sanitizeTsvField } from "./messages.js";
 
@@ -41,12 +41,14 @@ export async function agentsCreate(
 ): Promise<void> {
   if (!email) fail(EXIT.USAGE, CREATE_USAGE);
   // Bare names expand on the shared domain: `create myname` means
-  // myname@<shared_domain>. Both `agents create` and `keys create --agent`
-  // apply this expansion, so `agents create mybot` and `keys create --agent mybot`
-  // use the same address.
-  const address = email.includes("@") ? email : `${email}@${loadConfig().shared_domain}`;
+  // myname@<shared_domain>, discovered live via GET /v1/info when not
+  // already known (see expandBareAddress). Both `agents create` and `keys
+  // create --agent` apply this expansion, so `agents create mybot` and
+  // `keys create --agent mybot` use the same address.
+  const config = loadConfig();
+  const address = await expandBareAddress(email, config);
 
-  const client = createClient();
+  const client = createClient({}, config);
   const agent = await client.agents.create({ email: address, name: opts.name });
   if (opts.json) {
     process.stdout.write(JSON.stringify(agent) + "\n");

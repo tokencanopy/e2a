@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Field } from "../../../components/Field";
+import { Field } from "@e2a/ui";
 import { isValidDomain } from "../../../components/onboarding/state";
 import { registerDomain } from "../../../components/onboarding/api";
 import { track } from "../../../components/onboarding/analytics";
@@ -74,21 +74,7 @@ export function AddDomainForm({
         placeholder="mail.yourcompany.com"
         value={domain}
         onChange={(v) => setDomain(v.toLowerCase())}
-        hint={
-          <>
-            Use a subdomain you control. All emails to *@this-domain will be routed to e2a. If your domain is in Cloudflare, consider adding{" "}
-            <a
-              href="https://github.com/cloudflare/mcp"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline"
-              style={{ color: "var(--fg-muted)" }}
-            >
-              Cloudflare MCP
-            </a>{" "}
-            so your AI coding agent can configure DNS records automatically.
-          </>
-        }
+        hint="Use a subdomain you control. All emails to *@this-domain will be routed to e2a."
       />
       <button
         type="submit"

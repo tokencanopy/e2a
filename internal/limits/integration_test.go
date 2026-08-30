@@ -248,3 +248,55 @@ func TestEnforcer_BlocksAtAgentCap_RealDB(t *testing.T) {
 	}
 	_ = idStore // keeps the fixture-imported store referenced
 }
+
+// TestStoreGet_MaxMessagesDayColumn_RealDB pins the first nullable cap
+// (migration 110): a fresh row reads NULL → nil (no daily policy); the
+// sidecar's value round-trips through Upsert; clearing back to NULL works.
+func TestStoreGet_MaxMessagesDayColumn_RealDB(t *testing.T) {
+	pool, _, _, _, userID := setupLimitsUser(t, "daycapcol")
+	ctx := context.Background()
+	limitsStore := limits.NewStore(pool)
+
+	if err := limitsStore.Upsert(ctx, userID, limits.Limits{
+		PlanCode: "free", MaxAgents: 1, MaxDomains: 1,
+		MaxMessagesMonth: 100, MaxStorageBytes: 1 << 20,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, found, err := limitsStore.Get(ctx, userID)
+	if err != nil || !found {
+		t.Fatalf("Get: err=%v found=%v", err, found)
+	}
+	if got.MaxMessagesDay != nil {
+		t.Errorf("fresh row MaxMessagesDay = %v, want nil (NULL = no daily policy)", *got.MaxMessagesDay)
+	}
+
+	day := 100
+	if err := limitsStore.Upsert(ctx, userID, limits.Limits{
+		PlanCode: "free", MaxAgents: 1, MaxDomains: 1,
+		MaxMessagesMonth: 100, MaxMessagesDay: &day, MaxStorageBytes: 1 << 20,
+	}); err != nil {
+		t.Fatalf("Upsert with day cap: %v", err)
+	}
+	got, _, err = limitsStore.Get(ctx, userID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.MaxMessagesDay == nil || *got.MaxMessagesDay != 100 {
+		t.Fatalf("MaxMessagesDay = %v, want 100", got.MaxMessagesDay)
+	}
+
+	if err := limitsStore.Upsert(ctx, userID, limits.Limits{
+		PlanCode: "pro", MaxAgents: 25, MaxDomains: 10,
+		MaxMessagesMonth: 50000, MaxStorageBytes: 10 << 30,
+	}); err != nil {
+		t.Fatalf("Upsert clearing day cap: %v", err)
+	}
+	got, _, err = limitsStore.Get(ctx, userID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.MaxMessagesDay != nil {
+		t.Errorf("MaxMessagesDay after clear = %v, want nil", *got.MaxMessagesDay)
+	}
+}

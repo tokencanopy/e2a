@@ -1,7 +1,25 @@
 # Copy to config.yaml and edit for your deployment.
 # Secrets should be set via env vars (E2A_*) — see README "Configuration".
 
-env: "development"  # Set to "production" to enforce TLS, HTTPS webhooks, and HMAC secret strength checks
+# Set to "production" to enforce TLS, HTTPS webhooks, HMAC secret strength
+# checks, and real DNS domain verification (development short-circuits
+# domain verification to "found" with no lookup, logging a WARNING per
+# check). The E2A_ENV environment variable overrides this value — the only
+# way to reach production mode on the published Docker image, which bakes
+# this file to a fixed path. Any value other than "development" or
+# "production" fails startup.
+env: "development"
+
+# Optional. Names WHICH deployment this is ("prod" or "staging"), for
+# classification metadata e2a attaches to resources it creates in external
+# systems — today the e2a-env tag on provisioned SES sender identities, so a
+# shared AWS account can be audited without this server's database. NOT the
+# same as `env` above: that is a development/production mode switch, and a
+# hosted staging deployment runs env: "production" too. Self-hosters leave
+# this empty and simply get no environment tag. Any other value is logged
+# once at startup and treated as empty — never a startup failure.
+# Override with E2A_DEPLOYMENT_NAME.
+deployment_name: ""
 
 # Optional. When set, users can register agents by slug (no DNS setup required)
 # and the server provisions <slug>@<shared_domain>. Leave empty on a self-host
@@ -70,6 +88,50 @@ oidc:
   user_id_claim: ""       # TokenCanopy uses "e2a_user_id". Override: E2A_OIDC_USER_ID_CLAIM
   # Enable with: E2A_OIDC_ENABLED=true
 
+# — Delegated access tokens ——————————————————————————————————————————————————
+# Optional, off by default. Lets an external control plane (any OIDC issuer
+# — the operator's own platform, for example) call the e2a API with
+# short-lived, audience-bound RFC 9068 access tokens (JOSE typ "at+jwt")
+# minted server-side for its signed-in humans. e2a verifies the token
+# against the issuer's published JWKS and maps the verified (issuer,
+# subject) pair to an existing local user via external_principal_mappings
+# — populated by provisioning/attach, never on token presentation. A
+# verified token acts with account scope, exactly like an account API key.
+#
+# Enabled requires every field below; a malformed static configuration
+# refuses to start, and in production the issuer must be https. Issuer
+# NETWORK unavailability is deliberately not startup-fatal: discovery
+# retries in the background and delegated requests fail 503 until it
+# succeeds. Existing credentials (API keys, OAuth, agent JWTs, sessions)
+# are unaffected by any delegated outage. Compact tokens whose protected
+# header says typ "at+jwt" belong to this verifier even while it is
+# disabled — they never fall through to the API-key path.
+delegated:
+  enabled: false          # Override: E2A_DELEGATED_ENABLED
+  issuer_url: ""          # exact issuer/discovery base, byte-compared against `iss`, e.g. "https://auth.platform.example.com/oidc"
+  audience: ""            # exact single-string `aud`, e.g. "https://api.e2a.example.com"
+  authorized_party: ""    # exact `azp` the issuer stamps on console-minted tokens
+  required_scope: ""      # exact singleton scope, e.g. "account" — the whole claim, not a member
+  allowed_algorithms: ["RS256", "ES256"]   # closed allowlist; only these two are supported
+  max_token_lifetime_seconds: 120          # bound on exp - iat
+  clock_skew_seconds: 5                    # tolerated iat-future / exp-past drift
+  # Context claims every token must carry as bounded nonempty strings;
+  # allowed_values (optional) closes a claim to a value set. These claim
+  # NAMES and role VALUES are your issuer's identity policy — not shipped
+  # with any default — so set them to your deployment's own claims. The
+  # generic placeholders below are illustrative only; enabling the
+  # verifier with an empty required_claims or forbidden_claims list is a
+  # startup error.
+  required_claims:
+    - name: tenant_id
+    - name: seat_id
+    - name: seat_role
+      allowed_values: [admin, member]
+  # Claims that must be absent entirely (present-as-null still rejects):
+  # your issuer's machine-credential claim names, so a non-human token can
+  # never pass the human-token policy.
+  forbidden_claims: [service_client_id, robot_id]
+
 # — Internal user provisioning ———————————————————————————————————————————————
 # Optional, off by default, internal-only (not part of the public /v1 API or
 # the OpenAPI spec). When enabled, an external control plane can create e2a
@@ -88,8 +150,11 @@ provisioning:
 
 signing:
   # Generate with: openssl rand -hex 32
-  # Production refuses to start with this placeholder or with anything < 32 bytes.
-  hmac_secret: "change-me-in-production"
+  # This placeholder is >=32 bytes so `make run` boots for local dev
+  # without edits. Production refuses to start with this exact placeholder
+  # value or with anything < 32 bytes — see placeholderHMACSecret in
+  # internal/config/config.go (keep the two in sync if you ever change this).
+  hmac_secret: "change-me-in-production-this-is-not-a-real-secret"
 
 outbound_smtp:
   # Upstream SMTP relay for outbound mail (HITL approval notifications,
@@ -180,6 +245,45 @@ sender_identity:
   # (config-only deploy) to switch producers to the versioned v2 lane.
   # Single-instance deployments have no overlap and can leave this false.
   legacy_job_compat: false
+  # How long a FIXTURE sending identity — one provisioned for a non-customer
+  # account class (internal dogfooding, synthetic monitoring) — is assumed to
+  # still be in use. Stamped onto the identity as the e2a-expires tag so an
+  # abandoned test fixture is distinguishable from a live customer domain in
+  # the provider account alone. Customer identities never carry it. Written as
+  # a Go duration string; "0s" disables the tag. Override with
+  # E2A_SENDER_IDENTITY_FIXTURE_TTL.
+  fixture_ttl: "24h"
+  # Orphan reclaim: let the hourly reaper DELETE sending identities that exist
+  # at the provider with no ledger row and no domain row (crashed test runs
+  # leak these). Off by default, and arming it is not enough on its own — an
+  # identity is deleted only when ALL of these hold: it carries e2a's ownership
+  # tag, its e2a-env tag names THIS deployment (deployment_name must be set),
+  # its e2a-purpose tag says "fixture", its e2a-expires stamp is in the past,
+  # its e2a-created stamp clears reclaim_min_age, its name falls under a
+  # reclaim_zones entry, and the provider reports it as NOT verified for
+  # sending. Anything missing or unparseable refuses. Deletion runs through the
+  # same ownership-verifying teardown path the ledgered phase uses.
+  #
+  # With reap_orphans false the reaper still runs the whole decision and logs
+  # "WOULD DELETE <domain>" (or the refusal reason) without touching the
+  # provider — run there for a few days and read the logs before arming.
+  reap_orphans: false
+  # DNS zones that hold ONLY e2a's own test fixtures. This is the strongest
+  # guard: customer domains are never under the test zone. Matching is on a
+  # label boundary, so "example.test" covers "a.example.test" and
+  # "example.test" itself but never "evilexample.test". EMPTY (the default)
+  # reclaims NOTHING — it is never read as "any zone".
+  reclaim_zones: []
+  # Absolute age floor before an identity may be reclaimed, checked
+  # independently of its expiry tag so clock skew or a mis-set fixture_ttl
+  # cannot make a brand-new identity instantly reclaimable. Go duration string;
+  # "0s" reclaims nothing.
+  reclaim_min_age: "168h"
+  # Cap on deletions per reaper JOB (the orphan phase is paginated across
+  # jobs, so this is a per-page budget, not a global one). A systematic
+  # mistake then costs a handful of identities and a loud log, not the
+  # account. 0 reclaims nothing.
+  reclaim_max_per_sweep: 5
 
 # Operator-managed recipient-volume ramp for newly verified custom sender
 # domains. Disabled by default for self-hosts. When enabled, the schedule is
@@ -227,7 +331,15 @@ limits:
   plan_code: "default"
   max_agents: 1000000
   max_domains: 1000000
+  # Message-flow allowances count OUTBOUND recipient-deliveries: a message
+  # sent to N distinct recipients consumes N units; received mail is free
+  # and unmetered (it never consumes the allowance).
   max_messages_month: 1000000000
+  # Optional per-UTC-day send cap for users without an account_limits row.
+  # ABSENT (the default) = no daily policy; 0 = block all sends. Hosted
+  # deployments set this to the free tier's daily allowance and let the
+  # billing provisioner override it per account.
+  # max_messages_day: 100
   max_storage_bytes: 1125899906842624  # 1 PiB — effectively unbounded
   cache_ttl_seconds: 60
   # Shared HMAC secret used to authenticate /api/internal/limits/invalidate.
@@ -300,6 +412,19 @@ metrics:
 
 
 # — Content screening (piguard) ——————————————————————————————————————————————
+# Master switch: set the environment variable E2A_CONTENT_SCAN_ENABLED=true
+# to turn content screening on for this deployment (internal/identity/
+# protection.go). Off by default, including here in the self-host example —
+# this is what "self-host to use it today" (README → Content screening)
+# means in practice. There is no YAML key for this; it is env-only.
+#
+# This is a deployment-level unlock, not a per-agent one: while it's unset
+# or false, PUT /v1/agents/{email}/protection clamps every agent's
+# scan_sensitivity to "off" no matter what a caller requests. With it
+# enabled, still set each agent's scan_sensitivity to low/medium/high via
+# that endpoint (or the dashboard) to actually turn scanning on for that
+# agent — the two below only affect which detector runs once scanning is on.
+#
 # The Gemini LLM-as-detector layer is enabled by setting the environment
 # variable GEMINI_API_KEY (or GOOGLE_API_KEY) to a Google AI Studio key.
 # When the variable is absent the Gemini detector is silently skipped and

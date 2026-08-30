@@ -35,26 +35,31 @@ test("shows the optional outbound-review instruction for inbox setup", () => {
   render(<AgentPromptCard {...AGENT_PROMPTS.inboxes} />);
 
   const notice = screen.getByRole("note", {
-    name: "Optional outbound review setup",
+    name: "Want every outbound email reviewed first?",
   });
-  expect(notice).toHaveTextContent("Want every outbound email reviewed first?");
   expect(notice).toHaveTextContent(
     "Configure this inbox so every outbound email requires human review.",
   );
 });
 
-test("does not show the inbox-only notice on other setup cards", () => {
-  const { rerender } = render(
-    <AgentPromptCard {...AGENT_PROMPTS.templates} />,
-  );
-  expect(
-    screen.queryByRole("note", { name: "Optional outbound review setup" }),
-  ).not.toBeInTheDocument();
+// DNS records land at the registrar, not in e2a — an agent driving domain
+// setup over MCP stalls there unless it also holds a provider MCP. The
+// recommendation belongs next to the prompt the user is about to paste.
+test("recommends the Cloudflare MCP on the domain setup card", () => {
+  render(<AgentPromptCard {...AGENT_PROMPTS.domains} />);
 
-  rerender(<AgentPromptCard {...AGENT_PROMPTS.domains} />);
+  const notice = screen.getByRole("note", {
+    name: "Domain managed by Cloudflare?",
+  });
+  expect(notice).toHaveTextContent("create the DNS records for you");
   expect(
-    screen.queryByRole("note", { name: "Optional outbound review setup" }),
-  ).not.toBeInTheDocument();
+    screen.getByRole("link", { name: "https://github.com/cloudflare/mcp" }),
+  ).toHaveAttribute("href", "https://github.com/cloudflare/mcp");
+});
+
+test("shows no notice on setup cards that do not define one", () => {
+  render(<AgentPromptCard {...AGENT_PROMPTS.templates} />);
+  expect(screen.queryByRole("note")).not.toBeInTheDocument();
 });
 
 test("copy button writes the card's prompt to the clipboard and flips its label", async () => {

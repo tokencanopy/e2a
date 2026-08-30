@@ -2,8 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Button } from "../../../../components/loft/Button";
-import { Chip } from "../../../../components/loft/Chip";
+import { Button, Chip } from "@e2a/ui";
 
 type Outreach = {
   address: string;

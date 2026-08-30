@@ -25,6 +25,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/contactdue"
+	"github.com/tokencanopy/e2a/internal/delegated"
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/eventpayload"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
@@ -276,6 +277,12 @@ func main() {
 	var jobsClient *jobs.Client
 	var registrars []jobs.Registrar
 
+	// Read-side usage store. Built up here rather than beside the limits
+	// enforcer that also consumes it, because the sender-identity registrar
+	// below reads account classes through it to classify (tag) the SES
+	// identities it provisions.
+	usageStore := usage.NewStore(pool)
+
 	// Usage tracking is hosted-deployment infrastructure (counts every
 	// inbound/outbound message into usage_events + usage_summaries for downstream
 	// billing reconciliation). Self-hosters get the no-op tracker by default — the
@@ -366,11 +373,30 @@ func main() {
 		if perr != nil {
 			log.Fatalf("sender identity: build SES provider: %v", perr)
 		}
+		// Classification tags on every identity e2a provisions, so a cleanup
+		// pass can judge one from AWS alone. Reuses the metrics build label as
+		// the provisioner stamp — it is already the deployed release string.
+		provider = provider.WithIdentityTags(cfg.DeploymentName, cfg.Metrics.Build, cfg.SenderIdentity.FixtureTTL)
 		senderMgr = senderidentity.NewManager(
-			senderidentity.NewStoreAdapter(store),
+			senderidentity.NewStoreAdapter(store, func(ctx context.Context, userID string) (string, error) {
+				class, err := usageStore.GetAccountClass(ctx, userID)
+				return string(class), err
+			}),
 			provider,
 			senderIdentityEventFirer(outboxPublisher),
-			senderidentity.Config{LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat},
+			senderidentity.Config{
+				LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat,
+				// Orphan reclaim reads the SAME deployment name the tags were
+				// written with, so an identity can only ever be reclaimed by
+				// the deployment that created it.
+				Reclaim: senderidentity.ReclaimConfig{
+					Enabled:     cfg.SenderIdentity.ReapOrphans,
+					Deployment:  cfg.DeploymentName,
+					Zones:       cfg.SenderIdentity.ReclaimZones,
+					MinAge:      cfg.SenderIdentity.ReclaimMinAge,
+					MaxPerSweep: cfg.SenderIdentity.ReclaimMaxPerSweep,
+				},
+			},
 		)
 		registrars = append(registrars, senderMgr)
 	}
@@ -688,7 +714,6 @@ func main() {
 	// run a provisioner get the generous config defaults applied to
 	// every user — effectively unlimited unless they tighten the
 	// `limits:` config block.
-	usageStore := usage.NewStore(pool)
 	enforcer := limits.NewEnforcer(
 		limits.NewStore(pool),
 		usageStore,
@@ -697,6 +722,7 @@ func main() {
 			MaxAgents:        cfg.Limits.MaxAgents,
 			MaxDomains:       cfg.Limits.MaxDomains,
 			MaxMessagesMonth: cfg.Limits.MaxMessagesMonth,
+			MaxMessagesDay:   cfg.Limits.MaxMessagesDay,
 			MaxStorageBytes:  cfg.Limits.MaxStorageBytes,
 			// Row-less fallback for the outbound-footer entitlement — the
 			// `outbound_footer:` block's default_enabled, not `limits:`.
@@ -713,12 +739,19 @@ func main() {
 	// otherwise an expires-to-approve hold ships unfootered while the identical
 	// human-approved hold does not.
 	hitlWorker.SetOutboundFooterResolver(api.OutboundFooterForAccount)
-	// Fire-time monthly-cap gate for scheduled sends: enforce the cap in the
-	// month a scheduled send actually fires (accept-time enforcement can't know a
-	// future fire month). Over-cap → refuse terminally; a transient lookup error
-	// fails open so a glitch never drops a legitimate send.
-	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string) (bool, error) {
-		return scheduledSendMonthlyQuotaResult(enforcer.CheckMessageSend(ctx, userID))
+	// TTL auto-approve releases held drafts that were never metered at accept;
+	// give the sweep the same flow-cap re-check the human approve funnel runs.
+	hitlWorker.SetQuotaCheck(func(ctx context.Context, userID string, units int) error {
+		return enforcer.CheckMessageSend(ctx, userID, units)
+	})
+	// Fire-time flow-cap gate for deferred-settlement sends (scheduled +
+	// review-released): enforce the caps in the window the send actually
+	// fires, with the claim's real recipient-unit count. Monthly over-cap →
+	// terminal refusal; daily over-cap → deferral to next UTC midnight; a
+	// transient lookup error fails open so a glitch never drops a legitimate
+	// send.
+	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string, units int) (string, bool, error) {
+		return scheduledSendQuotaResult(enforcer.CheckMessageSend(ctx, userID, units))
 	})
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
@@ -750,6 +783,40 @@ func main() {
 	// through a higher-level abstraction.
 	api.SetPoolForEvents(pool)
 	api.SetMetrics(metrics)
+
+	// Delegated access-token verification (config delegated:). The issuer
+	// is wired independently of enablement so the external-principal
+	// attach endpoint can populate mappings ahead of flipping the
+	// verifier on. Construction is static-only (config.Validate already
+	// vetted the policy); issuer discovery runs in the background with
+	// retry, so an unreachable issuer degrades delegated auth to 503
+	// without touching startup or any other credential path.
+	api.SetDelegatedIssuer(cfg.Delegated.IssuerURL)
+	if cfg.Delegated.Enabled {
+		requiredClaims := make([]delegated.RequiredClaim, 0, len(cfg.Delegated.RequiredClaims))
+		for _, rc := range cfg.Delegated.RequiredClaims {
+			requiredClaims = append(requiredClaims, delegated.RequiredClaim{
+				Name:          rc.Name,
+				AllowedValues: rc.AllowedValues,
+			})
+		}
+		delegatedVerifier, err := delegated.NewVerifier(ctx, delegated.Config{
+			IssuerURL:         cfg.Delegated.IssuerURL,
+			Audience:          cfg.Delegated.Audience,
+			AuthorizedParty:   cfg.Delegated.AuthorizedParty,
+			RequiredScope:     cfg.Delegated.RequiredScope,
+			AllowedAlgorithms: cfg.Delegated.AllowedAlgorithms,
+			MaxTokenLifetime:  time.Duration(cfg.Delegated.MaxTokenLifetimeSeconds) * time.Second,
+			ClockSkew:         time.Duration(cfg.Delegated.ClockSkewSeconds) * time.Second,
+			RequiredClaims:    requiredClaims,
+			ForbiddenClaims:   cfg.Delegated.ForbiddenClaims,
+		}, metrics)
+		if err != nil {
+			log.Fatalf("Failed to initialize delegated verifier: %v", err)
+		}
+		api.SetDelegatedVerifier(delegatedVerifier)
+		log.Printf("[delegated] verifier enabled (issuer=%s); discovering issuer in the background", cfg.Delegated.IssuerURL)
+	}
 
 	api.RegisterRoutes(router)
 
@@ -812,6 +879,7 @@ func main() {
 		SESRegion:                 cfg.SenderIdentity.SESRegion,
 		SharedDomain:              cfg.SharedDomain,
 		PublicURL:                 cfg.HTTP.PublicURL,
+		APIURL:                    cfg.HTTP.APIURL,
 		SigningSecret:             cfg.Signing.HMACSecret,
 		EventsEnabled:             webhookOutbox.Enabled(),
 		Production:                cfg.IsProduction(),
@@ -1028,18 +1096,23 @@ func main() {
 	<-riverDone
 }
 
-// scheduledSendMonthlyQuotaResult narrows the general send-limit check to the
-// fire-time concern for scheduled messages. The message is already persisted,
-// so a later storage-cap breach must not cancel it; only the monthly message
-// cap for the month in which it fires is terminal.
-func scheduledSendMonthlyQuotaResult(err error) (bool, error) {
+// scheduledSendQuotaResult narrows the general send-limit check to the
+// fire-time concern for deferred-settlement messages (scheduled and
+// review-released). The message is already persisted, so a later storage-cap
+// breach must not cancel it; only the FLOW caps matter at fire time, and the
+// exceeded resource stem is returned so the caller can distinguish terminal
+// monthly exhaustion from a recoverable daily deferral.
+func scheduledSendQuotaResult(err error) (resource string, over bool, retErr error) {
 	if err == nil {
-		return false, nil
+		return "", false, nil
 	}
 	if limitErr, ok := limits.IsLimitExceeded(err); ok {
-		return limitErr.Resource == "messages_month", nil
+		if limitErr.Resource == "messages_month" || limitErr.Resource == "messages_day" {
+			return limitErr.Resource, true, nil
+		}
+		return "", false, nil
 	}
-	return false, err
+	return "", false, err
 }
 
 // isTerminal reports whether f is an interactive terminal rather than a pipe or

@@ -29,7 +29,7 @@ from .generated.api.reviews_api import ReviewsApi
 from .generated.api.templates_api import TemplatesApi
 from .generated.api.contacts_api import ContactsApi
 from .generated.api.webhooks_api import WebhooksApi
-from .generated.api_client import ApiClient
+from .generated.api_client import ApiClient, RequestSerialized
 from .generated.configuration import Configuration
 from .generated.models import (
     AgentView,
@@ -210,8 +210,66 @@ def _coerce(model_cls: Type[T], body: Optional[Body]) -> T:
         ) from e
 
 
+def _assert_not_dot_segment(value: str, param: str) -> str:
+    # A value of exactly ".." collapses the built URL onto the PRECEDING path
+    # segment, and exactly "." collapses onto the segment's own parent
+    # collection (it drops itself, not the segment before it); neither is
+    # escaped by urllib.parse.quote(), so both reach httpx's URL builder
+    # literally. httpx then normalizes the dot segments away and drops any
+    # collapsed trailing slash, so several of these collapses land on a
+    # real, live route rather than 404ing. (The TS client's URL builder
+    # behaves the same way for every mid-path collapse and for any collapsed
+    # trailing slash not followed by a query string, so this was live on
+    # both SDKs.) Reject before the wire either way.
+    if value in (".", ".."):
+        raise E2AValidationError(
+            code="unsafe_path_segment",
+            message=f'{param} must not be "." or ".."; it would collapse the request path onto a different, larger resource',
+            status=0,
+            retryable=False,
+        )
+    return value
+
+
 class _TypedApiClient(ApiClient):
     """Map malformed successful responses before the retry boundary sees them."""
+
+    def param_serialize(
+        self,
+        method: str,
+        resource_path: str,
+        path_params: Optional[Mapping[str, Any]] = None,
+        query_params: Optional[Any] = None,
+        header_params: Optional[Any] = None,
+        body: Optional[Any] = None,
+        post_params: Optional[Any] = None,
+        files: Optional[Any] = None,
+        auth_settings: Optional[Any] = None,
+        collection_formats: Optional[Any] = None,
+        _host: Optional[str] = None,
+        _request_auth: Optional[Any] = None,
+    ) -> RequestSerialized:
+        # Every generated *Api method builds its URL through this one call, so
+        # checking here covers every path parameter of every resource, not just
+        # the 10 sites the ergonomic wrapper classes above happen to name.
+        if path_params:
+            for name, value in path_params.items():
+                if isinstance(value, str):
+                    _assert_not_dot_segment(value, name)
+        return super().param_serialize(
+            method,
+            resource_path,
+            path_params,
+            query_params,
+            header_params,
+            body,
+            post_params,
+            files,
+            auth_settings,
+            collection_formats,
+            _host,
+            _request_auth,
+        )
 
     def response_deserialize(self, response_data: Any, response_types_map: Any = None) -> Any:
         try:
@@ -469,6 +527,7 @@ class AgentsResource:
         self, email: str, address: str
     ) -> DeleteSuppressionResult:
         """Beta: remove only this exact agent-recipient block."""
+        address = _assert_not_dot_segment(address, "address")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_agent_suppression(
                 email, address, confirm="DELETE", _headers=h
@@ -606,6 +665,7 @@ class MessagesResource:
         it on the review queue first. Returns the deletion receipt
         ({deleted, id}).
         """
+        message_id = _assert_not_dot_segment(message_id, "message_id")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_message(
                 # `permanent or None` omits the param entirely on the soft path,
@@ -619,6 +679,7 @@ class MessagesResource:
         """Restore a soft-deleted message. A scheduled message restored before
         scheduled_at re-arms; at/after scheduled_at it returns live as failed
         with submission canceled."""
+        message_id = _assert_not_dot_segment(message_id, "message_id")
         return await self._c._write_unsafe(
             lambda h: self._api.restore_message(email, message_id, _headers=h)
         )
@@ -750,6 +811,7 @@ class MessagesResource:
     async def update_labels(
         self, email: str, message_id: str, body: Body
     ) -> UpdateMessageResultView:
+        message_id = _assert_not_dot_segment(message_id, "message_id")
         req = _coerce(UpdateMessageRequest, body)
         return await self._c._write_idempotent(
             lambda h: self._api.update_message(email, message_id, req, _headers=h)
@@ -896,6 +958,7 @@ class ContactsResource:
 
     async def delete_import(self, batch_id: str) -> DeleteImportBatchResult:
         """Reverse an import, removing untouched contacts and agent enrolments it created."""
+        batch_id = _assert_not_dot_segment(batch_id, "batch_id")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_import_batch(batch_id, confirm="DELETE", _headers=h)
         )
@@ -965,6 +1028,7 @@ class ContactsResource:
         """Enrol a contact in an agent's outreach, or update the agent-owned
         fields. Omitted fields are left unchanged, so advancing the stage after a
         send does not disturb the schedule."""
+        email = _assert_not_dot_segment(email, "email")
         req = _coerce(UpsertEngagementRequest, body)
         return await self._c._write_idempotent(
             lambda h: self._api.upsert_engagement(
@@ -975,6 +1039,8 @@ class ContactsResource:
     async def delete_outreach(self, email: str, address: str) -> DeleteEngagementResult:
         """Un-enrol a contact from an agent's outreach. The contact itself
         survives, and suppressions are untouched — this is not consent."""
+        email = _assert_not_dot_segment(email, "email")
+        address = _assert_not_dot_segment(address, "address")
         return await self._c._write_idempotent(
             lambda h: self._api.delete_engagement(email, address, confirm="DELETE", _headers=h)
         )
@@ -1277,6 +1343,7 @@ class SuppressionsResource:
 
     async def delete(self, email: str) -> DeleteSuppressionResult:
         # Returns the deletion object ({deleted, address}).
+        email = _assert_not_dot_segment(email, "address")
         return await self._c._write_idempotent(lambda h: self._api.delete_suppression(email, confirm="DELETE", _headers=h))
 
 
@@ -1306,6 +1373,7 @@ class APIKeysResource:
 
     async def delete(self, key_id: str) -> DeleteApiKeyResult:
         # Returns the deletion object ({deleted, id}).
+        key_id = _assert_not_dot_segment(key_id, "id")
         return await self._c._write_idempotent(lambda h: self._api.delete_api_key(key_id, confirm="DELETE", _headers=h))
 
 

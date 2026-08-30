@@ -17,7 +17,7 @@ const CONFIG_DIR = join(homedir(), ".e2a");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 
 // Import after mocks are set up
-import { loadConfig, saveConfig, requireApiKey } from "../config.js";
+import { loadConfig, saveConfig, requireApiKey, resolveSharedDomain, expandBareAddress } from "../config.js";
 
 describe("loadConfig", () => {
   beforeEach(() => {
@@ -42,6 +42,10 @@ describe("loadConfig", () => {
     expect(config.api_key).toBe("");
     expect(config.api_url).toBe("https://e2a.dev");
     expect(config.agent_email).toBe("");
+    // Deliberately no baked-in "agents.e2a.dev" here — a caller
+    // authenticating purely by env (never `e2a login`) must not silently
+    // resolve to the operator's shared domain. See resolveSharedDomain.
+    expect(config.shared_domain).toBe("");
   });
 
   it("reads config from file", () => {
@@ -247,5 +251,105 @@ describe("requireApiKey", () => {
 
     mockExit.mockRestore();
     mockStderr.mockRestore();
+  });
+});
+
+describe("resolveSharedDomain", () => {
+  const baseConfig = { api_key: "", api_url: "https://selfhost.example.test", agent_email: "" };
+  let mockFetch: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the already-known shared_domain without any network call", async () => {
+    const domain = await resolveSharedDomain({ ...baseConfig, shared_domain: "agents.known.test" });
+    expect(domain).toBe("agents.known.test");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("discovers shared_domain from GET /v1/info when unset", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ shared_domain: "agents.selfhost.example.test" }) });
+    const domain = await resolveSharedDomain({ ...baseConfig, shared_domain: "" });
+    expect(domain).toBe("agents.selfhost.example.test");
+    expect(mockFetch).toHaveBeenCalledWith("https://selfhost.example.test/v1/info");
+  });
+
+  it("strips a trailing slash from api_url before probing /v1/info", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ shared_domain: "agents.selfhost.example.test" }) });
+    await resolveSharedDomain({ ...baseConfig, api_url: "https://selfhost.example.test/", shared_domain: "" });
+    expect(mockFetch).toHaveBeenCalledWith("https://selfhost.example.test/v1/info");
+  });
+
+  it("returns \"\" — never the hosted product's domain — on a non-ok response (older deployment)", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+    const domain = await resolveSharedDomain({ ...baseConfig, shared_domain: "" });
+    expect(domain).toBe("");
+  });
+
+  it("returns \"\" when the deployment is unreachable", async () => {
+    mockFetch.mockRejectedValue(new TypeError("fetch failed"));
+    const domain = await resolveSharedDomain({ ...baseConfig, shared_domain: "" });
+    expect(domain).toBe("");
+  });
+
+  it("returns \"\" when /v1/info responds without a shared_domain field", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ version: "1.0.0" }) });
+    const domain = await resolveSharedDomain({ ...baseConfig, shared_domain: "" });
+    expect(domain).toBe("");
+  });
+});
+
+describe("expandBareAddress", () => {
+  const baseConfig = { api_key: "", api_url: "https://selfhost.example.test", agent_email: "" };
+  let mockFetch: ReturnType<typeof vi.fn>;
+  let mockExit: ReturnType<typeof vi.spyOn>;
+  let mockStderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+    mockExit = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    mockStderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    mockExit.mockRestore();
+    mockStderr.mockRestore();
+  });
+
+  it("passes a full address through unchanged with no network call", async () => {
+    const address = await expandBareAddress("mybot@example.com", { ...baseConfig, shared_domain: "" });
+    expect(address).toBe("mybot@example.com");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("expands a bare name using the already-known shared_domain", async () => {
+    const address = await expandBareAddress("mybot", { ...baseConfig, shared_domain: "agents.known.test" });
+    expect(address).toBe("mybot@agents.known.test");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("expands a bare name using a live-discovered shared_domain", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ shared_domain: "agents.selfhost.example.test" }) });
+    const address = await expandBareAddress("mybot", { ...baseConfig, shared_domain: "" });
+    expect(address).toBe("mybot@agents.selfhost.example.test");
+  });
+
+  it("exits USAGE with a clear message instead of expanding onto no domain", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+    await expect(expandBareAddress("mybot", { ...baseConfig, shared_domain: "" })).rejects.toThrow(
+      "process.exit",
+    );
+    expect(mockExit).toHaveBeenCalledWith(2);
+    expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining("no shared domain"));
   });
 });

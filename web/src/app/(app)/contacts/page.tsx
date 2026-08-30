@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentPromptCard } from "../../components/AgentPromptCard";
-import { Button } from "../../components/loft/Button";
-import { Chip } from "../../components/loft/Chip";
+import { Button, Chip } from "@e2a/ui";
 import { PageShell } from "../../components/loft/PageShell";
 import { useAgents } from "../../components/hooks/useAgents";
 import {

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { PageShell } from "../../components/loft/PageShell";
-import { Chip } from "../../components/loft/Chip";
+import { Chip } from "@e2a/ui";
 import { StarterGallery } from "./_components/StarterGallery";
 import { AgentPromptCard, AGENT_PROMPTS } from "../../components/AgentPromptCard";
 import { StarterPreviewModal } from "./_components/StarterPreviewModal";

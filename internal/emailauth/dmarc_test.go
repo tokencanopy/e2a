@@ -42,6 +42,23 @@ func TestEvaluateDMARCAlignedDKIM(t *testing.T) {
 	}
 }
 
+func TestEvaluateDMARCEncodesUnicodeFromDomainForLookup(t *testing.T) {
+	r := &fakeTXTResolver{records: map[string][]string{
+		"_dmarc.xn--mnchen-3ya.example": {"v=DMARC1; p=reject"},
+	}}
+	dkimDomain, selector := "xn--mnchen-3ya.example", "s1"
+	got := evaluateDMARC(context.Background(), r, "münchen.example",
+		SPFResult{Status: StatusNone},
+		[]DKIMResult{{Status: StatusPass, Domain: &dkimDomain, Selector: &selector}},
+	)
+	if len(r.lookups) == 0 || r.lookups[0] != "_dmarc.xn--mnchen-3ya.example" {
+		t.Fatalf("lookups = %v, want the punycode label queried first", r.lookups)
+	}
+	if got.Status != StatusPass || got.Policy == nil || *got.Policy != DMARCPolicyReject {
+		t.Fatalf("got %+v, want the record found under the punycode name to apply", got)
+	}
+}
+
 func TestEvaluateDMARCRejectsBarePublicSuffixAuthor(t *testing.T) {
 	r := &fakeTXTResolver{records: map[string][]string{
 		"_dmarc.github.io": {"v=DMARC1; p=reject"},

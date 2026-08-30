@@ -3,8 +3,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Button } from "../../../../components/loft/Button";
-import { Chip } from "../../../../components/loft/Chip";
+import { Button, Chip } from "@e2a/ui";
 import { appendUniqueByAddress, encodeAddressSegment } from "../../../contacts/_lib/suppressionPath";
 
 // Per-agent recipient blocks: unsubscribes plus manual entries, scoped to this

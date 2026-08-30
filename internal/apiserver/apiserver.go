@@ -46,7 +46,11 @@ type Params struct {
 	SMTPDomain   string
 	SharedDomain string
 	PublicURL    string
-	Production   bool
+	// APIURL is config http.api_url (defaults to PublicURL when unset) — the
+	// externally visible API host this deployment advertises in the OpenAPI
+	// document's `servers` block. See httpapi.Deps.APIURL.
+	APIURL     string
+	Production bool
 
 	// SESRegion is the SES sending-identity region (config
 	// sender_identity.ses_region). Non-empty enables the sending feature, which
@@ -311,6 +315,7 @@ func BuildDeps(p Params) httpapi.Deps {
 
 		SharedDomain: p.SharedDomain,
 		PublicURL:    p.PublicURL,
+		APIURL:       p.APIURL,
 		WSHandle:     p.WSHandle,
 		Legacy:       p.Legacy,
 		Metrics:      p.Metrics,

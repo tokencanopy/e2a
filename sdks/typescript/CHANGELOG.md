@@ -1,5 +1,41 @@
 # Changelog
 
+## 5.8.0
+
+### Added
+- **`E2A_API_URL` is the canonical base-URL environment variable**, matching the
+  name the server uses for its externally visible API base. The previous
+  `E2A_BASE_URL` is still honoured so published integrations keep working, but
+  now emits a one-shot deprecation warning. Resolution order is
+  `opts.baseUrl` -> `E2A_API_URL` -> `E2A_BASE_URL` (deprecated) ->
+  `https://api.e2a.dev`.
+
+### Fixed
+- **`WSListener` now resolves its base URL the same way `E2AClient` does.** It
+  previously honoured only an explicit `opts.baseUrl` and otherwise went
+  straight to `https://api.e2a.dev`, ignoring the environment entirely — so a
+  self-hosted deployment that set the env var still had its WebSocket listener
+  pointed at the hosted service. Exporting `E2A_API_URL` now points both at the
+  same deployment.
+
+### Changed
+- **Dot-segment path parameters (`.` / `..`) are now rejected client-side**
+  on `agents.deleteSuppression`, `contacts.deleteOutreach` (both `email` and
+  `address`), `contacts.deleteImport`, `contacts.setOutreach` (`email`),
+  `messages.delete`, `messages.restore`, `messages.updateLabels`,
+  `account.suppressions.delete`, and `account.apiKeys.delete`, throwing
+  `E2AValidationError` (code `unsafe_path_segment`) before any request is
+  built. Previously a value of exactly `.` or `..` reached the URL builder
+  unescaped and could retarget the request at a different, larger resource
+  (e.g. `contacts.deleteOutreach("..", address)` could permanently delete the
+  contact record via `deleteContact` instead of un-enrolling one outreach
+  relationship, and `contacts.deleteOutreach(email, "..")` could delete the
+  agent itself via `deleteAgent`; `messages.restore(email, "..")` could undo
+  an agent deletion via `restoreAgent` instead of restoring a message). This
+  is a behavior change for any caller that was, deliberately or not, passing
+  one of these values: it now throws instead of sending the (misdirected)
+  request.
+
 ## 5.7.0
 
 Additive only. Every 5.6.0 call site keeps compiling and behaving identically.

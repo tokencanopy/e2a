@@ -325,7 +325,7 @@ describe("Shared local flow", () => {
     await waitFor(() => {
       expect(screen.getByText("Inbox created!")).toBeInTheDocument();
     });
-    expect(screen.getByText("Connect your agent")).toBeInTheDocument();
+    expect(screen.getByText("Connect your application or agent")).toBeInTheDocument();
     expect(screen.getByText("Install the e2a skill")).toBeInTheDocument();
   });
 });
@@ -587,7 +587,7 @@ describe("Custom-domain flow: new domain -> DNS -> verify -> local agent", () =>
     await waitFor(() => {
       expect(screen.getByText("Inbox created!")).toBeInTheDocument();
     });
-    expect(screen.getByText("Connect your agent")).toBeInTheDocument();
+    expect(screen.getByText("Connect your application or agent")).toBeInTheDocument();
   });
 });
 

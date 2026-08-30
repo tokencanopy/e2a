@@ -51,7 +51,7 @@ func TestMessageLifecycleMigrationCatalogMatchesCanonicalCatalog(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if want := messagelifecycle.Catalog(); !reflect.DeepEqual(got, want) {
+	if want := migrationLifecycleCatalog(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("database catalog mismatch\ngot:  %#v\nwant: %#v", got, want)
 	}
 }
@@ -79,9 +79,25 @@ func TestMessageLifecycleMigrationIsIdempotent(t *testing.T) {
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("catalog changed after migration replay\nbefore: %#v\nafter:  %#v", before, after)
 	}
-	if len(after) != 30 {
-		t.Fatalf("catalog row count = %d, want 30", len(after))
+	if want := len(migrationLifecycleCatalog()); len(after) != want {
+		t.Fatalf("catalog row count = %d, want %d", len(after), want)
 	}
+}
+
+// migrationLifecycleCatalog includes the dormant reason codes reserved by the
+// sending-protection foundation migration. They stay outside Catalog until B10
+// adds their emitters and public lifecycle documentation.
+func migrationLifecycleCatalog() map[messagelifecycle.ReasonCode]messagelifecycle.Definition {
+	result := messagelifecycle.Catalog()
+	result[messagelifecycle.ReasonCode("submission.policy_budget_expired")] = messagelifecycle.Definition{
+		Stage:   messagelifecycle.StageSubmission,
+		Outcome: messagelifecycle.OutcomeFailed,
+	}
+	result[messagelifecycle.ReasonCode("submission.sending_setup_expired")] = messagelifecycle.Definition{
+		Stage:   messagelifecycle.StageSubmission,
+		Outcome: messagelifecycle.OutcomeFailed,
+	}
+	return result
 }
 
 func TestMessageLifecycleMigrationRejectsCatalogDrift(t *testing.T) {

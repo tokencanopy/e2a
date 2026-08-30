@@ -44,9 +44,9 @@ const fraunces = localFont({
   display: "swap",
 });
 
-const ROOT_TITLE = "e2a — Authenticated Email for AI Agents";
+const ROOT_TITLE = "e2a | The open-source email API for applications and AI agents";
 const ROOT_DESC =
-  "Authenticated email gateway for AI agents: verified sender identity, SPF/DKIM, agent-to-agent routing, conversation threading. Send and receive real email from your agent with a signed webhook or WebSocket.";
+  "Send transactional email from any product, give agents real two-way inboxes, and keep people in control. Use e2a as a hosted service or run the Apache-2.0 stack yourself.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -58,8 +58,10 @@ export const metadata: Metadata = {
   applicationName: SITE_NAME,
   keywords: [
     "email api for ai agents",
+    "open source email api",
+    "transactional email api",
+    "two way email api",
     "agent email gateway",
-    "authenticated email webhook",
     "SPF DKIM AI agents",
     "agent-to-agent email",
     "conversation id email threading",

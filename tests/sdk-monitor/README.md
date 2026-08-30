@@ -30,8 +30,8 @@ of five interfaces:
 | `api` | raw HTTP against the server's `/v1/agents/{email}/messages` (and `.../reply`) endpoints — no SDK. Catches a server-contract break distinct from an SDK break. | python (stdlib `urllib`) |
 | `python_sdk` | the published `e2a` PyPI package | python |
 | `mcp` | the deployed MCP streamable-HTTP server's `send_message` / `reply_to_message` tools | python (hand-rolled JSON-RPC over `urllib`) |
-| `ts_sdk` | the published `@e2a/sdk` npm package (v5.4.0) | node, shelled out from python |
-| `cli` | the published `@e2a/cli` npm package (v2.1.0, bin `e2a`) | node, shelled out from python |
+| `ts_sdk` | the published `@e2a/sdk` npm package | node, shelled out from python |
+| `cli` | the published `@e2a/cli` npm package (bin `e2a`) | node, shelled out from python |
 
 Anything that breaks any of those — a bad publish, a wire-contract drift, a
 packaging regression, an MCP transport change — stops that interface's
@@ -173,6 +173,8 @@ labeled by `iface`:
 | `monitor_replied` | Inbound leg received and replied to, via `iface`. |
 | `monitor_deleted` | Cleanup done for `iface`: the leg's message was trashed via `iface` (carries `inbox` + `message_id`). |
 | `monitor_stale` | A probe arrived past `MAX_AGE_MS` on `leg` (`outbound` or `reply`) for `iface`; not a success. |
+| `monitor_sweep` | The per-tick hygiene sweep moved rows in `inbox`: `trashed` live messages, `purged` from the trash. Housekeeping, never a verdict on the stack. |
+| `monitor_dropped` | A leg was abandoned rather than retried, because the failure is terminal — currently only `stage=hydrate` on a `not_found` (the message is gone, so redelivery can only 404 again). The iface falls silent and the absent-metric alert is the signal. |
 | `monitor_skip` | `iface` was skipped this tick because its config is absent (`stage=send`, currently only `mcp` without `E2A_MONITOR_MCP_URL`), or its cleanup was skipped because the interface's published client has no delete verb (`stage=cleanup`, currently always `cli`). |
 | `monitor_error` | Failure, with `stage` = `config` \| `send` \| `signature` \| `hydrate` \| `reply` \| `cleanup` \| `unknown_iface` \| `nonce_auth`, and (where applicable) `iface`. A `send`/`reply` failure includes a held (`pending_review`), terminal-`failed`, or unrecognized send-response `status` — see "Uniform send-status handling" below. A `cleanup` failure means the round trip succeeded (its `monitor_replied`/`monitor_ok` was already logged) but the trash step failed — hygiene, not an outage. |
 | `monitor_start` | Process start; lists the configured `ifaces` and whether `mcp` is configured. |
@@ -192,6 +194,29 @@ node helper it shells out to), and `cli` (via its own `emitSendResult`,
 an immediate failure: `monitor_error(stage=send` or `reply)` at send/reply
 time, not a success logged now that only surfaces later as a
 `monitor_stale` timeout once the reply never arrives.
+
+### Hygiene sweep
+
+Each tick ends by trashing and then purging up to `E2A_MONITOR_SWEEP_BUDGET`
+messages per inbox — the two agents would otherwise keep every probe the
+monitor ever sent (47k outbound rows per inbox on staging). Purge only accepts
+a message already in the trash, so the order is a requirement, not a
+preference.
+
+**The sweep may never touch a message younger than `MAX_AGE_MS`.** The tick
+returns as soon as the sends are away, but a round trip finishes later, on
+`/webhook` — so the tick's own probes are still in flight when the sweep runs,
+and the listing is newest-first unless asked otherwise. An unscoped sweep
+therefore deletes the round trip it just started: the leg 404s on hydrate or
+reply, the iface goes silent, and the alert fires for an outage the monitor
+manufactured. `_sweep_ids` pins both `sort=asc` and an `until` cutoff for this
+reason; `sort=asc` alone only postpones the collision until the backlog drains
+below one page.
+
+`MAX_AGE_MS` is exactly the right floor. A message's `created_at` is at or
+after the `sent_ms` its nonce carries, and a leg only counts while
+`now - sent_ms <= MAX_AGE_MS`, so anything past the cutoff can no longer
+produce a `monitor_ok` — purging it cannot cost a success.
 
 ### Ops contract
 
@@ -215,7 +240,8 @@ All via environment.
 | `E2A_MONITOR_NONCE_SECRET` | no | falls back to `E2A_MONITOR_WEBHOOK_SECRET` | Dedicated key for the nonce HMAC tag (see "Nonce authentication" above). Optional so protection never depends on an unset var — set it only if you want to rotate the nonce key independently of the webhook secret. |
 | `E2A_BASE_URL` | no | `https://api.e2a.dev` | API host, shared by `api`, `python_sdk`, `ts_sdk` (as `E2A_API_URL`), and `cli` (as `E2A_URL`). |
 | `E2A_MONITOR_MCP_URL` | no | — | Full streamable-HTTP MCP endpoint (e.g. `https://api.e2a.dev/mcp`), matching the prober's `E2A_PROBE_MCP_URL` convention. **Optional**: when unset, the `mcp` interface is skipped every tick (`monitor_skip`) instead of failing the whole service — see "Design decisions to review" below. |
-| `E2A_MONITOR_MAX_AGE_MS` | no | `900000` | Stale-reply cutoff. |
+| `E2A_MONITOR_MAX_AGE_MS` | no | `900000` | Stale-reply cutoff. Also the floor on what the hygiene sweep may delete — see "Hygiene sweep" below. |
+| `E2A_MONITOR_SWEEP_BUDGET` | no | `50` | Messages the hygiene sweep may touch per inbox per phase, per tick. Must stay within the endpoint's `limit` bounds (1–100): outside them the listing is a 422, which the sweep swallows as `monitor_error(stage=sweep)` and does nothing — a usable kill switch, but a deliberate one. |
 | `PORT` | no | `8080` | Cloud Run injects this. |
 
 `api`, `python_sdk`, `ts_sdk`, and `cli` are **core** interfaces: they need no
@@ -274,8 +300,8 @@ signal, not something to work around.
 ## SDK / package version bump policy
 
 `requirements.txt` pins an exact published Python SDK version (currently
-**5.4.0**); `package.json` pins exact published `@e2a/sdk` (**5.4.0**) and
-`@e2a/cli` (**2.1.0**) versions. None of these is ever a path or workspace
+**5.8.0**); `package.json` pins exact published `@e2a/sdk` (**5.8.0**) and
+`@e2a/cli` (**2.5.0**) versions. None of these is ever a path or workspace
 dependency on the corresponding source directory — installing from local
 source would defeat the entire purpose by hiding a broken publish.
 

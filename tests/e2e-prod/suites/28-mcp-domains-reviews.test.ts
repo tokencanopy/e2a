@@ -194,7 +194,7 @@ test("mcp-domains-reviews: list_pending_messages + get_pending_message + approve
   } finally {
     // Agent delete cascades to its held/sent messages; explicit and tracked
     // regardless so a mid-test throw still gets cleaned up.
-    await apiClient.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+    await apiClient.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
     untrack("agent", email);
   }
 });
@@ -212,7 +212,7 @@ test("mcp-domains-reviews: reject_message discards the held draft", async () => 
     const rereject = await callTool(mcp, "reject_message", { message_id: id, reason: "should fail" });
     assert.equal(rereject.isError, true, "re-reject of an already-resolved message must isError");
   } finally {
-    await apiClient.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+    await apiClient.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
     untrack("agent", email);
   }
 });

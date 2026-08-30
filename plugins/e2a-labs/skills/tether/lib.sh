@@ -22,14 +22,27 @@ t_load_config() {
     # shellcheck disable=SC1091
     set -a; . "${HOME}/.e2a-tether.env"; set +a
   fi
-  # 2) reuse the CLI's agent creds from `e2a login` (~/.e2a/config.json)
-  if { [ -z "${E2A_API_KEY:-}" ] || [ -z "${E2A_AGENT_EMAIL:-}" ]; } && [ -f "${HOME}/.e2a/config.json" ]; then
+  # 2) reuse the CLI's login state from `e2a login` (~/.e2a/config.json).
+  # Gated on ANY of the three being missing, not just the credentials: after
+  # `tether.sh setup` writes ~/.e2a-tether.env with E2A_API_KEY +
+  # E2A_AGENT_EMAIL (and no E2A_URL — see setup), every later load already
+  # has both credentials set from step 1, so a credentials-only gate here
+  # would skip this step forever and E2A_URL would never pick up the
+  # deployment's real api_url even though this block already parses it.
+  # Each field is only overridden when still unset (checked in Python via
+  # os.environ, reflecting what step 1 already exported) so an
+  # already-resolved credential from ~/.e2a-tether.env is never clobbered by
+  # a *different* agent the CLI happens to be logged in as.
+  if { [ -z "${E2A_API_KEY:-}" ] || [ -z "${E2A_AGENT_EMAIL:-}" ] || [ -z "${E2A_URL:-}" ]; } && [ -f "${HOME}/.e2a/config.json" ]; then
     eval "$(python3 -c 'import json,shlex,os
 try:
   d=json.load(open(os.path.expanduser("~/.e2a/config.json")))
-  if d.get("api_key"):     print("export E2A_API_KEY="+shlex.quote(d["api_key"]))
-  if d.get("agent_email"): print("export E2A_AGENT_EMAIL="+shlex.quote(d["agent_email"]))
-  if d.get("api_url"):     print("export E2A_URL="+shlex.quote(d["api_url"].rstrip("/")))
+  if not os.environ.get("E2A_API_KEY") and d.get("api_key"):
+    print("export E2A_API_KEY="+shlex.quote(d["api_key"]))
+  if not os.environ.get("E2A_AGENT_EMAIL") and d.get("agent_email"):
+    print("export E2A_AGENT_EMAIL="+shlex.quote(d["agent_email"]))
+  if not os.environ.get("E2A_URL") and d.get("api_url"):
+    print("export E2A_URL="+shlex.quote(d["api_url"].rstrip("/")))
 except Exception:pass')"
   fi
   # A ~/.e2a-tether.env written before the rename still says E2A_BASE_URL. Carry
@@ -55,14 +68,18 @@ except Exception:pass')"
   case "${E2A_API_KEY:-}" in *...*) E2A_API_KEY="";; esac
   case "${E2A_AGENT_EMAIL:-}" in tether@you.example) E2A_AGENT_EMAIL="";; esac
 
-  # EXPORTED: the transport is a child process (the e2a CLI). An unexported
-  # default here would leave the CLI on its own default host while status
-  # reports this one — a silent split-brain once the hosts diverge.
-  #
-  # E2A_URL is the CLI's deployment root (it serves the dashboard and proxies
-  # /v1), NOT the API host — so this default tracks the CLI's own default
-  # rather than forcing api.e2a.dev on it as the old E2A_BASE_URL name did.
-  export E2A_URL="${E2A_URL:-https://e2a.dev}"
+  # NO default here (deliberately unlike the old E2A_BASE_URL behavior, which
+  # forced api.e2a.dev). Sources above already covered every place tether
+  # knows to look for the deployment's real URL — an explicit env var, the
+  # tether-managed env file, or the CLI's own login state. If none of them
+  # resolved one, forcing "https://e2a.dev" here would silently hand a
+  # self-hoster's agent key to the operator's production API. Instead we
+  # leave E2A_URL exactly as we found it (unset, most likely) and export it
+  # only when non-empty, so `t_cli` falls through to the e2a CLI's OWN
+  # resolution (its stored ~/.e2a/config.json, or its own documented
+  # default) rather than tether silently overriding it with a second,
+  # divergent default.
+  [ -n "${E2A_URL:-}" ] && export E2A_URL
   [ -n "${E2A_API_KEY:-}" ] && [ -n "${E2A_AGENT_EMAIL:-}" ]
 }
 

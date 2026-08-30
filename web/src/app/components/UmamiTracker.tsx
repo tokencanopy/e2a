@@ -3,11 +3,10 @@
 import Script from "next/script";
 import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
-import { UMAMI_WEBSITE_ID } from "../../lib/site";
+import { UMAMI_WEBSITE_ID, UMAMI_COLLECTOR_ORIGIN } from "../../lib/site";
 
 export const UMAMI_TRACKER_PATH =
   "/vendor/umami/umami-v3.2.0.1ad1145d.js";
-const UMAMI_COLLECTOR_ORIGIN = "https://umami.tokencanopy.com";
 
 type UmamiPayload = Record<string, unknown> & {
   referrer?: string;
@@ -171,7 +170,11 @@ export function UmamiTracker() {
     lastTrackedURL.current = url;
   }, [isPublicPath, pathname, trackerReady]);
 
-  if (!UMAMI_WEBSITE_ID || !isPublicPath) return null;
+  // Both the website id AND the collector origin must be configured — a
+  // self-hoster who only sets one (most likely just the website id, the var
+  // .env.example presents as "the" way to enable analytics) must get no
+  // tracking at all, not a beacon silently POSTed to the wrong collector.
+  if (!UMAMI_WEBSITE_ID || !UMAMI_COLLECTOR_ORIGIN || !isPublicPath) return null;
 
   return (
     <Script

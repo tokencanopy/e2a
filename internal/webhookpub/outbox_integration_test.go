@@ -336,10 +336,10 @@ func TestOutbox_Integration_JanitorDeletesExpired(t *testing.T) {
 	// a deterministic ID so the post-sweep assertions can target it
 	// individually.
 	rows := []struct {
-		label       string
-		status      string
-		expiresAt   string
-		shouldKeep  bool
+		label      string
+		status     string
+		expiresAt  string
+		shouldKeep bool
 	}{
 		// Terminal + expired → DELETE.
 		{"processed_expired", "processed", "now() - interval '1 day'", false},

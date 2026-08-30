@@ -92,6 +92,10 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
     recordCovered("messages.getMetrics");
   });
 
+  // Explicit timeout, same rationale as the grouped variant below: the
+  // aggregate's cost is environment-dependent, and the release pipeline runs
+  // this suite against a post-conformance staging DB where the 5s default
+  // failed (2026-08-28).
   it("account.metrics() aggregates across the account", async () => {
     const flat = await client.account.metrics();
 
@@ -105,7 +109,7 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
     }
 
     recordCovered("account.metrics");
-  });
+  }, 30_000);
 
   // Split from the flat read, and the only test in this suite carrying an
   // explicit timeout. group_by=agent fans the aggregate out per agent, so its

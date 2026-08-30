@@ -5,7 +5,7 @@ import { ApiClient } from "../harness/client.ts";
 import { cleanupDomainFixture } from "../harness/domain-fixture-cleanup.ts";
 import { CloudflareDnsClient, cloudflareFixtureComment, type CloudflareDnsRecordRef } from "../harness/cloudflare-dns.ts";
 import { track } from "../harness/cleanup.ts";
-import { uniqueSlug } from "../harness/fixtures.ts";
+import { fixtureDomainSuffix, uniqueSlug } from "../harness/fixtures.ts";
 import { writeReport, fail, info } from "../harness/report.ts";
 
 // The FULL custom-domain lifecycle — the one flow prod e2e structurally can't do
@@ -18,7 +18,11 @@ import { writeReport, fail, info } from "../harness/report.ts";
 //   CLOUDFLARE_API_TOKEN  — a DNS:Edit token scoped to the conformance zone ONLY
 //   CLOUDFLARE_ZONE_ID    — that zone's id
 //   CLOUDFLARE_ZONE_NAME  — that zone's apex (e.g. trymnexa.com); conformance
-//                           domains are minted as <slug>.<zone-name>
+//                           domains are minted as
+//                           <slug>.<fixtureDomainSuffix(apiUrl, zone-name)> —
+//                           `staging.<zone>` off-prod so delete-time SES
+//                           deprovision stays inside the staging IAM fence
+//                           (see harness/fixtures.ts)
 //
 // TWO NON-OBVIOUS FACTS the server's verify enforces (learned the hard way):
 //  1. `verified` requires the ownership TXT *AND* the inbound MX record pointing
@@ -93,7 +97,7 @@ async function waitForPublicDns(domain: string, txtValue: string, mxHost: string
 }
 
 test("domain lifecycle: register → DNS TXT+MX → verify (happy path) → custom-domain agent → teardown", { skip }, async () => {
-  const domain = `${uniqueSlug("dl")}.${CF_ZONE_NAME}`;
+  const domain = `${uniqueSlug("dl")}.${fixtureDomainSuffix(client.env.apiUrl, CF_ZONE_NAME!)}`;
   const dnsRecords: CloudflareDnsRecordRef[] = [];
   let agentEmail: string | undefined;
   track("domain", domain);
@@ -189,7 +193,7 @@ test("domain verify NEGATIVE control: an unpublished domain does NOT verify (gua
   // test above into a tautology (green while the published DNS is never consulted).
   // This asserts the real DNS path is live. Uses its own throwaway domain that we
   // never verify for real, so poisoning its 30-min negative cache is harmless.
-  const domain = `${uniqueSlug("dlneg")}.${CF_ZONE_NAME}`;
+  const domain = `${uniqueSlug("dlneg")}.${fixtureDomainSuffix(client.env.apiUrl, CF_ZONE_NAME!)}`;
   track("domain", domain);
   try {
     const reg = await client.post("/v1/domains", { body: { domain } });

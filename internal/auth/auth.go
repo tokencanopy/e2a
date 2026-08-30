@@ -268,8 +268,8 @@ func writeCLIHandoffPage(store *identity.Store, w http.ResponseWriter, r *http.R
 // CLI login params (cli_callback, cli_state) are encoded into the OAuth state
 // parameter so they survive the redirect through Google without relying on cookies.
 // return_to (optional) is a same-origin server path the user resumes on after
-// callback success. MCP OAuth paths plus the dashboard's consolidated review
-// and threaded inbox routes are permitted.
+// callback success. MCP OAuth paths plus the dashboard's sender setup,
+// consolidated review, and threaded inbox routes are permitted.
 func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	cliCallback := r.URL.Query().Get("cli_callback")
 	cliState := r.URL.Query().Get("cli_state")
@@ -307,8 +307,8 @@ func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 // validateReturnToPath enforces the same-origin / known-route allow-list
 // for return_to values. Accepting an arbitrary URL would turn /api/auth/login
 // into an open redirector that an attacker could chain with phishing-class
-// social engineering. The OAuth flow owns /oauth2/*; the two exact dashboard
-// routes preserve review-email and post-approval thread deep links.
+// social engineering. The OAuth flow owns /oauth2/*; exact application routes
+// preserve sender setup, review-email, and post-approval thread deep links.
 func validateReturnToPath(raw string) error {
 	if strings.ContainsAny(raw, "\\\n\r\x00") {
 		return errors.New("return_to contains forbidden characters")
@@ -322,6 +322,7 @@ func validateReturnToPath(raw string) error {
 		return errors.New("return_to must be a path with no scheme or authority")
 	}
 	allowed := strings.HasPrefix(u.Path, "/oauth2/") ||
+		u.Path == "/get-started" ||
 		u.Path == "/reviews" ||
 		u.Path == "/inboxes/messages"
 	if !allowed {
@@ -336,6 +337,7 @@ func validateReturnToPath(raw string) error {
 	cleaned := path.Clean(u.Path)
 	cleanedAllowed := strings.HasPrefix(cleaned, "/oauth2/") ||
 		cleaned == "/oauth2" ||
+		cleaned == "/get-started" ||
 		cleaned == "/reviews" ||
 		cleaned == "/inboxes/messages"
 	if !cleanedAllowed {

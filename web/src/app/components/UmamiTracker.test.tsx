@@ -3,6 +3,7 @@ import { UmamiTracker } from "./UmamiTracker";
 
 let mockPathname = "/";
 let mockWebsiteId = "website_test";
+let mockCollectorOrigin = "https://umami.example.test";
 
 jest.mock("next/navigation", () => ({
   usePathname: () => mockPathname,
@@ -11,6 +12,9 @@ jest.mock("next/navigation", () => ({
 jest.mock("../../lib/site", () => ({
   get UMAMI_WEBSITE_ID() {
     return mockWebsiteId;
+  },
+  get UMAMI_COLLECTOR_ORIGIN() {
+    return mockCollectorOrigin;
   },
 }));
 
@@ -44,6 +48,7 @@ const track = jest.fn<void, [TrackArgument]>();
 beforeEach(() => {
   mockPathname = "/";
   mockWebsiteId = "website_test";
+  mockCollectorOrigin = "https://umami.example.test";
   window.history.replaceState({}, "", "/");
   Object.defineProperty(window, "umami", {
     configurable: true,
@@ -72,6 +77,37 @@ describe("UmamiTracker", () => {
     expect(track).not.toHaveBeenCalled();
   });
 
+  it("does not load or track when only the website id is set (no collector origin configured)", async () => {
+    // Regression: the collector host used to be a hardcoded literal, so
+    // setting NEXT_PUBLIC_UMAMI_WEBSITE_ID alone (the var .env.example
+    // presents as "the" way to enable analytics) silently beaconed to the
+    // upstream operator's collector. Both vars are now required.
+    mockCollectorOrigin = "";
+    render(<UmamiTracker />);
+
+    await act(async () => {});
+    expect(
+      document.querySelector(
+        'script[src="/vendor/umami/umami-v3.2.0.1ad1145d.js"]',
+      ),
+    ).toBeNull();
+    expect(track).not.toHaveBeenCalled();
+  });
+
+  it("does not load or track when only the collector origin is set (no website id configured)", async () => {
+    mockWebsiteId = "";
+    mockCollectorOrigin = "https://umami.example.test";
+    render(<UmamiTracker />);
+
+    await act(async () => {});
+    expect(
+      document.querySelector(
+        'script[src="/vendor/umami/umami-v3.2.0.1ad1145d.js"]',
+      ),
+    ).toBeNull();
+    expect(track).not.toHaveBeenCalled();
+  });
+
   it("loads an inert tracker and manually records one public pageview without query data", async () => {
     window.history.replaceState({}, "", "/?campaign=sensitive");
     render(<UmamiTracker />);
@@ -81,12 +117,10 @@ describe("UmamiTracker", () => {
       "src",
       "/vendor/umami/umami-v3.2.0.1ad1145d.js",
     );
-    expect(script).toHaveAttribute(
-      "data-host-url",
-      "https://umami.tokencanopy.com",
-    );
+    // The collector host comes from the configured env var, not a literal.
+    expect(script).toHaveAttribute("data-host-url", mockCollectorOrigin);
     expect(
-      document.querySelector('script[src^="https://umami.tokencanopy.com"]'),
+      document.querySelector(`script[src^="${mockCollectorOrigin}"]`),
     ).toBeNull();
     expect(script).toHaveAttribute("data-auto-track", "false");
     expect(script).toHaveAttribute("data-exclude-search", "true");
@@ -100,6 +134,17 @@ describe("UmamiTracker", () => {
     });
     expect(payload.url).toBe("http://localhost/");
     expect(payload.referrer).toBe("");
+  });
+
+  it("reflects a different configured collector origin verbatim", async () => {
+    mockCollectorOrigin = "https://umami.self-hosted.example";
+    render(<UmamiTracker />);
+
+    const script = document.querySelector("#tc-umami-tracker");
+    expect(script).toHaveAttribute(
+      "data-host-url",
+      "https://umami.self-hosted.example",
+    );
   });
 
   it.each([

@@ -76,14 +76,14 @@ const rateMinSnooze = 250 * time.Millisecond
 // race for minutes). 3m — 3× the 1m production window — keeps essentially all of
 // the doubling's wake-up savings while bounding worst-case re-check latency and
 // the fairness skew below. Tunable: raise it to trade lower wake-up volume for
-// higher tail latency. Well under sendRetryHorizon either way.
+// higher tail latency. Well under SendRetryHorizon either way.
 const rateMaxSnooze = 3 * time.Minute
 
-// sendRetryHorizon bounds the outage-tolerant tail: past this age (from accept) an
+// SendRetryHorizon bounds the outage-tolerant tail: past this age (from accept) an
 // outage-snoozing job stops deferring and is declared terminally failed. 72h matches
 // the industry MTA retry horizon (and the webhook deliverer's envelope) — long enough
 // to ride out a multi-hour regional SES incident, not forever.
-const sendRetryHorizon = 72 * time.Hour
+const SendRetryHorizon = 72 * time.Hour
 
 // OutboundSendArgs drives one outbound send. Args carry only the message id; the
 // worker re-reads the messages row (the source of truth) each attempt.
@@ -108,7 +108,7 @@ type SendJob struct {
 	RawMessage   []byte // composed MIME
 	SentAs       string // From identity decided at accept ("own_address"|"relay")
 	// AcceptedAt is messages.created_at — the outage tail's clock, so a job that has
-	// been snoozing through an outage past sendRetryHorizon can be terminated.
+	// been snoozing through an outage past SendRetryHorizon can be terminated.
 	AcceptedAt time.Time
 	// ScheduledAt is messages.scheduled_at for a scheduled send (zero for an
 	// immediate one). The retry horizon is measured from max(AcceptedAt,
@@ -158,7 +158,7 @@ func (j *SendJob) pastRetryHorizon() bool {
 	// outage tail starts when it fires, not when it was accepted, so a >72h-out
 	// schedule isn't terminally failed on its very first attempt.
 	start := j.fireTime()
-	return !start.IsZero() && time.Since(start) > sendRetryHorizon
+	return !start.IsZero() && time.Since(start) > SendRetryHorizon
 }
 
 // submissionAnchor is this job's acceptance→terminal SLI baseline — see the
@@ -246,10 +246,23 @@ type RateGate interface {
 // internal/identity in the binary. ClaimSend atomically checks that the message
 // and agent are live and persists delivery_status='sending' for the stamped River
 // job before provider I/O begins.
+// DailyQuotaDeferredError is returned by Store.ClaimSend when the owning
+// account's per-day send cap is exhausted at fire time. The store has already
+// released the send claim; the worker snoozes the job until RetryAt (the next
+// UTC midnight, when the daily window resets) instead of failing the message.
+type DailyQuotaDeferredError struct {
+	RetryAt time.Time
+}
+
+func (e *DailyQuotaDeferredError) Error() string {
+	return fmt.Sprintf("daily send cap exhausted; deferred until %s", e.RetryAt.Format(time.RFC3339))
+}
+
 type Store interface {
 	// ClaimSend returns nil when the message is gone, trashed, terminal, or owned
-	// by a different River job.
-	// (agent-delete cascade / TTL) — the worker treats that as a no-op.
+	// by a different River job. It returns *DailyQuotaDeferredError (claim
+	// released) when the account's daily send cap is exhausted at fire time.
+	// (agent-delete cascade / TTL) — the worker treats a nil job as a no-op.
 	ClaimSend(ctx context.Context, messageID string, jobID int64) (*SendJob, error)
 	// ReleaseSend clears a side-effect-free attempt before River backoff.
 	ReleaseSend(ctx context.Context, messageID string, jobID int64) error
@@ -347,6 +360,17 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 	observedAt := jobObservationTime(job)
 	j, err := w.store.ClaimSend(ctx, job.Args.MessageID, job.ID)
 	if err != nil {
+		// Daily-cap deferral: the store already released the claim; park the
+		// job until the messages_day window resets (next UTC midnight). Not a
+		// failure — the send fires unchanged tomorrow.
+		var dqd *DailyQuotaDeferredError
+		if errors.As(err, &dqd) {
+			delay := time.Until(dqd.RetryAt)
+			if delay < time.Minute {
+				delay = time.Minute
+			}
+			return river.JobSnooze(delay)
+		}
 		return err // DB error — retryable
 	}
 	if j == nil {
@@ -418,7 +442,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 					return err
 				}
 				_ = w.ramp.Release(ctx, j.MessageID)
-				return river.JobCancel(fmt.Errorf("sending ramp unavailable past %s horizon: %w", sendRetryHorizon, rerr))
+				return river.JobCancel(fmt.Errorf("sending ramp unavailable past %s horizon: %w", SendRetryHorizon, rerr))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after ramp-check failure: %w", err)
@@ -434,7 +458,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 				if err := w.ramp.Release(ctx, j.MessageID); err != nil {
 					return fmt.Errorf("release ramp reservation after timeout: %w", err)
 				}
-				return river.JobCancel(fmt.Errorf("sending ramp deferred past %s horizon", sendRetryHorizon))
+				return river.JobCancel(fmt.Errorf("sending ramp deferred past %s horizon", SendRetryHorizon))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after ramp deferral: %w", err)
@@ -470,7 +494,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 				if w.ramp != nil && j.rampEligible() {
 					_ = w.ramp.Release(ctx, j.MessageID)
 				}
-				return river.JobCancel(fmt.Errorf("send rate gate unavailable past %s horizon: %w", sendRetryHorizon, rerr))
+				return river.JobCancel(fmt.Errorf("send rate gate unavailable past %s horizon: %w", SendRetryHorizon, rerr))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after rate-gate failure: %w", err)
@@ -488,7 +512,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 						return fmt.Errorf("release ramp reservation after send-rate timeout: %w", err)
 					}
 				}
-				return river.JobCancel(fmt.Errorf("send rate deferred past %s horizon", sendRetryHorizon))
+				return river.JobCancel(fmt.Errorf("send rate deferred past %s horizon", SendRetryHorizon))
 			}
 			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
 				return fmt.Errorf("release outbound send claim after rate deferral: %w", err)
@@ -595,7 +619,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 	// Provider outage (relay unreachable) — snooze WITHOUT burning an attempt so a
 	// multi-hour SES incident defers instead of exhausting MaxSendAttempts and
 	// mass-firing false email.failed (§8 circuit breaker). Bounded by the retry
-	// horizon: once the accept is older than sendRetryHorizon, give up terminally
+	// horizon: once the accept is older than SendRetryHorizon, give up terminally
 	// (provenance 'local': the provider never confirmed a rejection).
 	if out.Outage {
 		if j.pastRetryHorizon() {
@@ -605,7 +629,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 			if w.ramp != nil && j.rampEligible() {
 				_ = w.ramp.Release(ctx, j.MessageID)
 			}
-			return fmt.Errorf("outbound send failed (provider outage past %s horizon): %w", sendRetryHorizon, out.Err)
+			return fmt.Errorf("outbound send failed (provider outage past %s horizon): %w", SendRetryHorizon, out.Err)
 		}
 		if err := w.store.RecordTemporaryFailure(ctx, j.MessageID, job.ID, job.Attempt, observedAt, out.Err.Error()); err != nil {
 			return fmt.Errorf("record outbound provider outage and release claim: %w", err)

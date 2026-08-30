@@ -1,0 +1,67 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/tokencanopy/e2a/internal/delegated"
+	"github.com/tokencanopy/e2a/internal/identity"
+)
+
+// DelegatedVerifier is the narrow seam over delegated.Verifier so tests
+// can substitute outcomes without an issuer.
+type DelegatedVerifier interface {
+	Verify(ctx context.Context, bearer string) (*delegated.Claims, error)
+}
+
+// SetDelegatedVerifier wires the delegated-token verifier (config
+// delegated.enabled). Nil (the default) keeps delegated-owned tokens
+// failing authentication — ownership itself is decided by Classify and
+// never depends on this being set.
+func (a *API) SetDelegatedVerifier(v DelegatedVerifier) { a.delegated = v }
+
+// errDelegatedInvalid classifies every delegated 401: the bare Bearer
+// challenge with no check-specific detail (which check failed — type,
+// signature, claim, unknown subject, or verifier disabled — must not be
+// distinguishable on the wire).
+var errDelegatedInvalid = errors.New("invalid delegated token")
+
+// principalFromDelegatedToken owns every positively classified at+jwt
+// bearer. Verification and the one exact (issuer, subject) mapping
+// lookup produce an account-scoped principal with no bound agent —
+// exactly an account API key's authority. Failures split into the two
+// wire classes: invalid (401) and unavailable (503, via
+// identity.ErrAuthUnavailable).
+func (a *API) principalFromDelegatedToken(r *http.Request, bearer string) (*identity.Principal, error) {
+	if a.delegated == nil {
+		// Disabled verifier: delegated-owned tokens still never fall
+		// through to any other credential path.
+		a.emit().DelegatedAuthFailure("invalid_token")
+		return nil, errDelegatedInvalid
+	}
+	claims, err := a.delegated.Verify(r.Context(), bearer)
+	if err != nil {
+		if errors.Is(err, delegated.ErrUnavailable) {
+			a.emit().DelegatedAuthFailure("verifier_unavailable")
+			return nil, fmt.Errorf("%w: delegated verifier", identity.ErrAuthUnavailable)
+		}
+		a.emit().DelegatedAuthFailure("invalid_token")
+		return nil, errDelegatedInvalid
+	}
+	user, err := a.store.GetUserByExternalPrincipal(r.Context(), claims.Issuer, claims.Subject)
+	if err != nil {
+		// The token may well be valid — the mapping store couldn't say.
+		// 503, not 401, so a database blip doesn't read as revocation.
+		a.emit().DelegatedAuthFailure("identity_store_failure")
+		return nil, fmt.Errorf("%w: identity store", identity.ErrAuthUnavailable)
+	}
+	if user == nil {
+		// Unknown subject: plain 401, indistinguishable from any other
+		// invalid token (no existence oracle).
+		a.emit().DelegatedAuthFailure("unknown_subject")
+		return nil, errDelegatedInvalid
+	}
+	return &identity.Principal{User: user, Scope: identity.ScopeAccount}, nil
+}

@@ -1,0 +1,12 @@
+-- 109_usage_events_units.sql
+--
+-- Recipient-unit metering: a metered outbound message consumes one unit per
+-- accepted recipient (to ∪ cc ∪ bcc, deduplicated), not one unit per message.
+-- usage_events keeps one row per metered message; `units` records how many
+-- deliveries that row represents so per-recipient consumption stays auditable
+-- without changing the table's cardinality. Existing rows backfill to 1 via
+-- the DEFAULT — historically every metered message counted as exactly one
+-- unit, so DEFAULT 1 is the correct retroactive value, not an approximation.
+--
+-- ADD COLUMN with a constant DEFAULT is metadata-only on PG11+ (no rewrite).
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS units INTEGER NOT NULL DEFAULT 1;

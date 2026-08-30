@@ -108,10 +108,12 @@ describe("DomainCard — DNS records section", () => {
     expect(screen.queryByText("Prove domain ownership (also drives SPF check)")).not.toBeInTheDocument();
   });
 
-  it("shows the Cloudflare MCP reminder when DNS records are expanded", async () => {
+  // The Cloudflare-MCP reminder moved up to the page's agent-prompt card,
+  // where it is visible before the user starts hand-copying records.
+  it("does not repeat the Cloudflare MCP reminder in the DNS records", async () => {
     renderCard(makeDomain());
     await userEvent.click(screen.getByRole("button", { name: /View DNS records/ }));
-    expect(screen.getByText("Cloudflare managed?")).toBeInTheDocument();
+    expect(screen.queryByText(/Cloudflare/)).not.toBeInTheDocument();
   });
 
   it("splits MX priority into its own field instead of embedding it in the value", async () => {

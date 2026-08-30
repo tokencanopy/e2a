@@ -58,6 +58,7 @@ from typing import Optional, Protocol
 
 from e2a.v1 import (
     E2AClient,
+    E2ANotFoundError,
     E2AWebhookSignatureError,
     construct_event,
     is_email_received,
@@ -99,6 +100,23 @@ MCP_URL = os.environ.get("E2A_MONITOR_MCP_URL", "")
 # A reply older than this is a stale redelivery, not a fresh success — it must
 # never refresh the alert's "last seen" clock.
 MAX_AGE_MS = int(os.environ.get("E2A_MONITOR_MAX_AGE_MS", "900000"))
+# Per-tick ceiling on the hygiene sweep, per inbox and per phase. The tick
+# creates a handful of messages, so the surplus also drains backlog from
+# earlier ticks without turning the monitor into a bulk-delete client.
+SWEEP_BUDGET = int(os.environ.get("E2A_MONITOR_SWEEP_BUDGET", "50"))
+# How old a message must be before the sweep may touch it. NOT a tuning knob:
+# the sweep runs at the end of /tick, but a round trip completes LATER, on
+# /webhook, so the tick's own probes are still in flight when it runs. Below
+# this age a purge destroys the monitor's own probe and manufactures the
+# outage it exists to detect.
+#
+# MAX_AGE_MS is exactly the right floor, and provably so: a message's
+# created_at is >= the sent_ms its nonce carries (the row is written at or
+# after the send), and a leg only counts when now - sent_ms <= MAX_AGE_MS. So
+# a row older than this cutoff can no longer produce anything but
+# monitor_stale, and purging it cannot cost a success. The extra minute is
+# margin for clock skew between this container and the server.
+SWEEP_MIN_AGE_MS = MAX_AGE_MS + 60_000
 PORT = int(os.environ.get("PORT", "8080"))
 
 # Every interface this service exercises, in the fixed order /tick fires them.
@@ -621,6 +639,92 @@ def _cleanup(strategy: Interface, iface: str, nonce: str, *, inbox: str, message
     log("monitor_deleted", iface=iface, nonce=nonce, inbox=inbox, message_id=message_id)
 
 
+def _sweep_api(path: str, method: str = "GET") -> dict:
+    """One raw-API call for the hygiene sweep.
+
+    Deliberately NOT routed through an Interface strategy: the per-leg
+    _cleanup already exercises each interface's delete verb, which is the
+    coverage that matters, and the cli interface has no delete verb at all.
+    The sweep is housekeeping, so it takes the shortest reliable path."""
+    req = urllib.request.Request(f"{BASE_URL.rstrip('/')}{path}", method=method)
+    req.add_header("Authorization", f"Bearer {API_KEY}")
+    req.add_header("User-Agent", USER_AGENT)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read()
+    return json.loads(raw.decode("utf-8", "replace")) if raw else {}
+
+
+def _sweep_ids(inbox: str, *, deleted: bool) -> list:
+    """Up to SWEEP_BUDGET message ids from one inbox, oldest first and none
+    of them younger than SWEEP_MIN_AGE_MS.
+
+    direction=all and read_status=all are both load-bearing: the endpoint
+    defaults to inbound-only, and for inbound to unread-only, so the defaults
+    would walk straight past every outbound copy — which is precisely the
+    residue this sweep exists to clear (the per-leg _cleanup trashes the
+    RECEIVED copy; the sent copy in the opposite folder was never in scope).
+
+    So are the other two. `until` is the correctness boundary: the listing is
+    newest-first by default, so an unscoped page is the tick's own in-flight
+    probes — the sweep would eat the round trip it just started and the
+    interface would go silent (see SWEEP_MIN_AGE_MS). `sort=asc` then aims
+    the budget at the oldest residue, which is what the sweep is FOR; on its
+    own it would only postpone the collision until the backlog drained below
+    one page, so both are required, not alternatives."""
+    cutoff = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime((time.time() * 1000 - SWEEP_MIN_AGE_MS) / 1000),
+    )
+    q = (
+        f"direction=all&read_status=all&sort=asc&limit={SWEEP_BUDGET}"
+        f"&until={cutoff}"
+        f"{'&deleted=true' if deleted else ''}"
+    )
+    page = _sweep_api(f"/v1/agents/{urllib.parse.quote(inbox, safe='')}/messages?{q}")
+    return [it["id"] for it in page.get("items", []) if it.get("id")]
+
+
+def _sweep_inbox(inbox: str) -> tuple:
+    """Trash this inbox's live messages, then purge its trash.
+
+    The order is a requirement, not a preference: "delete forever" only accepts
+    a message ALREADY in the trash (409 not_in_trash otherwise), so a live
+    message has to be trashed first. Trashing is idempotent, so re-trashing a
+    row an earlier pass moved is harmless.
+
+    Best-effort, exactly like _cleanup and for the same reason: this runs after
+    the tick's sends are logged, so a failure here is hygiene debt and must
+    never change the tick's status code. Cloud Scheduler reads that code as the
+    health of the client surfaces, not of our housekeeping."""
+    trashed = purged = 0
+    try:
+        for mid in _sweep_ids(inbox, deleted=False):
+            try:
+                _sweep_api(
+                    f"/v1/agents/{urllib.parse.quote(inbox, safe='')}"
+                    f"/messages/{urllib.parse.quote(mid, safe='')}",
+                    method="DELETE",
+                )
+                trashed += 1
+            except Exception:  # noqa: BLE001,S112 - held/in-flight retries next tick
+                continue
+        for mid in _sweep_ids(inbox, deleted=True):
+            try:
+                _sweep_api(
+                    f"/v1/agents/{urllib.parse.quote(inbox, safe='')}"
+                    f"/messages/{urllib.parse.quote(mid, safe='')}"
+                    "?permanent=true&confirm=DELETE",
+                    method="DELETE",
+                )
+                purged += 1
+            except Exception:  # noqa: BLE001,S112 - retries next tick
+                continue
+    except Exception as exc:  # noqa: BLE001 - a listing failure ends this pass only
+        log("monitor_error", stage="sweep", inbox=inbox,
+            error=type(exc).__name__, detail=str(exc))
+    return trashed, purged
+
+
 def handle_tick() -> tuple[int, dict]:
     """Fire one outbound leg PER interface: agent A -> agent B, nonce
     (encoding the interface) in subject and body. A per-interface send
@@ -667,6 +771,18 @@ def handle_tick() -> tuple[int, dict]:
         # Total outage across every considered interface: Cloud Scheduler
         # needs a non-2xx so a send-side blackout doesn't read as healthy.
         status_code = 500
+
+    # Hygiene, after the verdict is fixed so it cannot colour the tick. Without
+    # it the two monitor inboxes keep every message the monitor ever sent —
+    # 47k outbound copies each on staging — until unrelated deletes on that
+    # instance start timing out.
+    for inbox in (AGENT_A, AGENT_B):
+        if not inbox:
+            continue
+        swept, gone = _sweep_inbox(inbox)
+        if swept or gone:
+            log("monitor_sweep", inbox=inbox, trashed=swept, purged=gone)
+
     return status_code, {"ok": ok, "results": results}
 
 
@@ -695,6 +811,16 @@ def handle_webhook(raw_body: bytes, signature: str) -> tuple[int, dict]:
 
     try:
         email = client().inbound.from_event(event)
+    except E2ANotFoundError as exc:
+        # Terminal, not transient: the message the event names is gone, and no
+        # number of redeliveries brings it back. Answering 5xx here would ask
+        # e2a to retry a delivery that can only 404 again — one purged probe
+        # becomes an unbounded redelivery loop, which is how this was found.
+        # Drop the leg with a 200 and let the iface fall silent: the
+        # absent-metric alert is the honest signal for a lost round trip.
+        log("monitor_dropped", stage="hydrate", event_id=event.id,
+            error=type(exc).__name__, detail=str(exc))
+        return 200, {"ok": False, "stage": "hydrate", "dropped": True}
     except Exception as exc:  # noqa: BLE001
         log("monitor_error", stage="hydrate", event_id=event.id, error=type(exc).__name__, detail=str(exc))
         # 5xx so e2a retries: a transient hydration failure shouldn't silently

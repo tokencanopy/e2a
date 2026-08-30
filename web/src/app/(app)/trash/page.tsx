@@ -15,7 +15,7 @@ import {
   permanentDeleteAgent,
 } from "../../components/onboarding/api";
 import { PageShell } from "../../components/loft/PageShell";
-import { CounterpartyAvatar } from "../../components/messages/CounterpartyAvatar";
+import { Avatar } from "@e2a/ui";
 import { formatRelativeAge } from "../../../lib/relativeTime";
 import {
   deletedAgentsKey,
@@ -118,7 +118,7 @@ export default function TrashPage() {
                 marginBottom: 10,
               }}
             >
-              <CounterpartyAvatar email={a.email} name={a.name} size={28} />
+              <Avatar email={a.email} name={a.name} size={28} />
               <div className="min-w-0 flex-1">
                 <div style={{ fontSize: 14, fontWeight: 600, color: "var(--fg)" }}>
                   {a.name || a.email.split("@")[0]}

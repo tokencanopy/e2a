@@ -9,8 +9,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { PageShell } from "../../../components/loft/PageShell";
-import { Chip } from "../../../components/loft/Chip";
-import { Button } from "../../../components/loft/Button";
+import { Button, Chip } from "@e2a/ui";
 import { TemplatePreview } from "../_components/TemplatePreview";
 import {
   readErrorBody,

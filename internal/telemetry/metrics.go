@@ -207,6 +207,17 @@ type Metrics interface {
 	// upgrade_failed, internal_error}. Never label with emails or tokens.
 	WSHandshakeRejected(reason string)
 
+	// DelegatedAuthFailure counts delegated-token authentication
+	// failures by category ∈ {invalid_token, unknown_subject,
+	// verifier_unavailable, identity_store_failure}. Category-only by
+	// contract: never subjects, issuer text, or token data.
+	DelegatedAuthFailure(category string)
+
+	// DelegatedJWKSRefresh counts delegated-verifier key refresh
+	// outcomes ∈ {success, key_absent, transport_error, parse_error,
+	// rate_limited}.
+	DelegatedJWKSRefresh(outcome string)
+
 	// WSDrained counts unread messages pushed during connect-drain.
 	WSDrained(count int)
 
@@ -281,6 +292,8 @@ func (NoOp) WebhookFirstAttemptLatency(float64)           {}
 func (NoOp) WSConnected()                                 {}
 func (NoOp) WSDisconnected(string)                        {}
 func (NoOp) WSHandshakeRejected(string)                   {}
+func (NoOp) DelegatedAuthFailure(string)                  {}
+func (NoOp) DelegatedJWKSRefresh(string)                  {}
 func (NoOp) WSDrained(int)                                {}
 func (NoOp) WSSendFailure()                               {}
 func (NoOp) SetWSActive(int)                              {}
@@ -456,6 +469,14 @@ func (l *Log) WSDrained(count int) {
 
 func (l *Log) WSSendFailure() {
 	log.Printf("[metrics] event=ws.send_failure")
+}
+
+func (l *Log) DelegatedAuthFailure(category string) {
+	log.Printf("[metrics] event=delegated.auth_failure category=%s", enum(delegatedFailSet, category))
+}
+
+func (l *Log) DelegatedJWKSRefresh(outcome string) {
+	log.Printf("[metrics] event=delegated.jwks_refresh outcome=%s", enum(delegatedRefreshSet, outcome))
 }
 
 func (l *Log) SetWSActive(int) {} // gauge churns on every connect/disconnect; Prom only

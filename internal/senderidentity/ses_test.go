@@ -321,7 +321,7 @@ func TestSESProvider_AdoptionDegradesWhenAccountIDUnavailable(t *testing.T) {
 		},
 	}
 
-	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Provision error = %v, want degraded ErrIdentityNotOwned when the account id is unavailable", err)
 	}
 	if len(stub.tagInputs) != 0 {
@@ -598,16 +598,17 @@ func TestSESProvider_ProvisionConfiguresMailFrom(t *testing.T) {
 	stub := &stubSESAPI{}
 	p := NewSESProvider(stub, "eu-west-1", testAccountID)
 
-	res, err := p.Provision(context.Background(), "acme.com", "e2a202606", pkcs1)
+	res, err := p.Provision(context.Background(), "acme.com", "e2a202606", pkcs1, ProvisionMeta{})
 	if err != nil {
 		t.Fatalf("Provision error: %v", err)
 	}
 	if res.Status != StatusPending {
 		t.Fatalf("want pending after provision, got %q", res.Status)
 	}
-	if stub.createInput == nil || len(stub.createInput.Tags) != 1 ||
-		stub.createInput.Tags[0].Key == nil || *stub.createInput.Tags[0].Key != managedIdentityTagKey ||
-		stub.createInput.Tags[0].Value == nil || *stub.createInput.Tags[0].Value != managedIdentityTagValue {
+	// The ownership tag is the anchor isManagedIdentity reads; the identity
+	// now also carries best-effort classification tags alongside it, pinned
+	// exhaustively by TestSESProvider_ProvisionIdentityTags.
+	if stub.createInput == nil || tagMap(stub.createInput.Tags)[managedIdentityTagKey] != managedIdentityTagValue {
 		t.Fatalf("created identity is missing ownership tag: %+v", stub.createInput)
 	}
 	// Configured the custom MAIL FROM on the identity.
@@ -646,7 +647,7 @@ func TestSESProvider_ProvisionAlreadyExistsStillSetsMailFrom(t *testing.T) {
 	// FROM must still be (re)configured.
 	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
-	res, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1)
+	res, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1, ProvisionMeta{})
 	if err != nil {
 		t.Fatalf("Provision error: %v", err)
 	}
@@ -893,7 +894,7 @@ func TestSESProvider_ProvisionRefusesForeignConfiguration(t *testing.T) {
 			},
 		}
 		p := NewSESProvider(stub, "us-east-1", testAccountID)
-		if _, err := p.Provision(context.Background(), "shared-config.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		if _, err := p.Provision(context.Background(), "shared-config.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 			t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
 		}
 		if len(stub.tagInputs) != 0 {
@@ -918,7 +919,7 @@ func TestSESProvider_ProvisionRefusesForeignConfiguration(t *testing.T) {
 			},
 		}
 		p := NewSESProvider(stub, "us-east-1", testAccountID)
-		if _, err := p.Provision(context.Background(), "shared-policy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		if _, err := p.Provision(context.Background(), "shared-policy.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 			t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
 		}
 		if len(stub.tagInputs) != 0 {
@@ -949,7 +950,7 @@ func TestSESProvider_ProvisionAdoptsProvablyOwnIdentity(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	res, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1)
+	res, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1, ProvisionMeta{})
 	if err != nil {
 		t.Fatalf("Provision error = %v, want adoption to succeed", err)
 	}
@@ -1009,7 +1010,7 @@ func TestSESProvider_RefuseAdoptionOutsideProduction(t *testing.T) {
 		}
 		p := &SESProvider{api: stub, region: "us-east-1", refuseAdoption: true}
 
-		if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+		if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 			t.Fatalf("Provision error = %v, want ErrIdentityNotOwned when refuseAdoption is set", err)
 		}
 		if len(stub.tagInputs) != 0 {
@@ -1062,7 +1063,7 @@ func TestSESProvider_AdoptIdentityUsesResolvedPartitionInARN(t *testing.T) {
 		},
 	}
 
-	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); err != nil {
+	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1, ProvisionMeta{}); err != nil {
 		t.Fatalf("Provision error = %v, want adoption to succeed", err)
 	}
 	if len(stub.tagInputs) != 1 {
@@ -1095,7 +1096,7 @@ func TestSESProvider_ProvisionRefusesMismatchedSelector(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Provision(context.Background(), "shared.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Provision(context.Background(), "shared.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
 	}
 	if len(stub.tagInputs) != 0 {
@@ -1127,7 +1128,7 @@ func TestSESProvider_ProvisionRefusesAWSManagedDkimOrigin(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Provision(context.Background(), "easy-dkim.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Provision(context.Background(), "easy-dkim.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
 	}
 	if len(stub.tagInputs) != 0 {
@@ -1146,7 +1147,7 @@ func TestSESProvider_ProvisionAlreadyTaggedDoesNotRetag(t *testing.T) {
 	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Provision(context.Background(), "already-owned.example", "e2a202607", pkcs1); err != nil {
+	if _, err := p.Provision(context.Background(), "already-owned.example", "e2a202607", pkcs1, ProvisionMeta{}); err != nil {
 		t.Fatalf("Provision error: %v", err)
 	}
 	if len(stub.tagInputs) != 0 {
@@ -1178,7 +1179,7 @@ func TestSESProvider_ProvisionAdoptionTagFailurePropagates(t *testing.T) {
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1); !errors.Is(err, boom) {
+	if _, err := p.Provision(context.Background(), "legacy.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, boom) {
 		t.Fatalf("Provision error = %v, want the TagResource error to propagate", err)
 	}
 	if stub.dkimInput != nil || stub.mailFromInput != nil {
@@ -1268,7 +1269,7 @@ func TestSESProvider_ProvisionAdoptionAccessDeniedRefusesNotRetries(t *testing.T
 	}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Provision(context.Background(), "denied.example", "e2a202607", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Provision(context.Background(), "denied.example", "e2a202607", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned for a permanently denied TagResource call", err)
 	}
 	if stub.dkimInput != nil || stub.mailFromInput != nil {
@@ -1391,7 +1392,7 @@ func TestSESProvider_RefusesUnmanagedExistingIdentity(t *testing.T) {
 	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}, unmanaged: true}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Provision(context.Background(), "shared.example", "sel", pkcs1); !errors.Is(err, ErrIdentityNotOwned) {
+	if _, err := p.Provision(context.Background(), "shared.example", "sel", pkcs1, ProvisionMeta{}); !errors.Is(err, ErrIdentityNotOwned) {
 		t.Fatalf("Provision error = %v, want ErrIdentityNotOwned", err)
 	}
 	if stub.dkimInput != nil || stub.mailFromInput != nil {
@@ -1409,7 +1410,7 @@ func TestSESProvider_ProvisionPropagatesMailFromError(t *testing.T) {
 	// must surface the error so River retries (not silently return pending).
 	stub := &stubSESAPI{putErr: errors.New("throttled")}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
-	if _, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1); err == nil {
+	if _, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1, ProvisionMeta{}); err == nil {
 		t.Fatal("expected PutEmailIdentityMailFromAttributes error to propagate")
 	}
 }
@@ -1421,7 +1422,7 @@ func TestSESProvider_ProvisionPropagatesReplacementDkimError(t *testing.T) {
 	stub := &stubSESAPI{createErr: &sestypes.AlreadyExistsException{}, putDkimErr: boom}
 	p := NewSESProvider(stub, "us-east-1", testAccountID)
 
-	if _, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1); !errors.Is(err, boom) {
+	if _, err := p.Provision(context.Background(), "acme.com", "sel", pkcs1, ProvisionMeta{}); !errors.Is(err, boom) {
 		t.Fatalf("expected DKIM update error to propagate, got %v", err)
 	}
 	if stub.mailFromInput != nil {

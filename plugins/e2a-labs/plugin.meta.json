@@ -3,7 +3,7 @@
 
   "name": "e2a-labs",
   "displayName": "e2a Labs",
-  "version": "0.2.1",
+  "version": "0.3.1",
   "license": "Apache-2.0",
   "homepage": "https://e2a.dev",
   "repository": "https://github.com/tokencanopy/e2a",
@@ -12,7 +12,7 @@
   "author": {
     "name": "TokenCanopy",
     "url": "https://e2a.dev",
-    "email": "support@e2a.dev"
+    "email": "support@agents.e2a.dev"
   },
 
   "keywords": ["email", "agents", "automation", "experimental"],

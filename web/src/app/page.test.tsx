@@ -43,19 +43,44 @@ describe("Landing page", () => {
     expect(
       screen.getByRole("heading", {
         level: 1,
-        name: /Build the best email agents with e2a/i,
+        name: "The open-source email API for applications and AI agents.",
       }),
     ).toBeInTheDocument();
-    // The hero leads with the product promise and makes the first use cases
-    // explicit rather than asking a visitor to infer what e2a is for.
     expect(
-      screen.getByText(/e2a gives every agent a real, authenticated inbox/i),
+      screen.getByText(
+        /Send transactional email from any product, give agents real two-way inboxes, and keep people in control\./i,
+      ),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Use e2a as a hosted service or run the Apache-2\.0 stack yourself\./i,
+      ),
+    ).toBeInTheDocument();
+    const audience = screen.getByText(
+      /For developers, agent-native teams, and businesses building email into their products and workflows\./i,
+    );
+    expect(audience).toBeInTheDocument();
+    expect(audience).toHaveStyle({ color: "var(--fg-muted)" });
+    expect(
+      screen.getByRole("link", { name: /^Send from your app$/i }),
+    ).toHaveAttribute("href", "/transactional-email-api");
+    expect(
+      screen.getByRole("link", { name: /^Give an agent an inbox$/i }),
+    ).toHaveAttribute("href", "/get-started");
   });
 
   it("renders the e2a wordmark", () => {
     render(<Home />);
     expect(screen.getAllByText("e2a").length).toBeGreaterThan(0);
+  });
+
+  // Self-host builds have no /pricing route (lib/site.PRICING_PATH is unset
+  // in jest, matching a build without NEXT_PUBLIC_PRICING_PATH), so the nav
+  // must render no Pricing link rather than a 404. The hosted branch is
+  // covered in page.pricing-nav.hosted.test.tsx.
+  it("renders no Pricing link when no pricing path is configured", () => {
+    render(<Home />);
+    expect(screen.queryByRole("link", { name: "Pricing" })).toBeNull();
   });
 
   // The nav groups into Quick start / Product / Resources — a flat row of
@@ -150,15 +175,19 @@ describe("Landing page", () => {
     }
   });
 
-  // Onboarding is agent-native: the first thing the page asks you to do is
-  // install the plugin into a coding agent, not install an SDK. The SDK/CLI
-  // exist, but as the "wiring e2a into your own service" escape hatch.
-  it("leads onboarding with the plugin, not the SDK", () => {
+  it("presents application and agent onboarding as equal starting points", () => {
     render(<Home />);
     expect(
       screen.getByRole("heading", {
-        name: /Install the plugin\. Your agent has an inbox\./i,
+        name: /Start with the email path you need\./i,
       }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Send from your application")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /Give an agent an inbox/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /Install the plugin\. Your agent has an inbox\./i }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/claude plugin install e2a@e2a/),
@@ -168,14 +197,25 @@ describe("Landing page", () => {
     ).toBeInTheDocument();
   });
 
-  // The SDK path exists, but as the step AFTER onboarding — for people
-  // already running an agent framework, not as the way in.
-  it("offers the SDK path for existing agent frameworks, after the quick start", () => {
+  it("offers the SDK path to ordinary applications without requiring an agent framework", () => {
     render(<Home />);
     expect(
-      screen.getByRole("heading", { name: /Already have an agent framework\?/i }),
+      screen.getByRole("heading", { name: /Send from any application\./i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/LangChain, Google ADK/)).toBeInTheDocument();
+    expect(screen.getByText(/No agent framework is required/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Transactional email guide/i }),
+    ).toHaveAttribute("href", "/transactional-email-api");
+  });
+
+  it("answers whether conventional software can use e2a", () => {
+    render(<Home />);
+    expect(
+      screen.getByText("Can e2a be used as a general transactional email API?"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Any application can use e2a's HTTP API and TypeScript or Python SDKs/i),
+    ).toBeInTheDocument();
   });
 
   it("shows the use cases section", () => {
@@ -185,6 +225,7 @@ describe("Landing page", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Support and intake")).toBeInTheDocument();
     expect(screen.getAllByText("Procurement").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/verified agent identity/i)).not.toBeInTheDocument();
   });
 
   it("shows the human-in-the-loop section", () => {
@@ -200,28 +241,19 @@ describe("Landing page", () => {
     expect(getStartedLinks.length).toBeGreaterThan(0);
   });
 
-  // Regression: the CTA button rows were `inline-flex`, so in the hero the
-  // "What is email infrastructure…" explainer link (itself inline) flowed
-  // onto the SAME line and sat jammed against "Get started free" instead of
-  // stacking above it. jsdom doesn't compute layout, so the guard is
-  // structural: every CTA row must be a block-level flex container.
+  // CTA rows must be block-level flex containers so their buttons wrap
+  // together cleanly at narrow widths.
   it("renders the CTA button rows as block-level flex containers", () => {
     render(<Home />);
     const rows = screen
       .getAllByRole("link", { name: /Get started free/ })
       .map((link) => link.parentElement!);
-    expect(rows).toHaveLength(2); // hero + closing CTA
+    expect(rows).toHaveLength(1); // closing CTA
     for (const row of rows) {
       const classes = row.className.split(/\s+/);
       expect(classes).toContain("flex");
       expect(classes).not.toContain("inline-flex");
     }
-    // The hero explainer link the row collided with is still present above.
-    expect(
-      screen.getByRole("link", {
-        name: /What is email infrastructure for AI agents\?/,
-      }),
-    ).toBeInTheDocument();
   });
 });
 
@@ -250,6 +282,9 @@ describe("FAQ and structured data", () => {
     expect(
       screen.getByText(/The inbox belongs to the agent rather than to a human/),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/real, authenticated email address/i),
+    ).not.toBeInTheDocument();
   });
 
   it("emits a valid FAQPage whose answers match the visible ones", () => {

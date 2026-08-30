@@ -232,6 +232,8 @@ test("agent trash lifecycle: message-held delete guard, then delete/restore the 
   const getAfterRestore = await client.get(`/v1/agents/${encodeURIComponent(email)}`);
   assert.equal(getAfterRestore.status, 200, `expected 200 after restore, got ${getAfterRestore.status}`);
 
-  // `after()` cleanup() re-trashes this tracked throwaway agent (soft
-  // delete), matching every other suite's teardown-into-trash convention.
+  // `after()` cleanup() PERMANENTLY deletes this tracked throwaway agent
+  // (harness/cleanup.ts uses ?permanent=true), so the trash rows this suite
+  // deliberately created don't outlive the run. The soft delete above stays
+  // soft on purpose — it IS the behavior under test.
 });

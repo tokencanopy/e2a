@@ -1,6 +1,6 @@
 {
   "name": "@e2a/sdk",
-  "version": "5.7.0",
+  "version": "5.8.0",
   "description": "TypeScript SDK for e2a — build AI agents with authenticated email",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -64,7 +64,7 @@
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
     "yaml": "^2.9.0"

@@ -5905,10 +5905,40 @@ var ErrEmailConflict = errors.New("identity: email already held by another user"
 // same ref returns the existing user (created=false) without touching its
 // email or name. A different ref carrying an email that another user already
 // holds fails with ErrEmailConflict. account_class stays at the DB default.
-func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name string) (*User, bool, error) {
+//
+// A nonempty externalIssuer additionally inserts/replays the delegated
+// (issuer, externalRef) → user mapping in the SAME transaction, so a
+// native control-plane activation atomically becomes delegated-token
+// resolvable while google_subject keeps its exact legacy behavior. The
+// empty string preserves the pre-delegated contract byte-for-byte and
+// writes no mapping. A pair already attached to a different user aborts
+// with ErrExternalPrincipalConflict.
+func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name, externalIssuer string) (*User, bool, error) {
+	if externalIssuer == "" {
+		return s.provisionUser(ctx, s.pool, externalRef, email, name)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback(ctx)
+	u, created, err := s.provisionUser(ctx, tx, externalRef, email, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := provisionExternalPrincipalTx(ctx, tx, externalIssuer, externalRef, u.ID); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return u, created, nil
+}
+
+func (s *Store) provisionUser(ctx context.Context, q rowQuerier, externalRef, email, name string) (*User, bool, error) {
 	subject := "bootstrap:" + externalRef
 	u := &User{}
-	err := s.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`INSERT INTO users (id, email, name, google_subject)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (google_subject) DO NOTHING
@@ -5934,7 +5964,7 @@ func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name stri
 	// The insert was swallowed by ON CONFLICT (google_subject) DO NOTHING:
 	// this ref was already provisioned. Re-read and report the existing row.
 	u = &User{}
-	if err := s.pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`SELECT id, email, name, google_subject, created_at FROM users WHERE google_subject = $1`, subject,
 	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt); err != nil {
 		return nil, false, err
@@ -6088,6 +6118,8 @@ func (s *Store) GetDashboardStats(ctx context.Context, userID string, windowDays
 
 	// 1) Today's usage and yesterday's baseline. LEFT JOIN trick keeps
 	// the query a single row even when one or both buckets are absent.
+	// Unit note (usage-based pricing v1): outbound_count is in RECIPIENT-
+	// DELIVERIES (a message to N recipients contributes N), not messages.
 	var todayInbound, todayOutbound, yesterdayInbound, yesterdayOutbound int
 	err := s.pool.QueryRow(ctx,
 		`SELECT

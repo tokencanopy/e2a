@@ -36,6 +36,11 @@ type Config struct {
 	// Default false: single-instance/self-host deployments have no blue/green
 	// overlap and want the v2 semantics immediately.
 	LegacyJobCompat bool
+	// Reclaim is the orphan-identity reclaim policy (config
+	// sender_identity.reap_orphans and friends). Its zero value — what every
+	// self-host and every deployment that omits the block gets — reclaims
+	// nothing, so the reaper's orphan phase stays alert-only exactly as before.
+	Reclaim ReclaimConfig
 }
 
 // Manager owns the sender-identity job lifecycle on the SHARED River client
@@ -97,7 +102,7 @@ func (m *Manager) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 	river.AddWorker(w, &ReconcileV2Worker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
 	river.AddWorker(w, &PostDrainAuditWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
 	river.AddWorker(w, &LegacyReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat})
-	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat, enqueueNext: enqueueReapPage})
+	river.AddWorker(w, &ReapWorker{store: m.store, provider: m.provider, fire: m.fire, maxReconcileAttempt: m.cfg.MaxReconcileAttempts, legacyJobs: m.cfg.LegacyJobCompat, reclaim: m.cfg.Reclaim, enqueueNext: enqueueReapPage})
 
 	reaperInterval := m.cfg.ReaperInterval
 	if reaperInterval <= 0 {

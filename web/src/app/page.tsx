@@ -7,20 +7,20 @@ import { Eyebrow } from "@e2a/ui";
 import { JsonLd } from "./components/JsonLd";
 import { TokenCanopyBadge } from "./components/loft/TokenCanopyBadge";
 import { faqPage, type FaqEntry } from "../lib/jsonld";
-import { SIGN_IN_URL } from "../lib/site";
+import { PRICING_PATH, SIGN_IN_URL } from "../lib/site";
 
-// Onboarding surfaces, in the order an agent-native user meets them: install
-// the plugin in your coding agent, or point any MCP runtime at the hosted
-// server. SDKs/CLI/webhooks are the escape hatch below, not a tab — they're
-// how you'd wire e2a into your own service, not how you give an agent an inbox.
+// Agent onboarding surfaces: install the plugin in a coding agent, or point
+// any MCP runtime at the hosted server. Application integrations use the SDK
+// examples below instead of choosing one of these tabs.
 type Tab = "claude" | "codex" | "cursor" | "mcp";
 
-// The two SDKs shown side by side in the "build agent systems" section.
+// The two SDKs shown side by side in the application API section.
 type SdkTab = "python" | "ts";
 
 // Nav is three grouped menus rather than a flat row: at seven top-level
 // items plus four social icons it wrapped onto two lines at common widths.
-// Quick start stays a direct link — it's the one thing a first visit is for.
+// Start stays a direct link so visitors can choose the application or agent
+// path without first understanding e2a's resource model.
 // `newTab` is for INTERNAL routes we still want opened in a new tab, so a
 // visitor reading the landing page keeps their place instead of navigating
 // away. External links always open in one.
@@ -32,7 +32,8 @@ type NavItem = {
 };
 
 const PRODUCT_LINKS: NavItem[] = [
-  { label: "Build agent systems", href: "#build" },
+  { label: "Transactional email", href: "/transactional-email-api" },
+  { label: "Agent inboxes", href: "/email-api-for-ai-agents" },
   { label: "Human-in-the-loop", href: "#hitl" },
   { label: "Use cases", href: "/use-cases" },
   { label: "FAQ", href: "#faq" },
@@ -52,7 +53,7 @@ const USE_CASES: { eyebrow: string; title: string; desc: string; href?: string }
   { eyebrow: "Admin", title: "Scheduling and admin", desc: "Coordinate meetings, send reminders, and follow up where most people already live — their inbox.", href: "/use-cases/scheduling-agent" },
   { eyebrow: "Reception", title: "AI receptionist", desc: "Answer common inquiries, route messages, and forward conversations to the right person.", href: "/use-cases/ai-receptionist" },
   { eyebrow: "Commerce", title: "E-commerce agents", desc: "Answer order questions, handle returns, and coordinate with vendors through persistent email threads.", href: "/use-cases/ecommerce-agent" },
-  { eyebrow: "Sales", title: "Sales and follow-through", desc: "Qualify leads, reply to outreach, and keep conversations moving with a verified agent identity.", href: "/use-cases/sales-agent" },
+  { eyebrow: "Sales", title: "Sales and follow-through", desc: "Qualify leads, reply to outreach, and keep conversations moving from an agent-owned address.", href: "/use-cases/sales-agent" },
   { eyebrow: "Recruiting", title: "Recruiting agents", desc: "Coordinate candidates, schedule interviews, and keep hiring conversations organized.", href: "/use-cases/recruiting-agent" },
   { eyebrow: "Auth", title: "OTP and verification", desc: "Receive verification codes, confirmation emails, and magic links — then act on them automatically." },
   { eyebrow: "Voice", title: "Voice agents", desc: "After a call ends, your voice agent sends a follow-up, receives a reply, and keeps the thread going." },
@@ -124,6 +125,7 @@ const SOCIAL_LINKS: { label: string; href: string; aria: string; path: string }[
 
 const FOOTER_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "GitHub", href: "https://github.com/tokencanopy/e2a", external: true },
+  { label: "Transactional Email", href: "/transactional-email-api" },
   { label: "API Docs", href: "/api-docs" },
   { label: "Blog", href: "/blog" },
   { label: "Python SDK", href: "https://pypi.org/project/e2a/", external: true },
@@ -144,9 +146,14 @@ const FOOTER_LINKS: { label: string; href: string; external?: boolean }[] = [
 // type; deliberately distinct from /mcp's, which answer "how do I connect".
 const FAQ: FaqEntry[] = [
   {
+    question: "Can e2a be used as a general transactional email API?",
+    answer:
+      "Yes. Any application can use e2a's HTTP API and TypeScript or Python SDKs to send transactional email. Agent inboxes, inbound email, threading, and human approval are additional capabilities—not requirements.",
+  },
+  {
     question: "Can an AI agent have its own email address?",
     answer:
-      "Yes. e2a gives an AI agent its own real, authenticated email address — on the shared agents.e2a.dev domain, or on a domain you verify yourself — that it can send from, receive to, and reply in-thread on. The inbox belongs to the agent rather than to a human whose mailbox the agent reads, so recipients can tell agent mail apart from yours and revoking the agent never touches anyone's personal mail. The agent reaches that inbox over MCP tools, a signed webhook, a WebSocket stream, REST polling, or the TypeScript and Python SDKs.",
+      "Yes. e2a gives an AI agent its own dedicated, two-way email address on the shared agents.e2a.dev domain or on a domain you verify yourself. The inbox belongs to the agent rather than to a human whose mailbox the agent reads, so recipients can tell agent mail apart from yours and revoking the agent never touches anyone's personal mail. The agent reaches that inbox over MCP tools, a signed webhook, a WebSocket stream, REST polling, or the TypeScript and Python SDKs.",
   },
   {
     question: "How do you verify an email actually came from an AI agent?",
@@ -162,7 +169,7 @@ const FAQ: FaqEntry[] = [
   {
     question: "Is there an open-source email API for AI agents?",
     answer:
-      "Yes — e2a is Apache-2.0, and the whole stack is public at github.com/tokencanopy/e2a: the Go server and SMTP relay, the TypeScript and Python SDKs, the CLI, the MCP server, and the dashboard. You can self-host it against your own Postgres and your own outbound SMTP relay, and every feature works the same way there. The hosted service at e2a.dev runs that same open-source server image, so choosing hosted is a deployment decision rather than a different product.",
+      "Yes. e2a is Apache-2.0, and the whole stack is public at github.com/tokencanopy/e2a: the Go server and SMTP relay, the TypeScript and Python SDKs, the CLI, the MCP server, and the dashboard. You can self-host it against your own Postgres and outbound SMTP relay. The hosted service at e2a.dev runs the same open-source server image and manages the operating infrastructure for you.",
   },
   {
     question: "How do you stop an AI agent from sending an email without approval?",
@@ -227,13 +234,25 @@ export default function Home() {
           <div className="flex items-center gap-1 text-[13px]">
             <div className="hidden md:flex items-center gap-1">
               <a
-                href="#quickstart"
+                href="#start"
                 className="px-3 py-1.5 rounded-md transition hover:bg-[var(--bg-elev)]"
                 style={{ color: "var(--fg-muted)" }}
               >
-                Quick start
+                Start
               </a>
               <NavMenu label="Product" items={PRODUCT_LINKS} />
+              {/* Hosted-only: /pricing is served by the deployment's proxy from
+                  outside this app (see PRICING_PATH in lib/site). Unset means
+                  no pricing page exists — render nothing rather than a 404. */}
+              {PRICING_PATH && (
+                <a
+                  href={PRICING_PATH}
+                  className="px-3 py-1.5 rounded-md transition hover:bg-[var(--bg-elev)]"
+                  style={{ color: "var(--fg-muted)" }}
+                >
+                  Pricing
+                </a>
+              )}
               <NavMenu label="Resources" items={RESOURCE_LINKS} />
               {SOCIAL_LINKS.map((s) => (
                 <a
@@ -343,39 +362,39 @@ export default function Home() {
               color: "var(--fg)",
             }}
           >
-            Build the best{" "}
+            The open-source{" "}
             <em
               style={{
                 fontStyle: "italic",
                 color: "var(--accent-strong)",
               }}
             >
-              email agents
+              email API
             </em>
-            {" "}with e2a.
+            {" "}for applications and AI agents.
           </h1>
           <p
-            className="mx-auto mb-9 leading-[1.55]"
+            className="mx-auto mb-3 leading-[1.55]"
             style={{
               fontSize: 17,
               color: "var(--fg-muted)",
-              maxWidth: 540,
+              maxWidth: 660,
             }}
           >
-            e2a gives every agent a real, authenticated inbox — so it can handle
-            support, scheduling, reception, and ecommerce work over email, with
-            human approval when it matters.
+            Send transactional email from any product, give agents real two-way
+            inboxes, and keep people in control. Use e2a as a hosted service or
+            run the Apache-2.0 stack yourself.
           </p>
-          <Link
-            href="/email-api-for-ai-agents"
-            className="inline-flex mb-7 text-[13px]"
-            style={{ color: "var(--accent-strong)" }}
+          <p
+            className="mx-auto mb-7 text-[13px] leading-[1.55]"
+            style={{ color: "var(--fg-muted)", maxWidth: 660 }}
           >
-            What is email infrastructure for AI agents? <span className="font-mono ml-1">→</span>
-          </Link>
+            For developers, agent-native teams, and businesses building email
+            into their products and workflows.
+          </p>
           <div className="flex flex-wrap items-center justify-center gap-2.5">
             <Link
-              href="/get-started"
+              href="/transactional-email-api"
               className="inline-flex items-center gap-2 px-4 py-2.5 text-[14px] font-medium transition"
               style={{
                 background: "var(--accent-fill)",
@@ -383,11 +402,11 @@ export default function Home() {
                 borderRadius: "var(--r-md)",
               }}
             >
-              Get started free
-              <span className="font-mono">→</span>
+              Send from your app
+              <span className="font-mono" aria-hidden="true">→</span>
             </Link>
             <Link
-              href="/api-docs"
+              href="/get-started"
               className="inline-flex items-center gap-2 px-4 py-2.5 text-[14px] font-medium transition"
               style={{
                 background: "var(--bg-panel)",
@@ -396,7 +415,7 @@ export default function Home() {
                 borderRadius: "var(--r-md)",
               }}
             >
-              Read the docs
+              Give an agent an inbox
             </Link>
           </div>
 
@@ -422,7 +441,7 @@ export default function Home() {
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"
-                alt="e2a – open-source email API for agents - Give your AI agents a real, authenticated email address. | Product Hunt"
+                alt="e2a, the open-source email API for AI agents | Product Hunt"
                 width={250}
                 height={54}
                 style={{ display: "block" }}
@@ -472,7 +491,69 @@ export default function Home() {
       {/* Divider */}
       <div style={{ height: 1, background: "var(--border)" }} />
 
-      {/* Quick start */}
+      {/* Start paths */}
+      <section id="start" className="px-6 md:px-8 py-12 md:py-16 scroll-mt-20">
+        <div className="max-w-[1080px] mx-auto">
+          <div className="text-center mb-8">
+            <Eyebrow>01 · Choose a path</Eyebrow>
+            <h2
+              className="mt-3 mb-2"
+              style={{
+                fontFamily: "var(--f-editorial)",
+                fontWeight: 400,
+                fontSize: "clamp(28px, 4vw, 38px)",
+                letterSpacing: "-0.01em",
+                color: "var(--fg)",
+              }}
+            >
+              Start with the email path you need.
+            </h2>
+            <p className="mx-auto max-w-[580px] text-[14px]" style={{ color: "var(--fg-muted)" }}>
+              Use the same open-source API for familiar application email,
+              agent-owned conversations, or approval-sensitive workflows.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {[
+              {
+                title: "Send from your application",
+                desc: "Deliver receipts, verification messages, alerts, and product notifications over HTTP or an SDK.",
+                href: "/transactional-email-api",
+              },
+              {
+                title: "Give an agent an inbox",
+                desc: "Add a real two-way address through a plugin, MCP, webhooks, WebSocket, REST, or an SDK.",
+                href: "#quickstart",
+              },
+              {
+                title: "Keep people in control",
+                desc: "Hold sensitive outbound messages for human approval before they leave the system.",
+                href: "#hitl",
+              },
+            ].map((path) => (
+              <Link
+                key={path.title}
+                href={path.href}
+                className="group p-6 transition hover:bg-[var(--bg-elev)]"
+                style={{
+                  background: "var(--bg-panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--r-lg)",
+                }}
+              >
+                <h3 className="text-[16px] font-semibold mb-2" style={{ color: "var(--fg)" }}>
+                  {path.title} <span className="font-mono group-hover:translate-x-0.5 inline-block transition-transform">→</span>
+                </h3>
+                <p className="text-[13px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
+                  {path.desc}
+                </p>
+              </Link>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Agent quick start */}
       <section
         id="quickstart"
         className="px-6 md:px-8 py-12 md:py-16"
@@ -484,7 +565,7 @@ export default function Home() {
       >
         <div className="max-w-[1080px] mx-auto">
           <div className="text-center mb-7">
-            <Eyebrow>01 · Quick start</Eyebrow>
+            <Eyebrow>02 · Agent quick start</Eyebrow>
             <h2
               className="mt-3 mb-2"
               style={{
@@ -616,14 +697,13 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Build agent systems — the SDK path, for people running their own agent
-          framework rather than a coding agent. Deliberately AFTER the plugin
-          quick start: this is the "now make it production" step, not the way
-          in. */}
+      {/* Application API — the conventional integration path. Agent inboxes
+          remain available, but application-triggered sending does not require
+          an agent framework. */}
       <section id="build" className="px-6 md:px-8 py-14 md:py-[72px]">
         <div className="max-w-[1080px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-10 md:gap-14 items-center">
           <div>
-            <Eyebrow>02 · Build agent systems</Eyebrow>
+            <Eyebrow>03 · Application API</Eyebrow>
             <h2
               className="mt-3.5 mb-4 leading-[1.1]"
               style={{
@@ -634,31 +714,29 @@ export default function Home() {
                 color: "var(--fg)",
               }}
             >
-              Already have an{" "}
-              <em style={{ color: "var(--accent-strong)" }}>agent framework?</em>
+              Send from any{" "}
+              <em style={{ color: "var(--accent-strong)" }}>application.</em>
             </h2>
             <p
               className="mb-3.5 leading-[1.6]"
               style={{ fontSize: 15, color: "var(--fg-muted)" }}
             >
-              The SDKs are plain async clients, so an inbox drops into whatever
-              you already run — LangChain, Google ADK, the OpenAI Agents SDK.
-              Same hosted MCP server, or go straight at the API.
+              Use e2a for receipts, verification messages, product
+              notifications, and alerts from the software you already run. No
+              agent framework is required.
             </p>
             <p
               className="mb-5 leading-[1.65]"
               style={{ fontSize: 13, color: "var(--fg-muted)" }}
             >
-              TypeScript and Python SDKs with one-call webhook verification and a
-              WebSocket <code className="font-mono">listen()</code> stream, a CLI
-              that bridges inbound mail to a local handler, and HMAC-signed
-              webhooks for cloud runtimes. Conversation threading survives the
-              email ↔ structured-data boundary, so multi-turn replies keep their
-              session.
+              Call the HTTP API directly or use the TypeScript and Python SDKs.
+              If the workflow later needs replies, e2a can turn the same sender
+              into a two-way inbox with threading, signed webhooks, WebSocket
+              delivery, and optional human approval.
             </p>
             <div className="flex flex-wrap items-center gap-2.5">
               <Link
-                href="/blog/email-agent-with-google-adk"
+                href="/transactional-email-api"
                 className="inline-flex items-center gap-2 px-4 py-2.5 text-[14px] font-medium"
                 style={{
                   background: "var(--accent-fill)",
@@ -666,13 +744,11 @@ export default function Home() {
                   borderRadius: "var(--r-md)",
                 }}
               >
-                Google ADK walkthrough
+                Transactional email guide
                 <span className="font-mono">→</span>
               </Link>
-              <a
-                href="https://github.com/tokencanopy/e2a/tree/main/examples/adk-cloud-webhook"
-                target="_blank"
-                rel="noopener noreferrer"
+              <Link
+                href="/api-docs"
                 className="inline-flex items-center px-4 py-2.5 text-[14px] font-medium"
                 style={{
                   background: "var(--bg-panel)",
@@ -681,14 +757,13 @@ export default function Home() {
                   borderRadius: "var(--r-md)",
                 }}
               >
-                Runnable example
-              </a>
+                API reference
+              </Link>
             </div>
           </div>
 
           <div>
-            {/* Both SDKs, same shape: listen → filter to email.received →
-                hand the thread key to your agent → reply in thread. */}
+            {/* Both SDKs, same ordinary application-triggered send. */}
             <div className="flex mb-3">
               <div
                 className="inline-flex gap-0.5 p-1"
@@ -725,25 +800,23 @@ export default function Home() {
               <Tok c="keyword">from</Tok> e2a.v1 <Tok c="keyword">import</Tok> AsyncE2AClient
             </Line>
             <Line>&nbsp;</Line>
-            <Line c="comment"># conversation_id threads multi-turn replies —</Line>
-            <Line c="comment"># bind it to your framework&apos;s session id</Line>
             <Line>
               <Tok c="keyword">async with</Tok> <Tok c="fn">AsyncE2AClient</Tok>(api_key=<Tok c="string">&quot;e2a_…&quot;</Tok>) <Tok c="keyword">as</Tok> client:
             </Line>
             <Line>
-              &nbsp;&nbsp;<Tok c="keyword">async for</Tok> event <Tok c="keyword">in</Tok> client.<Tok c="fn">listen</Tok>(<Tok c="string">&quot;support@acme.dev&quot;</Tok>):
+              &nbsp;&nbsp;<Tok c="keyword">await</Tok> client.messages.<Tok c="fn">send</Tok>(<Tok c="string">&quot;receipts@example.com&quot;</Tok>, {`{`}
             </Line>
             <Line>
-              &nbsp;&nbsp;&nbsp;&nbsp;<Tok c="keyword">if</Tok> event.type != <Tok c="string">&quot;email.received&quot;</Tok>: <Tok c="keyword">continue</Tok>
+              &nbsp;&nbsp;&nbsp;&nbsp;<Tok c="string">&quot;to&quot;</Tok>: [{`{`}<Tok c="string">&quot;email&quot;</Tok>: <Tok c="string">&quot;customer@example.net&quot;</Tok>{`}`}],
             </Line>
             <Line>
-              &nbsp;&nbsp;&nbsp;&nbsp;d = event.data
+              &nbsp;&nbsp;&nbsp;&nbsp;<Tok c="string">&quot;subject&quot;</Tok>: <Tok c="string">&quot;Your receipt&quot;</Tok>,
             </Line>
             <Line>
-              &nbsp;&nbsp;&nbsp;&nbsp;reply = <Tok c="keyword">await</Tok> agent.<Tok c="fn">run</Tok>(d[<Tok c="string">&quot;conversation_id&quot;</Tok>])
+              &nbsp;&nbsp;&nbsp;&nbsp;<Tok c="string">&quot;text&quot;</Tok>: <Tok c="string">&quot;Thanks for your order.&quot;</Tok>,
             </Line>
             <Line>
-              &nbsp;&nbsp;&nbsp;&nbsp;<Tok c="keyword">await</Tok> client.messages.<Tok c="fn">reply</Tok>(d[<Tok c="string">&quot;delivered_to&quot;</Tok>], d[<Tok c="string">&quot;message_id&quot;</Tok>], {`{`}<Tok c="string">&quot;text&quot;</Tok>: reply{`}`})
+              &nbsp;&nbsp;{`}`})
             </Line>
               </>
             )}
@@ -752,31 +825,26 @@ export default function Home() {
             <Line c="comment">{"// npm i @e2a/sdk"}</Line>
             <Line>&nbsp;</Line>
             <Line>
-              <Tok c="keyword">import</Tok> {`{`} E2AClient, isEmailReceived {`}`} <Tok c="keyword">from</Tok> <Tok c="string">&quot;@e2a/sdk&quot;</Tok>;
+              <Tok c="keyword">import</Tok> {`{`} E2AClient {`}`} <Tok c="keyword">from</Tok> <Tok c="string">&quot;@e2a/sdk&quot;</Tok>;
             </Line>
             <Line>&nbsp;</Line>
-            <Line c="comment">{"// conversation_id threads multi-turn replies —"}</Line>
-            <Line c="comment">{"// bind it to your framework's session id"}</Line>
             <Line>
               <Tok c="keyword">const</Tok> client = <Tok c="keyword">new</Tok> <Tok c="fn">E2AClient</Tok>({`{`} apiKey: <Tok c="string">&quot;e2a_…&quot;</Tok> {`}`});
             </Line>
             <Line>&nbsp;</Line>
             <Line>
-              <Tok c="keyword">for await</Tok> (<Tok c="keyword">const</Tok> event <Tok c="keyword">of</Tok> client.<Tok c="fn">listen</Tok>(<Tok c="string">&quot;support@acme.dev&quot;</Tok>)) {`{`}
+              <Tok c="keyword">await</Tok> client.messages.<Tok c="fn">send</Tok>(<Tok c="string">&quot;receipts@example.com&quot;</Tok>, {`{`}
             </Line>
             <Line>
-              &nbsp;&nbsp;<Tok c="keyword">if</Tok> (!<Tok c="fn">isEmailReceived</Tok>(event)) <Tok c="keyword">continue</Tok>;
+              &nbsp;&nbsp;to: [{`{`} email: <Tok c="string">&quot;customer@example.net&quot;</Tok> {`}`}],
             </Line>
             <Line>
-              &nbsp;&nbsp;<Tok c="keyword">const</Tok> d = event.data;
+              &nbsp;&nbsp;subject: <Tok c="string">&quot;Your receipt&quot;</Tok>,
             </Line>
             <Line>
-              &nbsp;&nbsp;<Tok c="keyword">const</Tok> reply = <Tok c="keyword">await</Tok> agent.<Tok c="fn">run</Tok>(d.conversation_id);
+              &nbsp;&nbsp;text: <Tok c="string">&quot;Thanks for your order.&quot;</Tok>,
             </Line>
-            <Line>
-              &nbsp;&nbsp;<Tok c="keyword">await</Tok> client.messages.<Tok c="fn">reply</Tok>(d.delivered_to, d.message_id, {`{`} text: reply {`}`});
-            </Line>
-            <Line>{`}`}</Line>
+            <Line>{`}`});</Line>
               </>
             )}
             </CodeBlock>

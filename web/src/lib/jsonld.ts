@@ -36,7 +36,7 @@ export function organization(): JsonLdNode {
     url: SITE_URL,
     logo: abs("/logo-wordmark.svg"),
     description:
-      "e2a gives AI agents a real, authenticated email address — SPF/DKIM-verified inbound, HMAC-signed webhook and WebSocket delivery, and an HTTP API for outbound.",
+      "e2a is the open-source email API for applications and AI agents. It sends transactional email from any product, gives agents real two-way inboxes, and returns structured SPF, DKIM, and DMARC evidence for inbound mail. That evidence applies to the From domain, not a person, mailbox, or content.",
     sameAs: [
       "https://github.com/tokencanopy/e2a",
       "https://www.npmjs.com/package/@e2a/sdk",
@@ -70,6 +70,7 @@ export function website(): JsonLdNode {
  * instead of one.
  */
 export const SOFTWARE_ID = `${SITE_URL}/#software`;
+export const FREE_OFFER_ID = `${SITE_URL}/#offer-free`;
 
 export function softwareApplication(description: string): JsonLdNode {
   return {
@@ -91,6 +92,7 @@ export function softwareApplication(description: string): JsonLdNode {
     // or not sell at all.
     offers: {
       "@type": "Offer",
+      "@id": FREE_OFFER_ID,
       price: "0",
       priceCurrency: "USD",
     },

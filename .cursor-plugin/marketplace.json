@@ -5,14 +5,14 @@
     "url": "https://e2a.dev"
   },
   "metadata": {
-    "description": "e2a — authenticated email gateway for AI agents (MCP configuration and canonical docs).",
-    "version": "0.9.1"
+    "description": "e2a — open-source email API for applications and AI agents (MCP configuration and canonical docs).",
+    "version": "0.9.5"
   },
   "plugins": [
     {
       "name": "e2a",
       "source": "./plugins/e2a",
-      "description": "Authenticated email gateway for AI agents — per-agent inboxes, HITL approval, SPF/DKIM verification, and a queryable, replayable event log."
+      "description": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log."
     }
   ]
 }

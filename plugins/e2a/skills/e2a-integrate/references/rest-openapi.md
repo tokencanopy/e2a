@@ -3,7 +3,7 @@
 For a server language without an official SDK, implement the adapter against
 the canonical OpenAPI contract:
 
-`https://api.e2a.dev/v1/openapi.yaml`
+`https://e2a.dev/v1/openapi.yaml`
 
 Send bearer authentication only from the server:
 

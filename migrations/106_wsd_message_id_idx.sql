@@ -1,0 +1,65 @@
+-- 106_wsd_message_id_idx.sql
+-- e2a:no-transaction
+--
+-- Index backing the FOREIGN KEY enforcement on
+-- webhook_subscriber_deliveries.message_id, declared in 025 as
+--     message_id TEXT REFERENCES messages(id) ON DELETE SET NULL
+-- and never indexed since.
+--
+-- Postgres auto-indexes the REFERENCED side of a foreign key (messages.id, via
+-- its primary key) but never the REFERENCING side. ON DELETE SET NULL is
+-- implemented as an internal per-row trigger that fires once for EVERY deleted
+-- parent row and runs
+--     UPDATE ONLY webhook_subscriber_deliveries SET message_id = NULL
+--      WHERE message_id = $1
+-- With no index on that column the only plan is a sequential scan of the whole
+-- table — per deleted message, not per statement.
+--
+-- Measured on staging (2026-08-23), where the table had reached 421,319 rows /
+-- 88,177 pages, against its structurally identical sibling webhook_events,
+-- which HAS such an index (idx_webhook_events_message_created, 026):
+--
+--   webhook_subscriber_deliveries  Seq Scan     cost 93443.49   (no index)
+--   webhook_events                 Index Scan   cost     8.44   (454,487 rows)
+--
+-- ~11,000x, on a table that is not even the larger of the two. A 1000-message
+-- delete batch was ~88M page visits; every batch aborted on a 60s
+-- statement_timeout, and a plain agent delete blew the 60s proxy budget and
+-- returned an HTML 504 — which then failed the conformance suite's
+-- response-schema gate, because the spec documents application/json. The same
+-- slow deletes pinned both slots of the per-account concurrent-destructive cap,
+-- so unrelated deletes 429'd. One missing index, four unrelated-looking
+-- symptoms.
+--
+-- 025's own header notes message_id is ON DELETE SET NULL "so the 30-day
+-- messages [retention] purge" can proceed — i.e. the design depends on exactly
+-- the path that was unindexed. Retention purges get progressively more
+-- expensive as this table grows, so this is a latent production problem, not a
+-- staging-only one.
+--
+-- NOT partial, unlike idx_webhook_events_message_created's
+-- WHERE message_id IS NOT NULL. Not because a partial index would fail — the
+-- EXPLAIN above proves the planner uses that partial sibling for exactly this
+-- predicate shape — but because it would buy nothing here: 419,593 of 424,276
+-- rows (98.9%) carry a message_id, so the partial and plain indexes are within
+-- ~1% of each other in size. Compare 107, where the same column shape is 0.79%
+-- non-null and partial is the obvious choice.
+--
+-- CREATE INDEX CONCURRENTLY so the build takes no write lock on this
+-- delivery-volume-scaled table (a plain CREATE INDEX would block webhook
+-- fan-out inserts for the whole build). The e2a:no-transaction directive skips
+-- the BeginTx wrapper — Postgres rejects CONCURRENTLY inside a transaction
+-- block — and that runner requires a single statement.
+--
+-- OPS NOTE — invalid-index recovery: if the CONCURRENTLY build is interrupted,
+-- Postgres leaves an INVALID index of this name. On the next startup this
+-- migration re-runs, but CREATE ... IF NOT EXISTS sees the name and SKIPS the
+-- rebuild, marking the migration applied over a broken index — FK enforcement
+-- silently falls back to a seq scan (a performance, not correctness,
+-- regression). To recover:
+--     DROP INDEX CONCURRENTLY IF EXISTS idx_wsd_message_id;
+-- then re-run this statement. Check validity with:
+--     SELECT indisvalid FROM pg_index
+--      WHERE indexrelid = 'idx_wsd_message_id'::regclass;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_wsd_message_id
+    ON webhook_subscriber_deliveries (message_id);

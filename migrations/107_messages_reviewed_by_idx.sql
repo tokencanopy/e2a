@@ -1,0 +1,43 @@
+-- 107_messages_reviewed_by_idx.sql
+-- e2a:no-transaction
+--
+-- The second unindexed FOREIGN KEY referencing column, found by the same audit
+-- that produced 106:
+--     messages.reviewed_by_user_id -> users(id) ON DELETE SET NULL
+--
+-- Same mechanism as 106. Postgres indexes the referenced side (users.id) but
+-- never the referencing side, so ON DELETE SET NULL fires a per-row
+--     UPDATE ONLY messages SET reviewed_by_user_id = NULL
+--      WHERE reviewed_by_user_id = $1
+-- which, unindexed, sequentially scans all of messages — on staging 549,579
+-- rows — once per deleted user.
+--
+-- Rarer than 106's path (users are deleted far less often than messages), but
+-- worse per occurrence and on a path that matters: deleteAccount is in
+-- destructiveOps (internal/httpapi/ratelimit.go), so it runs under the same
+-- concurrency cap and the same proxy timeout budget that 106's seq scan was
+-- already blowing. Account deletion is also a data-rights path, where "it timed
+-- out" is a bad answer.
+--
+-- PARTIAL here, unlike 106: only 4,333 of 549,579 rows (0.79%) carry a
+-- reviewed_by_user_id, since the column is set only on HITL-reviewed messages.
+-- The partial index is ~127x smaller than a plain one and covers every row the
+-- FK check can match, because `reviewed_by_user_id = $1` implies
+-- `reviewed_by_user_id IS NOT NULL` — the same implication the planner already
+-- exploits for idx_webhook_events_message_created (026), verified by EXPLAIN on
+-- staging showing an Index Scan through that partial index for this exact
+-- predicate shape.
+--
+-- CREATE INDEX CONCURRENTLY + e2a:no-transaction for the same reasons as 106:
+-- messages is the hottest table in the schema and a plain CREATE INDEX would
+-- block inbound writes for the whole build.
+--
+-- OPS NOTE — invalid-index recovery: an interrupted CONCURRENTLY build leaves an
+-- INVALID index, and CREATE ... IF NOT EXISTS will then skip the rebuild on the
+-- next startup, marking this applied over a broken index. To recover:
+--     DROP INDEX CONCURRENTLY IF EXISTS idx_messages_reviewed_by_user_id;
+-- then re-run this statement. Check validity with:
+--     SELECT indisvalid FROM pg_index
+--      WHERE indexrelid = 'idx_messages_reviewed_by_user_id'::regclass;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_reviewed_by_user_id
+    ON messages (reviewed_by_user_id) WHERE reviewed_by_user_id IS NOT NULL;

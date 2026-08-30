@@ -28,8 +28,10 @@ subprocess.run monkeypatched to capture/replay a call — no real network
 call, no real subprocess to node/npm.
 """
 
+import calendar
 import hashlib
 import hmac
+import io
 import json
 import os
 import sys
@@ -227,6 +229,44 @@ FakeEmail.subject = "hello from a real human"
 emitted.clear()
 status, payload = monitor.handle_webhook(inbound_body, sign(inbound_body))
 check("non-probe subject ignored", payload.get("ignored"), "not a probe")
+
+# Hydration is where a leg can die before it is even classified, and the two
+# failure kinds need opposite answers.
+_saved_inbound = FakeClient.inbound
+
+
+class RaisingInbound:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def from_event(self, event):
+        raise self._exc
+
+
+# not_found is terminal — the message is gone (purged by a sweep, deleted by an
+# operator) and no redelivery brings it back. 5xx here asks e2a to retry a
+# delivery that can only 404 again, turning one lost probe into an unbounded
+# retry loop against the very server under test.
+FakeClient.inbound = RaisingInbound(
+    monitor.E2ANotFoundError(code="not_found", message="message not found", status=404, retryable=False)
+)
+emitted.clear()
+status, payload = monitor.handle_webhook(inbound_body, sign(inbound_body))
+check("hydrate not_found does not ask for a retry", status, 200)
+check("hydrate not_found reports the drop", payload.get("dropped"), True)
+check("hydrate not_found logs monitor_dropped", "monitor_dropped" in emitted_events(), True)
+check("hydrate not_found claims no success", "monitor_ok" in emitted_events(), False)
+
+# Everything else may genuinely be transient (timeout, upstream 5xx). Dropping
+# those would lose a leg that would have succeeded on redelivery and
+# manufacture a false silence alert, so they keep asking for the retry.
+FakeClient.inbound = RaisingInbound(RuntimeError("connection reset"))
+emitted.clear()
+status, _ = monitor.handle_webhook(inbound_body, sign(inbound_body))
+check("hydrate transient failure still retries", status, 500)
+check("hydrate transient failure logs monitor_error", "monitor_error" in emitted_events(), True)
+
+FakeClient.inbound = _saved_inbound
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +553,21 @@ def tick_strategies(fail=(), unavailable=()):
     }
 
 
+# handle_tick ends with a hygiene sweep that talks to the API directly rather
+# than through a strategy, so the strategy fakes above do not cover it. Stub it
+# out for the aggregate/status-code checks — an offline suite must make no real
+# network call, and the sweep has its own tests below.
+_saved_sweep_inbox = monitor._sweep_inbox
+_swept_inboxes = []
+
+
+def _fake_sweep_inbox(inbox):
+    _swept_inboxes.append(inbox)
+    return (0, 0)
+
+
+monitor._sweep_inbox = _fake_sweep_inbox
+
 # All interfaces succeed -> 200, ok=True.
 monitor.STRATEGIES = tick_strategies()
 emitted.clear()
@@ -558,6 +613,12 @@ status, payload = monitor.handle_tick()
 check("tick all-fail (considered) returns 500", status, 500)
 check("tick all-fail reports ok=False", payload["ok"], False)
 check("tick all-fail still marks the skipped iface as skipped, not failed", payload["results"]["mcp"]["skipped"], True)
+
+# The sweep runs on every tick, including a total outage: residue accumulates
+# regardless of whether the client surfaces are healthy, and a stuck sweep
+# would be exactly the wrong response to an already-degraded stack.
+check("tick sweeps both monitor inboxes", sorted(set(_swept_inboxes)), sorted({monitor.AGENT_A, monitor.AGENT_B}))
+monitor._sweep_inbox = _saved_sweep_inbox
 
 
 # ---------------------------------------------------------------------------
@@ -1126,6 +1187,134 @@ _urllib_request.urlopen = _saved_urlopen
 
 check("mcp strategy reports unavailable when no URL is configured", monitor.McpStrategy("", "k").available(), False)
 check("mcp strategy reports available when a URL is configured", monitor.McpStrategy("https://x/mcp", "k").available(), True)
+
+
+# --------------------------------------------------------------------------
+# Hygiene sweep. The sweep is the only part of the monitor that deletes
+# messages the current tick did not create, so the ordering (trash BEFORE
+# purge), the query parameters (the endpoint defaults would skip exactly the
+# residue it exists to clear), and the best-effort contract all matter.
+# --------------------------------------------------------------------------
+
+
+def _sweep_urlopen(live_ids, trashed_ids, calls, fail_on=None):
+    """Serve two id pages and record every request. fail_on(url, method) may
+    raise to simulate a 409/held message."""
+
+    def _fake_urlopen(req, timeout=None):
+        url = req.full_url
+        method = req.get_method()
+        calls.append((method, url))
+        if fail_on is not None:
+            fail_on(url, method)
+        if method == "GET":
+            ids = trashed_ids if "deleted=true" in url else live_ids
+            body = {"items": [{"id": i} for i in ids], "next_cursor": None}
+        else:
+            body = {"deleted": True, "id": "x"}
+        return _FakeResponse(json.dumps(body).encode(), "application/json")
+
+    return _fake_urlopen
+
+
+_sweep_calls = []
+_urllib_request.urlopen = _sweep_urlopen(["m_live1", "m_live2"], ["m_tr1"], _sweep_calls)
+_trashed, _purged = monitor._sweep_inbox("a@x.test")
+_urllib_request.urlopen = _saved_urlopen
+
+check("sweep trashes every live message", _trashed, 2)
+check("sweep purges every trashed message", _purged, 1)
+
+_sweep_deletes = [(m, u) for m, u in _sweep_calls if m == "DELETE"]
+check("sweep issues one DELETE per message", len(_sweep_deletes), 3)
+# A purge before its trash would 409 not_in_trash against the real server.
+check(
+    "sweep trashes first (no permanent flag on the live deletes)",
+    [("permanent=true" in u) for _, u in _sweep_deletes],
+    [False, False, True],
+)
+check(
+    "sweep purge carries the confirm token",
+    "confirm=DELETE" in _sweep_deletes[-1][1],
+    True,
+)
+
+_sweep_lists = [u for m, u in _sweep_calls if m == "GET"]
+check("sweep lists live then trash", len(_sweep_lists), 2)
+# Defaults are inbound-only and, for inbound, unread-only: without both
+# overrides every outbound copy (47k per inbox on staging) stays live forever.
+check(
+    "sweep lists both directions and all read states",
+    all("direction=all" in u and "read_status=all" in u for u in _sweep_lists),
+    True,
+)
+check("sweep bounds each page by the budget", all(f"limit={monitor.SWEEP_BUDGET}" in u for u in _sweep_lists), True)
+check("sweep's first list is live messages", "deleted=true" not in _sweep_lists[0], True)
+check("sweep's second list is the trash", "deleted=true" in _sweep_lists[1], True)
+
+# The regression this pair exists for: the sweep runs at the end of /tick, but
+# a round trip finishes LATER, on /webhook. An unscoped page is newest-first,
+# so it is the tick's own in-flight probes — the monitor purges the round trip
+# it just started, the leg 404s on hydrate or reply, and the interface goes
+# silent. That is a manufactured outage, not a detected one.
+check(
+    "sweep asks for the oldest residue first, not the newest",
+    all("sort=asc" in u for u in _sweep_lists),
+    True,
+)
+
+
+def _excludes_live_traffic(url):
+    """Whether one sweep listing is scoped past everything a round trip in
+    flight could still legitimately use. An unscoped listing is reported as
+    False rather than raising, so a regression reads as a failed check."""
+    if "until=" not in url:
+        return False
+    value = url.split("until=")[1].split("&")[0]
+    until_ms = calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) * 1000
+    return time.time() * 1000 - until_ms >= monitor.MAX_AGE_MS
+
+
+check("sweep scopes every list by an until cutoff", all("until=" in u for u in _sweep_lists), True)
+# sort=asc alone only postpones the collision until the backlog drains below
+# one page; the cutoff is what makes an in-flight probe unreachable at all.
+check(
+    "sweep's cutoff excludes everything a live round trip could still use",
+    all(_excludes_live_traffic(u) for u in _sweep_lists),
+    True,
+)
+
+
+# A delete that fails (message held for review, or provider submission still in
+# flight) is skipped and retried next tick, never counted as done.
+def _fail_every_delete(url, method):
+    if method == "DELETE":
+        raise _urllib_error.HTTPError(url, 409, "conflict", {}, io.BytesIO(b'{"error":{"code":"message_held"}}'))
+
+
+_held_calls = []
+_urllib_request.urlopen = _sweep_urlopen(["m_held"], [], _held_calls, fail_on=_fail_every_delete)
+_trashed_held, _purged_held = monitor._sweep_inbox("a@x.test")
+_urllib_request.urlopen = _saved_urlopen
+check("sweep does not count a failed delete", (_trashed_held, _purged_held), (0, 0))
+
+
+# Listing failure ends the pass without raising: hygiene must never propagate
+# into the tick's status code, which Cloud Scheduler reads as stack health.
+def _fail_every_call(url, method):
+    raise _urllib_error.HTTPError(url, 500, "boom", {}, io.BytesIO(b"{}"))
+
+
+_urllib_request.urlopen = _sweep_urlopen([], [], [], fail_on=_fail_every_call)
+emitted.clear()
+_trashed_err, _purged_err = monitor._sweep_inbox("a@x.test")
+_urllib_request.urlopen = _saved_urlopen
+check("sweep returns zero counts when listing fails", (_trashed_err, _purged_err), (0, 0))
+check(
+    "sweep logs a monitor_error with stage=sweep",
+    any(e == "monitor_error" and f.get("stage") == "sweep" for e, f in emitted),
+    True,
+)
 
 
 print()

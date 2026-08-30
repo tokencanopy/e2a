@@ -98,11 +98,12 @@ import type {
   CreateAgentSuppressionRequest,
 } from "./generated/index.js";
 import { RetryHttpLibrary, type RetryOptions } from "./retry.js";
-import { E2AError, fromApiException, connectionError } from "./errors.js";
+import { E2AError, E2AValidationError, fromApiException, connectionError } from "./errors.js";
 import { AutoPager } from "./pagination.js";
 import { WSStream } from "./ws.js";
 import type { WebhookEvent, EmailReceivedData } from "./webhook-signature.js";
 import { InboundResource } from "./inbound.js";
+import { envVar, resolveBaseUrl, DEFAULT_BASE_URL } from "./env.js";
 
 export interface E2AClientOptions {
   /** Account (`e2a_acct_`) or agent (`e2a_agt_`) key, or an OAuth access token.
@@ -159,31 +160,6 @@ export type ForwardInput = Omit<ForwardRequest, "unsubscribe"> & {
   unsubscribe?: ManagedUnsubscribeOptions;
 };
 
-function envVar(name: string): string | undefined {
-  if (typeof process !== "undefined" && process.env && process.env[name]) return process.env[name];
-  return undefined;
-}
-
-let warnedBaseUrlDeprecated = false;
-
-// resolveBaseUrl reads the API host. Canonical is E2A_API_URL — the same
-// concept the server names with E2A_API_URL (its externally visible API base).
-// E2A_BASE_URL is the name the SDKs shipped with; still honoured so published
-// integrations keep working, with a one-shot deprecation note.
-function resolveBaseUrl(): string | undefined {
-  const canonical = envVar("E2A_API_URL");
-  if (canonical) return canonical;
-  const legacy = envVar("E2A_BASE_URL");
-  if (legacy && !warnedBaseUrlDeprecated) {
-    warnedBaseUrlDeprecated = true;
-    console.warn(
-      "[e2a] E2A_BASE_URL is deprecated — rename it to E2A_API_URL. " +
-        "The old name still works for now but will be dropped.",
-    );
-  }
-  return legacy;
-}
-
 // Map generated/transport failures to the typed hierarchy: ApiException →
 // envelope-mapped E2AError; an already-typed E2AError passes through; anything
 // else (a transport throw from the retry layer) is a connection error.
@@ -195,6 +171,24 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
     if (e instanceof ApiException) throw fromApiException(e);
     throw connectionError(e instanceof Error ? e.message : String(e), e);
   }
+}
+
+// A path-parameter value of exactly ".." collapses the built URL onto the
+// PRECEDING segment, and exactly "." collapses onto the segment's own parent
+// collection (i.e. it drops itself, not the segment before it); neither is
+// escaped by encodeURIComponent(), so both reach the URL parser literally.
+// Either way the request retargets a bigger resource than the caller named.
+// Rejected here, before it reaches the wire.
+function assertNotDotSegment(value: string, param: string): string {
+  if (value === "." || value === "..") {
+    throw new E2AValidationError({
+      code: "unsafe_path_segment",
+      message: `${param} must not be "." or ".."; it would collapse the request path onto a different, larger resource`,
+      status: 0,
+      retryable: false,
+    });
+  }
+  return value;
 }
 
 export class E2AClient {
@@ -223,7 +217,7 @@ export class E2AClient {
         retryable: false,
       });
     }
-    const baseUrl = opts.baseUrl ?? resolveBaseUrl() ?? "https://api.e2a.dev";
+    const baseUrl = opts.baseUrl ?? resolveBaseUrl() ?? DEFAULT_BASE_URL;
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
     const httpApi = new RetryHttpLibrary(new IsomorphicFetchHttpLibrary(), {
@@ -349,7 +343,7 @@ class AgentsResource {
   }
   /** Beta: remove only this exact agent-recipient block. */
   deleteSuppression(email: string, address: string): Promise<DeleteSuppressionResult> {
-    return call(() => this.api.deleteAgentSuppression(email, address, "DELETE"));
+    return call(() => this.api.deleteAgentSuppression(email, assertNotDotSegment(address, "address"), "DELETE"));
   }
 }
 
@@ -448,7 +442,7 @@ class MessagesResource {
    * on the review queue first. Returns the deletion receipt ({deleted:true, id}).
    */
   delete(email: string, id: string, opts: { permanent?: boolean } = {}): Promise<DeleteMessageResult> {
-    return call(() => this.api.deleteMessage(email, id, opts.permanent, "DELETE"));
+    return call(() => this.api.deleteMessage(email, assertNotDotSegment(id, "id"), opts.permanent, "DELETE"));
   }
   /**
    * Restore a soft-deleted message. A scheduled message restored before
@@ -456,7 +450,7 @@ class MessagesResource {
    * submission canceled.
    */
   restore(email: string, id: string): Promise<MessageView> {
-    return call(() => this.api.restoreMessage(email, id));
+    return call(() => this.api.restoreMessage(email, assertNotDotSegment(id, "id")));
   }
   // getAttachment returns one attachment's metadata + a short-lived download_url
   // (+ expires_at). Pass { inline: true } to also receive base64 `data` for small
@@ -479,7 +473,7 @@ class MessagesResource {
   // deprecated per-inbox messages.approve/reject was removed in the pre-GA
   // vocabulary freeze (a review is addressed by message id alone).
   updateLabels(email: string, id: string, body: UpdateMessageRequest): Promise<UpdateMessageResultView> {
-    return call(() => this.api.updateMessage(email, id, body));
+    return call(() => this.api.updateMessage(email, assertNotDotSegment(id, "id"), body));
   }
 }
 
@@ -637,7 +631,7 @@ class ContactsResource {
   }
   /** Reverse an import, removing untouched contacts and agent enrolments it created. */
   deleteImport(batchId: string): Promise<DeleteImportBatchResult> {
-    return call(() => this.api.deleteImportBatch(batchId, "DELETE"));
+    return call(() => this.api.deleteImportBatch(assertNotDotSegment(batchId, "batchId"), "DELETE"));
   }
 
   // ── Per-agent outreach ────────────────────────────────────────────────────
@@ -703,13 +697,21 @@ class ContactsResource {
     body: UpsertEngagementRequest,
     opts: { ifMatch?: string } = {},
   ): Promise<ContactEngagementView> {
-    return call(() => this.api.upsertEngagement(email, address, body, opts.ifMatch));
+    return call(() =>
+      this.api.upsertEngagement(assertNotDotSegment(email, "email"), address, body, opts.ifMatch),
+    );
   }
 
   /** Un-enrol a contact from an agent's outreach. The contact itself survives,
    *  and suppressions are untouched — this is not consent. */
   deleteOutreach(email: string, address: string): Promise<DeleteEngagementResult> {
-    return call(() => this.api.deleteEngagement(email, address, "DELETE"));
+    return call(() =>
+      this.api.deleteEngagement(
+        assertNotDotSegment(email, "email"),
+        assertNotDotSegment(address, "address"),
+        "DELETE",
+      ),
+    );
   }
 }
 
@@ -868,7 +870,7 @@ class SuppressionsResource {
     // The typed .delete() call is itself the confirmation; the SDK supplies the
     // ?confirm=DELETE guard the raw API requires so callers aren't burdened.
     // Returns the deletion object ({deleted:true, address}).
-    return call(() => this.api.deleteSuppression(email, "DELETE"));
+    return call(() => this.api.deleteSuppression(assertNotDotSegment(email, "address"), "DELETE"));
   }
 }
 
@@ -891,7 +893,7 @@ class APIKeysResource {
     // The typed .delete() call is itself the confirmation; the SDK supplies the
     // ?confirm=DELETE guard the raw API requires so callers aren't burdened.
     // Returns the deletion object ({deleted:true, id}).
-    return call(() => this.api.deleteApiKey(id, "DELETE"));
+    return call(() => this.api.deleteApiKey(assertNotDotSegment(id, "id"), "DELETE"));
   }
 }
 

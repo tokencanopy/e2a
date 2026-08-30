@@ -208,7 +208,9 @@ e2a reply msg_abc123 --body "On it." --agent bot@acme.com
 
 Common `send`/`reply` flags: `--body` / `--body-file`, `--html-file` (text
 fallback derived if no `--body`), `--attach` (repeatable; max 10 files, 10 MB
-each, 25 MB total), `--reply-to` (repeatable; max 5 addresses), `--send-at`
+each, 25 MB total), `--reply-to` (repeatable; max 5 addresses), `--cc` /
+`--bcc` (each repeatable; `--to` + `--cc` + `--bcc` combined are capped at
+50 recipients on `send`), `--send-at`
 (RFC 3339 with an explicit UTC offset, at most 90 days ahead),
 `--idempotency-key`, `--agent`, `--json`
 (print the full send result). `send`-only: `--to` (repeatable), `--subject`,
@@ -223,8 +225,10 @@ Scheduled sending via `--send-at` is **beta and may change before it is
 declared stable**.
 A future schedule exits `0` with `status=scheduled`; it is durably queued, so
 do not retry. Direct self-send cannot be scheduled and returns a permanent
-request error unless a review hold takes precedence (held sends drop the
-schedule). Trashing the message before provider submission starts prevents
+request error unless a review hold takes precedence — a schedule caught by a
+hold survives it: the held message keeps its `send_at`, and approving it
+submits at that instant if it is still in the future, or immediately if it
+has already passed. Trashing the message before provider submission starts prevents
 submission (an in-flight submission returns `409 send_in_progress`); restoring it before the
 send time re-arms it, while restoring at or after that time restores the
 message but leaves the send canceled.
@@ -420,7 +424,7 @@ domain, and cached key scope are managed by login or environment variables.
 | `E2A_API_KEY` | — | API key. Skips `e2a login` — useful in CI and scripts |
 | `E2A_URL` | `https://e2a.dev` | The e2a deployment root. Set for self-host |
 | `E2A_AGENT_EMAIL` | — | Default sending/listening inbox (what `--agent` overrides) |
-| `E2A_SHARED_DOMAIN` | auto-discovered | Force the shared domain instead of discovering it via `GET /v1/info` |
+| `E2A_SHARED_DOMAIN` | auto-discovered | Force the shared domain instead of discovering it via `GET /v1/info`. No baked-in default — bare-name commands (`agents create <name>`, `keys create --agent <name>`) discover it live from `/v1/info` when unset (cheap, unauthenticated) rather than assuming the hosted product's `agents.e2a.dev`; if a self-hosted deployment genuinely has none configured, those commands fail with a clear message instead of guessing |
 
 **Precedence:** command-line flags beat environment variables, which beat
 `~/.e2a/config.json`, which beats the defaults above.

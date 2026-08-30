@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Chip } from "../../../components/loft/Chip";
-import { Button } from "../../../components/loft/Button";
+import { Button, Chip } from "@e2a/ui";
 import type { StarterTemplateDetail } from "../_lib/types";
 import { exampleData, substituteVars } from "../_lib/preview";
 import { TemplatePreview } from "./TemplatePreview";

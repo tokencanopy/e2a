@@ -1,4 +1,4 @@
-.PHONY: build run test test-unit test-integration test-e2e cover cover-check clean docker-up docker-down migrate spec spec-check openapi-compat-check openapi-compat-test generate generate-check generate-sdk generate-sdk-check generate-sdk-ts generate-sdk-py
+.PHONY: build run test test-unit test-integration test-e2e cover cover-check clean docker-up docker-down migrate spec spec-check openapi-compat-check openapi-compat-test generate generate-check generate-sdk generate-sdk-check generate-sdk-ts generate-sdk-py fmt fmt-check
 
 # OpenAPI Generator for the /v1 SDK base. Pinned to a released tag (never
 # :latest/SNAPSHOT) so output is reproducible for the drift gate. Run via
@@ -22,6 +22,20 @@ export E2A_TEST_DATABASE_URL
 build:
 	go build -o bin/e2a ./cmd/e2a
 
+fmt:
+	gofmt -w internal/ cmd/ tests/
+
+# gofmt -l only lists files that would change and always exits 0, so the
+# check has to test its output itself rather than gofmt's exit code.
+fmt-check:
+	@files="$$(gofmt -l internal/ cmd/ tests/)"; \
+	if [ -n "$$files" ]; then \
+		echo "gofmt drift in:"; \
+		echo "$$files"; \
+		echo "run 'make fmt' to fix"; \
+		exit 1; \
+	fi
+
 run: build
 	./bin/e2a -config config.yaml
 
@@ -39,10 +53,15 @@ test-unit:
 test-integration:
 	go test -p 4 ./internal/identity/ ./internal/agent/ ./internal/hitlworker/ ./internal/hitlnotify/ ./internal/limits/ ./internal/relay/ ./internal/sendramp/
 
+# -timeout 11m: internal/identity runs 5-6 minutes on a healthy CI run, so Go's
+# default 10-minute per-package timeout left under a 2x margin and tripped on DB
+# contention (same root cause the cover target documents below). 11m stays under
+# the workflow's 14-minute job cap so a genuine wedge still panics with a usable
+# stack instead of being killed by the runner.
 test-e2e:
 	@packages="$$(find ./cmd ./internal ./tests -name '*_test.go' -exec grep -l '^//go:build integration$$' {} + | xargs -n 1 dirname | sort -u)"; \
 	test -n "$$packages"; \
-	go test -tags integration -p 4 $$packages
+	go test -tags integration -p 4 -timeout 11m $$packages
 
 # cover writes a coverage profile across the internal packages (needs Postgres
 # on :5433, like `make test`; per-package DBs make the -p 4 parallel run safe).

@@ -169,9 +169,10 @@ design.
   with a `Host` header outside the allowlist; correlating `http_request`
   log line shows `status: 421`.
 - **Likely cause**: DNS-rebinding guard — the request's `Host` is not in
-  `MCP_ALLOWED_HOSTS` (default `api.e2a.dev`). Common self-host mistakes:
-  accessing via a hostname/IP not listed, or a fronting proxy rewriting
-  `Host`.
+  `MCP_ALLOWED_HOSTS` (no literal default: derived from `MCP_PUBLIC_URL`'s
+  host if that's set, otherwise the process refuses to start). Common
+  self-host mistakes: accessing via a hostname/IP not listed, or a fronting
+  proxy rewriting `Host`.
 - **Remediation**: add the externally used hostname(s) to
   `MCP_ALLOWED_HOSTS` (comma-separated; ports are stripped before
   comparison). Never work around it by disabling the guard. Clients must

@@ -46,15 +46,26 @@ describe("keys commands", () => {
   let mockStderr: ReturnType<typeof vi.spyOn>;
   let mockExit: ReturnType<typeof vi.spyOn>;
 
+  let mockFetch: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     mockStdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     mockStderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     mockExit = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
+    // Bare-slug expansion now discovers shared_domain from GET /v1/info when
+    // it isn't already known (config.ts's loadConfig() has no baked default
+    // any more) — stub it so these tests never make a real network call.
+    mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ shared_domain: "agents.e2a.dev" }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.clearAllMocks();
   });
@@ -72,14 +83,16 @@ describe("keys commands", () => {
         scope: "agent",
         agentEmail: "bot@agents.e2a.dev",
       });
+      // A full address needs no shared-domain discovery.
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it("expands bare agent slug on shared domain", async () => {
+    it("expands bare agent slug on a live-discovered shared domain", async () => {
       mockCreate.mockResolvedValue(AGENT_KEY);
       const { keysCreate } = await import("../commands/keys.js");
       await keysCreate({ agent: "mybot" });
 
-      // Bare slug should expand to mybot@agents.e2a.dev (default shared_domain)
+      expect(mockFetch).toHaveBeenCalledWith("https://e2a.dev/v1/info");
       expect(mockCreate).toHaveBeenCalledWith({
         name: "agent key @testbox",
         scope: "agent",
@@ -91,6 +104,18 @@ describe("keys commands", () => {
       expect(mockStderr).toHaveBeenCalledWith(
         "Key key_agt1 created (agent-scoped: mybot@agents.e2a.dev). Shown once — store it now.\n",
       );
+    });
+
+    it("refuses to guess the operator's domain when discovery finds no shared domain", async () => {
+      // A self-hosted deployment with no /v1/info shared_domain (or an
+      // unreachable one) must NOT silently fall back to agents.e2a.dev.
+      mockFetch.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+      const { keysCreate } = await import("../commands/keys.js");
+
+      await expect(keysCreate({ agent: "mybot" })).rejects.toThrow("process.exit");
+      expect(mockExit).toHaveBeenCalledWith(2);
+      expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining("no shared domain"));
+      expect(mockCreate).not.toHaveBeenCalled();
     });
 
     it("prints the plaintext key alone on stdout, the warning on stderr", async () => {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestOutboundModeConfigurationRemoved is a source-level contract guard. Outbound
@@ -138,6 +139,56 @@ signing:
 	}
 }
 
+func TestLoadConfigEnvVarOverridesYAMLEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+env: "development"
+`), 0644)
+
+	t.Setenv("E2A_ENV", "production")
+	// Satisfy the production HMAC guards so this test isolates the Env
+	// override itself, not Validate()'s other production-only checks.
+	t.Setenv("E2A_HMAC_SECRET", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Env != "production" {
+		t.Errorf("Env = %q, want production (E2A_ENV should override config.yaml's env: development)", cfg.Env)
+	}
+	if !cfg.IsProduction() {
+		t.Error("IsProduction() = false, want true after E2A_ENV=production override")
+	}
+}
+
+func TestLoadRejectsInvalidEnvValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		yaml   string
+		envVar string
+	}{
+		{name: "invalid value in YAML", yaml: "env: \"staging\"\n"},
+		{name: "invalid value via E2A_ENV", yaml: "env: \"development\"\n", envVar: "staging"},
+		{name: "typo via E2A_ENV must not silently mean non-production", yaml: "env: \"production\"\n", envVar: "produciton"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.yaml")
+			os.WriteFile(cfgPath, []byte(tc.yaml), 0644)
+			if tc.envVar != "" {
+				t.Setenv("E2A_ENV", tc.envVar)
+			}
+
+			_, err := Load(cfgPath)
+			if err == nil {
+				t.Fatal("Load should reject an env value that is neither \"development\" nor \"production\"")
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidSenderIdentityLegacyCompatEnv(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -155,14 +206,22 @@ func TestLoadRejectsInvalidSenderIdentityLegacyCompatEnv(t *testing.T) {
 func TestValidateProductionRejectsPlaceholderHMAC(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfgPath, []byte(`
+	os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
 env: "production"
 signing:
-  hmac_secret: "change-me-in-production"
-`), 0644)
+  hmac_secret: %q
+`, placeholderHMACSecret)), 0644)
 
-	if _, err := Load(cfgPath); err == nil {
+	// placeholderHMACSecret is deliberately >=32 bytes (so `make run` boots
+	// in development without edits — see its doc comment), so this must be
+	// rejected on the placeholder-equality check, not merely the length
+	// check TestValidateProductionRejectsShortHMAC exercises below.
+	_, err := Load(cfgPath)
+	if err == nil {
 		t.Fatal("Load should refuse placeholder HMAC secret in production")
+	}
+	if !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("Load error = %v, want it to mention the placeholder rejection specifically", err)
 	}
 }
 
@@ -211,11 +270,11 @@ signing:
 func TestValidateDevelopmentAllowsPlaceholder(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfgPath, []byte(`
+	os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
 env: "development"
 signing:
-  hmac_secret: "change-me-in-production"
-`), 0644)
+  hmac_secret: %q
+`, placeholderHMACSecret)), 0644)
 
 	if _, err := Load(cfgPath); err != nil {
 		t.Fatalf("Load should accept placeholder in development, got: %v", err)
@@ -827,4 +886,198 @@ func TestNotificationsFromAddress(t *testing.T) {
 			t.Errorf("Validate rejected a valid bare reply_to: %v", err)
 		}
 	})
+}
+
+// TestDeploymentNameDefaultOverridesAndFallback covers the deployment name that
+// feeds the e2a-env classification tag on provisioned SES sender identities.
+// The load-time behavior that matters is the LAST case: a typo must degrade to
+// unset, never abort startup — nothing about serving mail depends on this value,
+// so refusing to boot over it would trade a cosmetic tag for an outage.
+func TestDeploymentNameDefaultOverridesAndFallback(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// Absent → unset (the self-host default: no env tag at all).
+	cfg, err := Load(write("default.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DeploymentName != "" {
+		t.Errorf("default DeploymentName = %q, want \"\"", cfg.DeploymentName)
+	}
+
+	// YAML override, both accepted names.
+	for _, name := range []string{"prod", "staging"} {
+		cfg, err = Load(write(name+".yaml", "env: \"development\"\ndeployment_name: \""+name+"\"\n"))
+		if err != nil {
+			t.Fatalf("Load(%s): %v", name, err)
+		}
+		if cfg.DeploymentName != name {
+			t.Errorf("DeploymentName = %q, want %q", cfg.DeploymentName, name)
+		}
+	}
+
+	// Env override wins over yaml.
+	t.Setenv("E2A_DEPLOYMENT_NAME", "staging")
+	cfg, err = Load(write("env.yaml", "env: \"development\"\ndeployment_name: \"prod\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DeploymentName != "staging" {
+		t.Errorf("env DeploymentName = %q, want \"staging\"", cfg.DeploymentName)
+	}
+	t.Setenv("E2A_DEPLOYMENT_NAME", "")
+
+	// An unrecognized value loads clean and reads as unset. "production" is the
+	// realistic typo: it is the legal value of the adjacent `env` field.
+	cfg, err = Load(write("bogus.yaml", "env: \"development\"\ndeployment_name: \"production\"\n"))
+	if err != nil {
+		t.Fatalf("Load must not reject an unrecognized deployment_name: %v", err)
+	}
+	if cfg.DeploymentName != "" {
+		t.Errorf("unrecognized DeploymentName = %q, want \"\" (treated as unset)", cfg.DeploymentName)
+	}
+	t.Setenv("E2A_DEPLOYMENT_NAME", "PROD")
+	cfg, err = Load(write("bogus-env.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load must not reject an unrecognized E2A_DEPLOYMENT_NAME: %v", err)
+	}
+	if cfg.DeploymentName != "" {
+		t.Errorf("unrecognized E2A_DEPLOYMENT_NAME left %q, want \"\"", cfg.DeploymentName)
+	}
+}
+
+// TestSenderIdentityFixtureTTL covers the TTL behind the e2a-expires tag on
+// fixture (internal/system) identities. A malformed env override is ignored
+// rather than fatal, for the same reason as the deployment name above.
+func TestSenderIdentityFixtureTTL(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	cfg, err := Load(write("default.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 24*time.Hour {
+		t.Errorf("default FixtureTTL = %v, want 24h", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	cfg, err = Load(write("yaml.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 2h\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 2*time.Hour {
+		t.Errorf("yaml FixtureTTL = %v, want 2h", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	// An explicit zero disables the expiry tag and must survive defaulting.
+	// It has to be spelled as a duration ("0s"): yaml.v3 decodes a duration
+	// field from a STRING only, so a bare `0` is a type error like any other.
+	cfg, err = Load(write("zero.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 0s\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 0 {
+		t.Errorf("explicit zero FixtureTTL = %v, want 0", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	t.Setenv("E2A_SENDER_IDENTITY_FIXTURE_TTL", "90m")
+	cfg, err = Load(write("env.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 2h\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 90*time.Minute {
+		t.Errorf("env FixtureTTL = %v, want 90m", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	t.Setenv("E2A_SENDER_IDENTITY_FIXTURE_TTL", "not-a-duration")
+	cfg, err = Load(write("bad-env.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 2h\n"))
+	if err != nil {
+		t.Fatalf("Load must not reject a malformed E2A_SENDER_IDENTITY_FIXTURE_TTL: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 2*time.Hour {
+		t.Errorf("malformed env override changed FixtureTTL to %v, want the yaml 2h", cfg.SenderIdentity.FixtureTTL)
+	}
+}
+
+// TestSenderIdentityOrphanReclaim covers the orphan-reclaim knobs. The whole
+// point of these defaults is that an operator who says nothing gets a
+// deployment that deletes nothing, so the default assertions here are the
+// safety property, not a convenience.
+func TestSenderIdentityOrphanReclaim(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	cfg, err := Load(write("default.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.ReapOrphans {
+		t.Error("orphan reclaim must default to OFF")
+	}
+	if len(cfg.SenderIdentity.ReclaimZones) != 0 {
+		t.Errorf("default ReclaimZones = %v, want empty (which reclaims nothing)", cfg.SenderIdentity.ReclaimZones)
+	}
+	if cfg.SenderIdentity.ReclaimMinAge != 168*time.Hour {
+		t.Errorf("default ReclaimMinAge = %v, want 168h", cfg.SenderIdentity.ReclaimMinAge)
+	}
+	if cfg.SenderIdentity.ReclaimMaxPerSweep != 5 {
+		t.Errorf("default ReclaimMaxPerSweep = %d, want 5", cfg.SenderIdentity.ReclaimMaxPerSweep)
+	}
+
+	// reclaim_min_age is a duration, so — like fixture_ttl — yaml.v3 decodes it
+	// from a STRING only.
+	cfg, err = Load(write("armed.yaml", "env: \"development\"\nsender_identity:\n"+
+		"  reap_orphans: true\n"+
+		"  reclaim_zones:\n    - fixtures.example.test\n    - probes.example.test\n"+
+		"  reclaim_min_age: 48h\n"+
+		"  reclaim_max_per_sweep: 3\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.SenderIdentity.ReapOrphans {
+		t.Error("reap_orphans: true was not read")
+	}
+	if len(cfg.SenderIdentity.ReclaimZones) != 2 || cfg.SenderIdentity.ReclaimZones[0] != "fixtures.example.test" {
+		t.Errorf("ReclaimZones = %v, want the two configured zones", cfg.SenderIdentity.ReclaimZones)
+	}
+	if cfg.SenderIdentity.ReclaimMinAge != 48*time.Hour {
+		t.Errorf("ReclaimMinAge = %v, want 48h", cfg.SenderIdentity.ReclaimMinAge)
+	}
+	if cfg.SenderIdentity.ReclaimMaxPerSweep != 3 {
+		t.Errorf("ReclaimMaxPerSweep = %d, want 3", cfg.SenderIdentity.ReclaimMaxPerSweep)
+	}
+
+	// An explicit zero on either bound must SURVIVE defaulting: both are read
+	// downstream as "reclaim nothing", which an operator must be able to state.
+	cfg, err = Load(write("zeroed.yaml", "env: \"development\"\nsender_identity:\n"+
+		"  reclaim_min_age: 0s\n  reclaim_max_per_sweep: 0\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.ReclaimMinAge != 0 || cfg.SenderIdentity.ReclaimMaxPerSweep != 0 {
+		t.Errorf("explicit zeros were re-defaulted: min_age=%v max_per_sweep=%d",
+			cfg.SenderIdentity.ReclaimMinAge, cfg.SenderIdentity.ReclaimMaxPerSweep)
+	}
 }

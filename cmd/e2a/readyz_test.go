@@ -43,6 +43,49 @@ func TestLatestMigration(t *testing.T) {
 	}
 }
 
+func TestLatestMigrationAppliedRecognizesLegacyAlias(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedTestDB(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tracker fixture transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	latest := latestMigration()
+	if latest != "118_sending_protection_validate_constraints.sql" {
+		t.Fatalf("latest migration = %q, want renamed B1 validation migration", latest)
+	}
+	if _, err := tx.Exec(ctx,
+		"DELETE FROM schema_migrations WHERE filename = $1",
+		latest,
+	); err != nil {
+		t.Fatalf("remove current tracker marker: %v", err)
+	}
+
+	applied, err := latestMigrationApplied(ctx, tx, latest)
+	if err != nil {
+		t.Fatalf("check legacy-only latest migration: %v", err)
+	}
+	if !applied {
+		t.Fatal("legacy-only tracker row must satisfy readiness after a filename-compatible upgrade")
+	}
+
+	if _, err := tx.Exec(ctx,
+		"DELETE FROM schema_migrations WHERE filename = $1",
+		"115_sending_protection_validate_constraints.sql",
+	); err != nil {
+		t.Fatalf("remove legacy tracker marker: %v", err)
+	}
+	applied, err = latestMigrationApplied(ctx, tx, latest)
+	if err != nil {
+		t.Fatalf("check missing latest migration: %v", err)
+	}
+	if applied {
+		t.Fatal("readiness accepted latest migration with neither current nor legacy tracker row")
+	}
+}
+
 func TestReadyzHandler_Ready(t *testing.T) {
 	pool := migratedTestDB(t)
 	rec := httptest.NewRecorder()

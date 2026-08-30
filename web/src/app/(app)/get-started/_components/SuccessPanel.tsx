@@ -93,7 +93,7 @@ export function SuccessPanel({
               Test email is on its way to {agent.email}
             </button>
             <p className="mt-3 text-sm text-muted text-center">
-              Connect your agent below to receive it. It will be the first message that arrives.
+              Connect your application or agent below to receive it. It will be the first message that arrives.
             </p>
           </>
         )}
@@ -112,13 +112,18 @@ export function SuccessPanel({
           color: "var(--fg)",
         }}
       >
-        Connect your agent
+        Connect your application or agent
       </h2>
       <p className="mb-6 text-[14px]" style={{ color: "var(--fg-muted)" }}>
-        Give the following commands to your agent to learn the e2a skill. Works with OpenClaw, Claude Code, Gemini CLI, or any agent that supports skills.
+        Use this address from any backend over the HTTP API or an SDK. If you are building an agent, you can also install the e2a skill for inbox tools.
       </p>
 
+      <ApiKeyNote />
+
       <div className="space-y-4">
+        <h3 className="text-[15px] font-semibold" style={{ color: "var(--fg)" }}>
+          Agent tools <span className="font-normal" style={{ color: "var(--fg-muted)" }}>(optional)</span>
+        </h3>
         <CodeBlock
           title="Install the e2a skill"
           code={`mkdir -p .claude/skills/e2a\ncurl -o .claude/skills/e2a/SKILL.md \\\n  https://raw.githubusercontent.com/tokencanopy/e2a/main/plugins/e2a/skills/e2a/SKILL.md`}
@@ -129,8 +134,6 @@ export function SuccessPanel({
           in your agent to get started. The skill walks through login, agent registration, and listening for emails automatically.
         </p>
       </div>
-
-      <ApiKeyNote />
 
       <a
         href="/inboxes"
@@ -144,14 +147,15 @@ export function SuccessPanel({
 
 function ApiKeyNote() {
   return (
-    <div className="mt-6 p-4 border border-border rounded-lg text-sm text-muted">
+    <div className="mb-6 p-4 border border-border rounded-lg text-sm text-muted">
       <p>
-        <span className="font-medium text-foreground">API key required.</span>{" "}
-        The CLI can create and save one automatically via{" "}
-        <code className="bg-surface px-1 py-0.5 rounded border border-border">e2a login</code>.
-        {" "}For direct API or SDK usage, manage keys on the{" "}
+        <span className="font-medium text-foreground">Application API.</span>{" "}
+        Create a key on the{" "}
         <a href="/api-keys" className="text-accent hover:underline">API Keys</a>{" "}
-        page. Full docs:{" "}
+        page and use it with the HTTP API, TypeScript SDK, or Python SDK. The CLI can
+        also create and save a key automatically via{" "}
+        <code className="bg-surface px-1 py-0.5 rounded border border-border">e2a login</code>.
+        {" "}Full docs:{" "}
         <a href="https://www.npmjs.com/package/@e2a/cli" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">CLI</a>,{" "}
         <a href="/api-docs" className="text-accent hover:underline">API</a>,{" "}
         <a href="https://pypi.org/project/e2a/" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">Python SDK</a>.

@@ -390,7 +390,7 @@ except Exception:print("")')"
     ;;
 
   status)
-    if t_load_config; then echo "config: OK (agent ${E2A_AGENT_EMAIL}, base ${E2A_URL})"; else echo "config: MISSING"; fi
+    if t_load_config; then echo "config: OK (agent ${E2A_AGENT_EMAIL}, base ${E2A_URL:-"(unset — e2a CLI default)"})"; else echo "config: MISSING"; fi
     echo "cli:    $(t_cli_desc)"
     if [ "$(t_state_get armed)" = "1" ]; then
       echo "armed:  yes"

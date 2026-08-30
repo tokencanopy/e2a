@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -252,9 +253,11 @@ type Deps struct {
 	// Optional — nil disables the wait valve (accepted is returned immediately).
 	PollSendOutcome func(ctx context.Context, messageID string) (identity.SendOutcome, error)
 	// HITL approve/reject (the held-draft decision)
-	ApprovePending     func(ctx context.Context, userID, messageID, expectedAgentEmail string, ovr agent.ApproveOverrides, idemCompleteTx agent.ApproveIdemCompleter) (*identity.Message, *agent.OutboundError)
-	RejectPending      func(ctx context.Context, userID, messageID, expectedAgentEmail, reason string) (*identity.Message, *agent.OutboundError)
-	EnforceMessageSend func(ctx context.Context, userID string) error
+	ApprovePending func(ctx context.Context, userID, messageID, expectedAgentEmail string, ovr agent.ApproveOverrides, idemCompleteTx agent.ApproveIdemCompleter) (*identity.Message, *agent.OutboundError)
+	RejectPending  func(ctx context.Context, userID, messageID, expectedAgentEmail, reason string) (*identity.Message, *agent.OutboundError)
+	// EnforceMessageSend pre-checks the outbound flow + storage caps for a
+	// send of `units` recipient-deliveries (deduplicated to ∪ cc ∪ bcc).
+	EnforceMessageSend func(ctx context.Context, userID string, units int) error
 	// Inbound review release — the held-screening decision (design 2026-06-22 §5).
 	// GetReviewMessage resolves a held message's direction so /approve+/reject can
 	// branch (it intentionally sees held inbound statuses, scoped to the resolved
@@ -446,6 +449,13 @@ type Deps struct {
 	// Deployment info surfaced by GET /v1/info.
 	SharedDomain string
 	PublicURL    string
+	// APIURL is this deployment's externally visible API host (config
+	// http.api_url, which already defaults to http.public_url and is already
+	// the OAuth issuer). Used as the sole entry in the OpenAPI document's
+	// `servers` block — see the comment in New() for why every deployment
+	// (hosted or self-hosted) must advertise ITS OWN host here, never a
+	// hardcoded literal.
+	APIURL string
 
 	// WSHandle serves the WebSocket upgrade for an agent address (the real-
 	// time inbound transport). Injected so httpapi need not depend on the ws
@@ -500,8 +510,11 @@ func New(deps Deps) *Server {
 	// handlers, legacy fallback). No-op when deps.Metrics is nil.
 	root.Use(requestMetrics(deps.Metrics))
 	root.Use(securityHeaders)
-	root.Use(authChallenge(deps.AuthChallenge))
+	// withRawRequest installs the per-request auth memo; authChallenge must
+	// run INSIDE it so the challenge builder's request carries that memo and
+	// reuses the already-resolved outcome instead of re-authenticating.
 	root.Use(withRawRequest)
+	root.Use(authChallenge(deps.AuthChallenge))
 
 	config := huma.DefaultConfig("e2a API", APIVersion)
 	// Reject bodies that are not valid UTF-8 BEFORE JSON decoding. This must
@@ -543,13 +556,25 @@ func New(deps Deps) *Server {
 		"beta, or enumerated as experimental, is stable.\n\n" +
 		"Removing or changing stable surface only happens on a new major version path (/v2); deprecations " +
 		"are announced ahead of time via `deprecated: true` in this document and keep working within v1."
-	// Canonical production host (api-v1-redesign §1: "Canonical base URL
-	// https://api.e2a.dev/v1"). Operations already carry the /v1 prefix, so the
-	// server URL stops at the host — otherwise clients would double it. Without a
-	// servers block, generated SDKs default to http://localhost (a
-	// Bearer-over-cleartext footgun).
-	config.Servers = []*huma.Server{
-		{URL: "https://api.e2a.dev", Description: "Production"},
+	// This document is served by EVERY deployment at /v1/openapi and /v1/docs
+	// — hosted and self-hosted alike — so the `servers` entry must name THIS
+	// deployment's own API host, never a literal. A self-hoster's docs page
+	// would otherwise render the operator as the sole server, and the
+	// try-it button would fire the reader's bearer at api.e2a.dev instead of
+	// the self-hosted deployment. deps.APIURL is config http.api_url, which
+	// already defaults to http.public_url and is already the OAuth issuer —
+	// api-v1-redesign §1's "Canonical base URL https://api.e2a.dev/v1" is
+	// simply what THAT config resolves to on the operator's own deployment.
+	// Operations already carry the /v1 prefix, so the server URL stops at
+	// the host — otherwise clients would double it. When APIURL is unset (a
+	// self-host that configured neither http.api_url nor http.public_url) we
+	// leave Servers nil rather than guess a host: Huma then falls back to
+	// its own http://localhost default, which is at worst unhelpful, never
+	// wrong about who is being talked to.
+	if deps.APIURL != "" {
+		config.Servers = []*huma.Server{
+			{URL: deps.APIURL, Description: "Production"},
+		}
 	}
 	// One auth scheme across the surface: a Bearer credential that is
 	// either an API key or an OAuth 2.1 access token (api-v1-redesign §5).
@@ -810,8 +835,15 @@ type reqCtxKey struct{}
 // the auth path. Storing the request in its own derived context is the
 // standard bridge; only headers/cookies are read downstream, so the
 // pre-derivation request is equivalent for authentication.
+//
+// It also installs a one-shot per-request auth memo (agent.WithAuthMemo)
+// so the credential is resolved exactly once across the rate-limit
+// middleware, the handler, and the WWW-Authenticate challenge re-run —
+// the stashed request and every RequestFromContext consumer then share
+// that memo (the stateful delegated verifier must not run twice).
 func withRawRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = agent.WithAuthMemo(r)
 		ctx := context.WithValue(r.Context(), reqCtxKey{}, r)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -850,6 +882,12 @@ func (s *Server) requirePrincipal(ctx context.Context) (*identity.Principal, err
 	}
 	p, err := s.resolvePrincipal(r)
 	if err != nil {
+		// Availability failures (delegated verifier not ready, identity
+		// store outage) are 503, not 401: the credential was never judged,
+		// so no challenge fires (the challenge wrapper keys on 401 alone).
+		if errors.Is(err, identity.ErrAuthUnavailable) {
+			return nil, NewError(http.StatusServiceUnavailable, "auth_unavailable", "authentication temporarily unavailable")
+		}
 		return nil, NewError(http.StatusUnauthorized, "unauthorized", "authentication required")
 	}
 	return p, nil

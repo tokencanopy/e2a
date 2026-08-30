@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/migrations"
 )
 
@@ -289,7 +290,8 @@ func latestMigrationApplied(ctx context.Context, pool querier, latest string) (b
 	}
 	var applied bool
 	err := pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename = $1)`, latest,
+		`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename = ANY($1))`,
+		identity.EquivalentMigrationFilenames(latest),
 	).Scan(&applied)
 	return applied, err
 }

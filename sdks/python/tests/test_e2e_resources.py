@@ -459,7 +459,13 @@ async def test_domains_register_get_list_verify_delete():
             deleted = await client.domains.delete(domain)
             assert deleted.deleted is True
             assert deleted.domain == domain
-            assert deleted.sending_teardown == "confirmed"
+            # With a sending-identity provider configured, the receipt starts
+            # "pending" and is only "confirmed" when the in-request best-effort
+            # deprovision proves provider absence. Staging's provider IAM policy
+            # denies identity calls outside its own namespace, so this throwaway
+            # .example.com domain can never reach "confirmed" there — both
+            # states are contract-valid receipts for a never-verified domain.
+            assert deleted.sending_teardown in ("pending", "confirmed")
             mark_covered("domains.delete")
 
 

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
@@ -135,6 +136,19 @@ func (a *API) ApprovePendingCore(ctx context.Context, userID, messageID, expecte
 	// (retryable 500, hold untouched) — see checkSuppressionCore.
 	if supErr := a.checkSuppressionStrict(ctx, agent.UserID, agent.ID, mergedReq); supErr != nil {
 		return nil, supErr
+	}
+	// Flow-cap re-check at approve time, with the FINAL merged recipient set
+	// (reviewer edits applied) so the probe charges what the send will
+	// actually cost. Held drafts are not metered at accept, so the account's
+	// usage can fill (or its caps shrink) while a draft sits in review —
+	// without this, approving a backlog of holds would bypass every send
+	// cap; with a 1-unit probe, a 50-recipient draft near the cap would be
+	// told "accepted" and then silently deferred or terminally failed at
+	// worker claim time. On refusal nothing below has run: the hold stays
+	// pending_review, same semantics as the suppression check.
+	if oerr := a.checkApproveQuota(ctx, userID,
+		identity.UniqueRecipientCount(mergedReq.To, mergedReq.CC, mergedReq.BCC)); oerr != nil {
+		return nil, oerr
 	}
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, agent.UserID, agent, &mergedReq, true); uerr != nil {
 		return nil, uerr
@@ -456,5 +470,40 @@ func (a *API) RejectInboundReviewCore(ctx context.Context, userID, reason string
 	log.Printf("[mail:%s] dir=inbound type=%s status=%s agent=%s rejected_by=user:%s reason_len=%d",
 		msg.ID, msg.Type, identity.MessageStatusReviewRejected, msg.AgentID, userID, utf8.RuneCountInString(reason))
 	a.publishRejected(ctx, a.buildInboundRejectedEvent(msg, a.reviewOwnerID(ctx, msg.AgentID, userID), userID, reason, transition), msg.ID)
+	return nil
+}
+
+// checkApproveQuota re-checks the outbound flow + storage caps when a held
+// draft of `units` recipient-deliveries is released into the send pipeline.
+// Storage is included deliberately: approval materializes a stored sent copy,
+// matching the accept-time posture (the fire-time gate excludes storage only
+// because its message is already persisted). Returns a 402 OutboundError whose
+// Details mirror the httpapi LimitExceededDetails shape (resource / limit /
+// current / plan_code / upgrade_url). A transient enforcer error fails open —
+// the external path is re-checked at worker claim time, and a glitch must not
+// strand a reviewer's approval.
+func (a *API) checkApproveQuota(ctx context.Context, userID string, units int) *OutboundError {
+	if a.enforcer == nil {
+		return nil
+	}
+	err := a.enforcer.CheckMessageSend(ctx, userID, units)
+	if err == nil {
+		return nil
+	}
+	if le, ok := limits.IsLimitExceeded(err); ok {
+		return &OutboundError{
+			Status: http.StatusPaymentRequired,
+			Code:   "limit_exceeded",
+			Msg:    fmt.Sprintf("cannot approve: %s cap reached (%d/%d)", le.Resource, le.Current, le.Limit),
+			Details: map[string]any{
+				"resource":    le.Resource,
+				"limit":       int64(le.Limit),
+				"current":     int64(le.Current),
+				"plan_code":   le.Limits.PlanCode,
+				"upgrade_url": le.Limits.UpgradeURL,
+			},
+		}
+	}
+	log.Printf("[api] approve quota check failed (failing open): %v", err)
 	return nil
 }

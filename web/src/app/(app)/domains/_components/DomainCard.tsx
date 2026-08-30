@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { DNSRecord as DNSRecordField } from "../../../components/Field";
+import { DNSRecord as DNSRecordField } from "../../../components/DnsRecord";
 import { Chip, Dot } from "@e2a/ui";
 import {
   verifyDomain,
@@ -627,18 +627,6 @@ export function DomainCard({
               before verifying.
             </div>
           )}
-
-          <div
-            className="p-3 text-[12px]"
-            style={{
-              background: "var(--bg-elev)",
-              color: "var(--fg-muted)",
-              border: "1px solid var(--border-sub)",
-              borderRadius: "var(--r-md)",
-            }}
-          >
-            <strong style={{ color: "var(--fg)" }}>Cloudflare managed?</strong> Add Cloudflare MCP to your AI coding agent (e.g. Claude Code, Cursor) so it can set up all DNS records automatically.
-          </div>
         </div>
       )}
     </div>

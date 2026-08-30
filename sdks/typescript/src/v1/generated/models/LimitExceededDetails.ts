@@ -26,7 +26,7 @@ export class LimitExceededDetails {
     */
     'planCode'?: string;
     /**
-    * The AccountView usage/limits field stem the cap applies to. Key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes.
+    * The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (per-UTC-day send cap; no AccountView field — resets at midnight UTC).
     */
     'resource': string;
     /**

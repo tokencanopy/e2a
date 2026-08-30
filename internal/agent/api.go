@@ -25,6 +25,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/agentauth"
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
+	"github.com/tokencanopy/e2a/internal/delegated"
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -218,6 +219,8 @@ type API struct {
 	internalAPISecret     string                // optional; when empty, /api/internal/* endpoints return 503
 	provisioningEnabled   bool                  // false by default; keeps /api/internal/users/provision disabled even if a secret is present
 	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
+	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
+	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
 	billingHookURL        string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
@@ -574,6 +577,14 @@ func (a *API) ConfigureProvisioning(enabled bool, secret string) {
 	a.provisioningSecret = secret
 }
 
+// SetDelegatedIssuer wires the configured delegated issuer URL
+// (config delegated.issuer_url) that the external-principal attach
+// endpoint byte-compares request issuers against. Deliberately separate
+// from the verifier being enabled: mappings can be populated ahead of
+// flipping delegated verification on. Empty (the default) keeps attach
+// returning 503 delegated_verifier_not_configured.
+func (a *API) SetDelegatedIssuer(issuer string) { a.delegatedIssuer = issuer }
+
 // SetBillingHookURL wires in the URL of an external billing service's
 // user-event endpoint. When the user deletes their account, the API
 // HMAC-signs a JSON payload and POSTs it there so the billing service
@@ -684,6 +695,13 @@ func (a *API) RegisterRoutes(r *mux.Router) {
 	// deliberately not advertised in OpenAPI. Off by default — 503s
 	// unless provisioning.enabled + the provisioning secret are set.
 	r.HandleFunc("/api/internal/users/provision", a.handleProvisionUser).Methods("POST")
+
+	// Internal machine-to-machine endpoint: attach an external OIDC
+	// (issuer, subject) pair to an EXISTING user for delegated-token
+	// authentication (reconciliation of accounts that predate delegated
+	// provisioning). Same HMAC boundary as provisioning; additionally
+	// 503s until a delegated issuer is configured.
+	r.HandleFunc("/api/internal/users/external-principals/attach", a.handleAttachExternalPrincipal).Methods("POST")
 
 	// HITL magic-link pages (/v1/approve, /v1/reject) are NOT registered on
 	// this mux: the chi root (internal/httpapi) owns every /v1/* path and
@@ -807,10 +825,41 @@ func (a *API) authenticateUser(r *http.Request) (*identity.User, error) {
 	return p.User, nil
 }
 
+// authenticatePrincipal resolves the request credential to a principal.
+// When the request carries a one-shot auth memo (WithAuthMemo, installed
+// by the v1 request pipeline), the resolution is computed once and reused
+// for every later call within the same request — the rate-limit
+// middleware, the handler, and the 401 challenge re-run all share it.
+// This keeps the stateful delegated verifier from running more than once
+// per request (see WithAuthMemo).
 func (a *API) authenticatePrincipal(r *http.Request) (*identity.Principal, error) {
+	memo, _ := r.Context().Value(authMemoKey{}).(*authMemo)
+	if memo != nil && memo.done {
+		return memo.p, memo.err
+	}
+	p, err := a.resolvePrincipalOnce(r)
+	if memo != nil {
+		memo.done, memo.p, memo.err = true, p, err
+	}
+	return p, err
+}
+
+// resolvePrincipalOnce is the actual credential-resolution path: the
+// token-kind dispatch that authenticatePrincipal memoizes per request.
+func (a *API) resolvePrincipalOnce(r *http.Request) (*identity.Principal, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader != "" {
 		bearer := stripBearerScheme(authHeader)
+		// Token-kind dispatch, first check: a compact JWT whose protected
+		// header says typ "at+jwt" is delegated-owned. The classification is
+		// parse-only (header bytes under exact size limits, no signature or
+		// network) and deliberately unconditional — disabled, unavailable,
+		// malformed, or invalid delegated tokens never fall through to the
+		// agent-JWT, OAuth, or API-key paths. Everything not positively
+		// classified keeps today's precedence exactly.
+		if delegated.Classify(len(authHeader), bearer) {
+			return a.principalFromDelegatedToken(r, bearer)
+		}
 		// auth.md agent access token (Slice 5b-2): an RS256 JWT we minted,
 		// resolving to an agent-scoped principal. Checked before the API-key
 		// path since a JWT is never a valid API key. A bearer that looks like
@@ -943,6 +992,13 @@ func (a *API) principalFromOAuthToken(r *http.Request, bearer string) (*identity
 // metadata document lands, add `resource_metadata="<url>"` here so MCP
 // clients can auto-discover the authorization server.
 func (a *API) writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	// Availability failures (delegated verifier not ready, identity-store
+	// outage) are 503, not 401 — they say nothing about the credential, so
+	// no Bearer challenge is advertised.
+	if errors.Is(err, identity.ErrAuthUnavailable) {
+		http.Error(w, "authentication temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("WWW-Authenticate", a.authChallenge(r, err))
 	http.Error(w, "authentication required", http.StatusUnauthorized)
 }
@@ -1035,6 +1091,16 @@ func checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dki
 			// the Get-started flow can show the DKIM row populated.
 			dkimState = "found"
 		}
+		// Loud on purpose, every time: this short-circuit skips real DNS
+		// lookups and reports every domain as verified (TXT/MX/SPF "found")
+		// with no ownership proof at all. It exists so local dev works
+		// without publishing DNS — see the doc comment above — but a
+		// deployment that's in this mode by accident (e.g. env: production
+		// never set — see E2A_ENV in internal/config/config.go) would
+		// silently present DNS verification as a security control while
+		// providing none, and on a multi-user self-host it doubles as a
+		// domain-ownership bypass. Never let this fire silently.
+		log.Printf("WARNING: dev-mode DNS short-circuit: domain=%q verified without any DNS lookup (TXT/MX/SPF reported \"found\" unconditionally); set env: production (or E2A_ENV=production) for real verification", domain)
 		return dnsRecordCheck{
 			TXTFound: true,
 			MX:       "found",
@@ -1768,22 +1834,30 @@ func (a *API) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		attempted++
 		ghRepo := os.Getenv("GITHUB_FEEDBACK_REPO")
 		if ghRepo == "" {
-			ghRepo = "tokencanopy/e2a"
-		}
-		parts := strings.SplitN(ghRepo, "/", 2)
-		if len(parts) != 2 {
-			log.Printf("feedback: invalid GITHUB_FEEDBACK_REPO: %s", ghRepo)
+			// A GitHub credential (App or PAT) is configured but no target repo
+			// is — refuse to file rather than defaulting to the operator's
+			// public tracker. /api/feedback is unauthenticated and
+			// IP-rate-limited only, so silently falling back here would let
+			// anyone who can reach this deployment file arbitrary-text issues
+			// on tokencanopy/e2a using THIS deployment's own GitHub
+			// credential, with the submitter's email in the issue body.
+			log.Printf("feedback: GITHUB_FEEDBACK_REPO is not set — refusing to file a GitHub issue (a self-hosted deployment's GitHub credential must never target the operator's repo by default)")
 		} else {
-			issue, _, err := ghClient.Issues.Create(ghCtx, parts[0], parts[1], &github.IssueRequest{
-				Title:  github.Ptr(title),
-				Body:   github.Ptr(body),
-				Labels: &[]string{label},
-			})
-			if err != nil {
-				log.Printf("feedback: GitHub API error: %v", err)
+			parts := strings.SplitN(ghRepo, "/", 2)
+			if len(parts) != 2 {
+				log.Printf("feedback: invalid GITHUB_FEEDBACK_REPO: %s", ghRepo)
 			} else {
-				delivered++
-				issueURL = issue.GetHTMLURL()
+				issue, _, err := ghClient.Issues.Create(ghCtx, parts[0], parts[1], &github.IssueRequest{
+					Title:  github.Ptr(title),
+					Body:   github.Ptr(body),
+					Labels: &[]string{label},
+				})
+				if err != nil {
+					log.Printf("feedback: GitHub API error: %v", err)
+				} else {
+					delivered++
+					issueURL = issue.GetHTMLURL()
+				}
 			}
 		}
 	}

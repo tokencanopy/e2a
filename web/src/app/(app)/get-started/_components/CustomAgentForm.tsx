@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Field } from "../../../components/Field";
+import { Field } from "@e2a/ui";
 import { createAgent } from "../../../components/onboarding/api";
 import { isValidLocalPart } from "../../../components/onboarding/state";
 import { track } from "../../../components/onboarding/analytics";

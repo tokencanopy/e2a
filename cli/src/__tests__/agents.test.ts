@@ -22,17 +22,27 @@ const AGENT = {
 
 describe("agents commands", () => {
   let mockStdout: ReturnType<typeof vi.spyOn>;
+  let mockStderr: ReturnType<typeof vi.spyOn>;
   let mockExit: ReturnType<typeof vi.spyOn>;
+  let mockFetch: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockStdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    mockStderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     mockExit = vi.spyOn(process, "exit").mockImplementation(() => {
       throw new Error("process.exit");
     });
+    // Bare-name expansion discovers shared_domain from GET /v1/info when it
+    // isn't already known — stub it so these tests never hit the network.
+    mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ shared_domain: "agents.e2a.dev" }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.clearAllMocks();
   });
@@ -44,12 +54,33 @@ describe("agents commands", () => {
 
     expect(mockCreate).toHaveBeenCalledWith({ email: "tether@agents.e2a.dev", name: "tether" });
     expect(mockStdout).toHaveBeenCalledWith("tether@agents.e2a.dev\n");
+    // A full address needs no shared-domain discovery.
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("create without an email exits USAGE (2)", async () => {
     const { agentsCreate } = await import("../commands/agents.js");
     await expect(agentsCreate(undefined, {})).rejects.toThrow("process.exit");
     expect(mockExit).toHaveBeenCalledWith(2);
+  });
+
+  it("create expands a bare name using a live-discovered shared domain", async () => {
+    mockCreate.mockResolvedValue({ ...AGENT, email: "mybot@agents.e2a.dev" });
+    const { agentsCreate } = await import("../commands/agents.js");
+    await agentsCreate("mybot", {});
+
+    expect(mockFetch).toHaveBeenCalledWith("https://e2a.dev/v1/info");
+    expect(mockCreate).toHaveBeenCalledWith({ email: "mybot@agents.e2a.dev", name: undefined });
+  });
+
+  it("create refuses to guess the operator's domain when discovery finds no shared domain", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+    const { agentsCreate } = await import("../commands/agents.js");
+
+    await expect(agentsCreate("mybot", {})).rejects.toThrow("process.exit");
+    expect(mockExit).toHaveBeenCalledWith(2);
+    expect(mockStderr).toHaveBeenCalledWith(expect.stringContaining("no shared domain"));
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 
   it("list prints TSV (email, name, verification)", async () => {
