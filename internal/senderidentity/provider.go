@@ -123,7 +123,13 @@ type Provider interface {
 	// matches this selector (see Provider doc); otherwise returns
 	// ErrIdentityNotOwned. Returns the initial Result — typically
 	// StatusPending — or an error to retry.
-	Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error)
+	//
+	// meta is best-effort classification metadata for the identity being
+	// created (see ProvisionMeta and tags.go). Implementations MUST treat
+	// every field as optional and MUST NOT fail a provision over it: a
+	// partial or wholly empty ProvisionMeta yields a less self-describing
+	// identity, never a failed verification.
+	Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte, meta ProvisionMeta) (Result, error)
 
 	// Status polls the current verification state from the provider.
 	// evidence is what e2a has on file for domain (see AdoptionEvidence) —

@@ -36,7 +36,11 @@ type FakeProvider struct {
 	// for List/reaper tests. Provision adds; Deprovision removes.
 	identities map[string]bool
 
-	ProvisionCalls   []string
+	ProvisionCalls []string
+	// ProvisionMetas is index-parallel to ProvisionCalls: the classification
+	// metadata each Provision call carried. Recorded separately so existing
+	// tests keep asserting on the plain domain list.
+	ProvisionMetas   []ProvisionMeta
 	StatusCalls      []StatusCall
 	DeprovisionCalls []string
 	ListCalls        int
@@ -128,10 +132,11 @@ func (f *FakeProvider) SetDeprovisionErr(err error) {
 	f.deprovisionErr = err
 }
 
-func (f *FakeProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error) {
+func (f *FakeProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte, meta ProvisionMeta) (Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ProvisionCalls = append(f.ProvisionCalls, domain)
+	f.ProvisionMetas = append(f.ProvisionMetas, meta)
 	if f.provisionErr != nil {
 		return Result{}, f.provisionErr
 	}

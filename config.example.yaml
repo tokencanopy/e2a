@@ -10,6 +10,17 @@
 # "production" fails startup.
 env: "development"
 
+# Optional. Names WHICH deployment this is ("prod" or "staging"), for
+# classification metadata e2a attaches to resources it creates in external
+# systems — today the e2a-env tag on provisioned SES sender identities, so a
+# shared AWS account can be audited without this server's database. NOT the
+# same as `env` above: that is a development/production mode switch, and a
+# hosted staging deployment runs env: "production" too. Self-hosters leave
+# this empty and simply get no environment tag. Any other value is logged
+# once at startup and treated as empty — never a startup failure.
+# Override with E2A_DEPLOYMENT_NAME.
+deployment_name: ""
+
 # Optional. When set, users can register agents by slug (no DNS setup required)
 # and the server provisions <slug>@<shared_domain>. Leave empty on a self-host
 # that doesn't operate a shared mail domain — every agent then needs a custom
@@ -234,6 +245,14 @@ sender_identity:
   # (config-only deploy) to switch producers to the versioned v2 lane.
   # Single-instance deployments have no overlap and can leave this false.
   legacy_job_compat: false
+  # How long a FIXTURE sending identity — one provisioned for a non-customer
+  # account class (internal dogfooding, synthetic monitoring) — is assumed to
+  # still be in use. Stamped onto the identity as the e2a-expires tag so an
+  # abandoned test fixture is distinguishable from a live customer domain in
+  # the provider account alone. Customer identities never carry it. Written as
+  # a Go duration string; "0s" disables the tag. Override with
+  # E2A_SENDER_IDENTITY_FIXTURE_TTL.
+  fixture_ttl: "24h"
 
 # Operator-managed recipient-volume ramp for newly verified custom sender
 # domains. Disabled by default for self-hosts. When enabled, the schedule is

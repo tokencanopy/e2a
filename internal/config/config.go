@@ -3,15 +3,22 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// defaultSenderIdentityFixtureTTL is how long a fixture sending identity is
+// assumed to still be in use. A conformance or prober fixture that outlives a
+// day has been abandoned by the run that made it.
+const defaultSenderIdentityFixtureTTL = 24 * time.Hour
 
 // splitAndTrim splits a comma-separated env value into a clean slice (trimmed,
 // no empties). Used for list-valued overrides like SNS topic ARNs.
@@ -64,6 +71,24 @@ type Config struct {
 	OutboundFooter   OutboundFooterConfig   `yaml:"outbound_footer"`
 	Notifications    NotificationsConfig    `yaml:"notifications"`
 	Env              string                 `yaml:"env"` // "development" or "production"
+	// DeploymentName names WHICH deployment of e2a this process is, for
+	// classification metadata e2a attaches to the resources it creates in
+	// external systems (today: the e2a-env tag on provisioned SES sender
+	// identities — internal/senderidentity/tags.go). It is deliberately NOT
+	// Env: Env is a development/production MODE switch that gates security
+	// behavior, and both the hosted prod and hosted staging deployments run
+	// env: "production", so Env provably cannot tell them apart.
+	//
+	// Recognized values are "prod" and "staging" — the closed vocabulary
+	// internal/senderidentity stamps, mirrored here only to normalize the
+	// operator's input (that package owns the tag values, and re-screens
+	// whatever it is given). Empty — the default, and what every self-host
+	// leaves it at — means unset: the metadata is simply omitted. An
+	// unrecognized value is logged once at load and treated as unset rather
+	// than rejected: nothing about serving mail depends on this, so a typo
+	// must never stop a server from booting.
+	// Override with E2A_DEPLOYMENT_NAME.
+	DeploymentName string `yaml:"deployment_name"`
 	// SharedDomain enables slug-based agent registration. When set
 	// (e.g. "agents.example.com"), users can register agents with just a
 	// slug and get `<slug>@<shared_domain>` provisioned without DNS
@@ -388,6 +413,21 @@ type SenderIdentityConfig struct {
 	// Default false — single-instance deployments have no blue/green overlap.
 	// Override via E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT.
 	LegacyJobCompat bool `yaml:"legacy_job_compat"`
+	// FixtureTTL is how long a FIXTURE sending identity — one provisioned for
+	// a non-customer account class (internal dogfooding, synthetic monitoring)
+	// — is expected to stay useful. It is stamped onto the identity as the
+	// e2a-expires tag so a later cleanup pass can tell an abandoned test
+	// fixture from a live customer domain without joining against this
+	// server's database. Customer identities never carry it.
+	//
+	// Written as a Go duration string ("24h", "90m"); yaml.v3 decodes a
+	// duration field from a string only, so a bare `0` is a type error —
+	// spell the disabled case "0s". Defaults to 24h (a conformance/prober
+	// fixture that outlives a day has been abandoned). Zero disables the tag
+	// without disabling the rest of the classification metadata. Override via
+	// E2A_SENDER_IDENTITY_FIXTURE_TTL; a malformed value there is logged and
+	// ignored rather than fatal, for the same reason as DeploymentName.
+	FixtureTTL time.Duration `yaml:"fixture_ttl"`
 }
 
 // SendingRampConfig is an operator-owned safety policy for newly verified
@@ -505,6 +545,9 @@ func Load(path string) (*Config, error) {
 		RateLimits: RateLimitsConfig{PollPerMinute: 240},
 		Metrics:    MetricsConfig{ListenAddr: "127.0.0.1:9091"},
 		Trash:      TrashConfig{RetentionDays: 30},
+		// An absent sender_identity block keeps the fixture expiry default;
+		// an explicit `fixture_ttl: 0` survives unmarshal and disables it.
+		SenderIdentity: SenderIdentityConfig{FixtureTTL: defaultSenderIdentityFixtureTTL},
 		// Delegated verification is off by default. Only protocol-level
 		// values are defaulted (algorithm allowlist, lifetime, skew); the
 		// required/forbidden CLAIM lists are deployment identity policy
@@ -677,6 +720,26 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT: %w", err)
 		}
 		cfg.SenderIdentity.LegacyJobCompat = b
+	}
+	if v := os.Getenv("E2A_SENDER_IDENTITY_FIXTURE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.SenderIdentity.FixtureTTL = d
+		} else {
+			log.Printf("[config] E2A_SENDER_IDENTITY_FIXTURE_TTL=%q is not a Go duration — ignoring it and keeping %s", v, cfg.SenderIdentity.FixtureTTL)
+		}
+	}
+	if v := os.Getenv("E2A_DEPLOYMENT_NAME"); v != "" {
+		cfg.DeploymentName = v
+	}
+	// Normalize AFTER the env override so a typo in either source degrades the
+	// same way. See DeploymentName's doc for why this is not a hard error.
+	if name := strings.TrimSpace(cfg.DeploymentName); name != "prod" && name != "staging" {
+		if name != "" {
+			log.Printf("[config] deployment_name (or E2A_DEPLOYMENT_NAME) = %q is not %q or %q — treating this deployment as unnamed; resources e2a provisions will carry no environment tag", name, "prod", "staging")
+		}
+		cfg.DeploymentName = ""
+	} else {
+		cfg.DeploymentName = name
 	}
 	if v := os.Getenv("E2A_TRASH_RETENTION_DAYS"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil {
