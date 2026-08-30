@@ -3,7 +3,7 @@
 
   "name": "e2a",
   "displayName": "e2a",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "license": "Apache-2.0",
   "homepage": "https://e2a.dev",
   "repository": "https://github.com/tokencanopy/e2a",
@@ -19,8 +19,8 @@
 
   "descriptions": {
     "$comment": "Three variants ship today. `manifest` omits HITL; both marketplace variants mention it. See docs/design/2026-08-09-agent-plugins-conformance.md — unifying them is a copy decision, deliberately not made by this migration. The MCP tool count must match mcp/tool-names.v1.json; the validator checks numeric claims.",
-    "manifest": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, structured SPF/DKIM/DMARC evidence, and a queryable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
-    "marketplaceLong": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
+    "manifest": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, structured SPF/DKIM/DMARC evidence, and a queryable event log. 79 MCP tools over hosted streamable HTTP with OAuth.",
+    "marketplaceLong": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log. 79 MCP tools over hosted streamable HTTP with OAuth.",
     "marketplaceShort": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log."
   },
 

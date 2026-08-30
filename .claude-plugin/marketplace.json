@@ -7,12 +7,12 @@
   },
   "metadata": {
     "description": "e2a plugins for Claude Code — open-source email API for applications and AI agents",
-    "version": "0.9.5"
+    "version": "0.9.6"
   },
   "plugins": [
     {
       "name": "e2a",
-      "description": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
+      "description": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, HITL approval, structured SPF/DKIM/DMARC evidence, and a queryable event log. 79 MCP tools over hosted streamable HTTP with OAuth.",
       "category": "productivity",
       "source": "./plugins/e2a",
       "homepage": "https://e2a.dev"
