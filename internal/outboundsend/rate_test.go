@@ -148,7 +148,7 @@ func TestSendWorker_RateLimitedBacksOffByElapsedWait(t *testing.T) {
 func TestSendWorker_RateLimitedHeldMessageAnchorsAtReview(t *testing.T) {
 	j := acceptedJob("msg_1")
 	j.AcceptedAt = time.Now().Add(-5 * time.Minute) // accepted long ago (would hit the 3m cap)
-	j.ReviewedAt = time.Now()                        // ...but only just cleared HITL review
+	j.ReviewedAt = time.Now()                       // ...but only just cleared HITL review
 	st := &fakeStore{job: j}
 	gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: false, RetryAt: time.Now().Add(time.Second)}}
 	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)

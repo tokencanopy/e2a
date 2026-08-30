@@ -77,8 +77,8 @@ func TestRateJitterScalesWithSpread(t *testing.T) {
 		}
 		return hi
 	}
-	small := maxOver(time.Minute)      // ceiling 15s
-	large := maxOver(3 * time.Minute)  // ceiling 45s
+	small := maxOver(time.Minute)     // ceiling 15s
+	large := maxOver(3 * time.Minute) // ceiling 45s
 	if large <= small {
 		t.Errorf("jitter did not scale with spread: 1m→%s, 3m→%s", small, large)
 	}
