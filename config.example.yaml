@@ -253,6 +253,37 @@ sender_identity:
   # a Go duration string; "0s" disables the tag. Override with
   # E2A_SENDER_IDENTITY_FIXTURE_TTL.
   fixture_ttl: "24h"
+  # Orphan reclaim: let the hourly reaper DELETE sending identities that exist
+  # at the provider with no ledger row and no domain row (crashed test runs
+  # leak these). Off by default, and arming it is not enough on its own — an
+  # identity is deleted only when ALL of these hold: it carries e2a's ownership
+  # tag, its e2a-env tag names THIS deployment (deployment_name must be set),
+  # its e2a-purpose tag says "fixture", its e2a-expires stamp is in the past,
+  # its e2a-created stamp clears reclaim_min_age, its name falls under a
+  # reclaim_zones entry, and the provider reports it as NOT verified for
+  # sending. Anything missing or unparseable refuses. Deletion runs through the
+  # same ownership-verifying teardown path the ledgered phase uses.
+  #
+  # With reap_orphans false the reaper still runs the whole decision and logs
+  # "WOULD DELETE <domain>" (or the refusal reason) without touching the
+  # provider — run there for a few days and read the logs before arming.
+  reap_orphans: false
+  # DNS zones that hold ONLY e2a's own test fixtures. This is the strongest
+  # guard: customer domains are never under the test zone. Matching is on a
+  # label boundary, so "example.test" covers "a.example.test" and
+  # "example.test" itself but never "evilexample.test". EMPTY (the default)
+  # reclaims NOTHING — it is never read as "any zone".
+  reclaim_zones: []
+  # Absolute age floor before an identity may be reclaimed, checked
+  # independently of its expiry tag so clock skew or a mis-set fixture_ttl
+  # cannot make a brand-new identity instantly reclaimable. Go duration string;
+  # "0s" reclaims nothing.
+  reclaim_min_age: "168h"
+  # Cap on deletions per reaper JOB (the orphan phase is paginated across
+  # jobs, so this is a per-page budget, not a global one). A systematic
+  # mistake then costs a handful of identities and a loud log, not the
+  # account. 0 reclaims nothing.
+  reclaim_max_per_sweep: 5
 
 # Operator-managed recipient-volume ramp for newly verified custom sender
 # domains. Disabled by default for self-hosts. When enabled, the schedule is

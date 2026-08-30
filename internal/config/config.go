@@ -20,6 +20,18 @@ import (
 // day has been abandoned by the run that made it.
 const defaultSenderIdentityFixtureTTL = 24 * time.Hour
 
+// defaultSenderIdentityReclaimMinAge is the age floor for reclaiming an
+// orphaned fixture identity. A week is far longer than any test run and far
+// longer than any plausible clock skew, so an identity that clears it is
+// abandoned rather than merely idle.
+const defaultSenderIdentityReclaimMinAge = 168 * time.Hour
+
+// defaultSenderIdentityReclaimMaxPerSweep bounds deletions per reaper job. Set
+// so a systematic mistake costs a handful of identities and a loud log rather
+// than an account's worth, while still draining a realistic leak backlog
+// (single digits, accumulated over weeks) within a couple of hourly sweeps.
+const defaultSenderIdentityReclaimMaxPerSweep = 5
+
 // splitAndTrim splits a comma-separated env value into a clean slice (trimmed,
 // no empties). Used for list-valued overrides like SNS topic ARNs.
 func splitAndTrim(s string) []string {
@@ -428,6 +440,44 @@ type SenderIdentityConfig struct {
 	// E2A_SENDER_IDENTITY_FIXTURE_TTL; a malformed value there is logged and
 	// ignored rather than fatal, for the same reason as DeploymentName.
 	FixtureTTL time.Duration `yaml:"fixture_ttl"`
+
+	// ReapOrphans ARMS the reaper's orphan-identity reclaim. An orphan is a
+	// provider identity with no ledger row and no domain row; today the reaper
+	// only alerts on them, and crashed test runs leak them until a human
+	// sweeps by hand. Default false: with the flag off the reaper runs the
+	// entire deletion decision and logs what it WOULD delete (or why it
+	// refused) without touching the provider — the observe-only mode an
+	// operator is expected to run for days before arming.
+	//
+	// Arming is NOT sufficient on its own: ReclaimZones must also be set, and
+	// every guard in senderidentity.orphanReclaimable must pass. Deletion goes
+	// through the same ownership-verifying Deprovision path the managed-ledger
+	// phase uses.
+	ReapOrphans bool `yaml:"reap_orphans"`
+	// ReclaimZones bounds reclaim to identity names at or under a DNS zone
+	// that holds only e2a's OWN test fixtures (e.g. the conformance/prober
+	// zone). This is the strongest of the reclaim guards — a customer domain
+	// is never under the test zone — and matching is on a label boundary, so
+	// zone "example.test" covers "a.example.test" and "example.test" itself
+	// but never "evilexample.test".
+	//
+	// EMPTY (the default) means reclaim NOTHING. An empty list is never read
+	// as "any zone".
+	ReclaimZones []string `yaml:"reclaim_zones"`
+	// ReclaimMinAge is the absolute age floor an identity must clear (by its
+	// e2a-created tag) before it can be reclaimed, checked INDEPENDENTLY of
+	// its expiry tag so that clock skew or a mis-set FixtureTTL cannot make a
+	// brand-new identity instantly reclaimable. Written as a Go duration
+	// string; yaml.v3 decodes a duration only from a string, so spell zero
+	// "0s". Defaults to 168h (7 days). Zero or negative reclaims nothing — an
+	// unset floor is treated as an unconfigured policy, not as a waiver.
+	ReclaimMinAge time.Duration `yaml:"reclaim_min_age"`
+	// ReclaimMaxPerSweep caps how many identities one reaper JOB may delete.
+	// The orphan phase is paginated across River jobs, so this is a per-page
+	// budget rather than a global one (see reapProviderOrphanPage): it exists
+	// so a systematic mistake costs a handful of identities and a loud log
+	// rather than the account. Defaults to 5; 0 reclaims nothing.
+	ReclaimMaxPerSweep int `yaml:"reclaim_max_per_sweep"`
 }
 
 // SendingRampConfig is an operator-owned safety policy for newly verified
@@ -547,7 +597,13 @@ func Load(path string) (*Config, error) {
 		Trash:      TrashConfig{RetentionDays: 30},
 		// An absent sender_identity block keeps the fixture expiry default;
 		// an explicit `fixture_ttl: 0` survives unmarshal and disables it.
-		SenderIdentity: SenderIdentityConfig{FixtureTTL: defaultSenderIdentityFixtureTTL},
+		// The reclaim defaults are the SAFE ones: disarmed, no zones (which
+		// alone reclaims nothing), a 7-day age floor, and a 5-per-job cap.
+		SenderIdentity: SenderIdentityConfig{
+			FixtureTTL:         defaultSenderIdentityFixtureTTL,
+			ReclaimMinAge:      defaultSenderIdentityReclaimMinAge,
+			ReclaimMaxPerSweep: defaultSenderIdentityReclaimMaxPerSweep,
+		},
 		// Delegated verification is off by default. Only protocol-level
 		// values are defaulted (algorithm allowlist, lifetime, skew); the
 		// required/forbidden CLAIM lists are deployment identity policy

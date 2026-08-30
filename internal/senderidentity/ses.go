@@ -401,6 +401,35 @@ func (p *SESProvider) Status(ctx context.Context, domain string, evidence Adopti
 	}, nil
 }
 
+// InspectIdentity reads the classification tags and the verified-for-sending
+// bit off ONE GetEmailIdentity response (see Provider.InspectIdentity for why
+// they must share a call). It deliberately makes no judgement — not even
+// isManagedIdentity's — so that every reclaim decision lives in the pure,
+// exhaustively tested orphanReclaimable rather than being split across a
+// provider that is only exercised against live AWS.
+func (p *SESProvider) InspectIdentity(ctx context.Context, domain string) (IdentityAudit, error) {
+	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+	if err != nil {
+		var notFound *sestypes.NotFoundException
+		if errors.As(err, &notFound) {
+			return IdentityAudit{}, ErrIdentityNotFound
+		}
+		return IdentityAudit{}, err
+	}
+	audit := IdentityAudit{
+		Domain:             domain,
+		Tags:               make(map[string]string, len(out.Tags)),
+		VerifiedForSending: out.VerifiedForSendingStatus,
+	}
+	for _, tag := range out.Tags {
+		if tag.Key == nil || tag.Value == nil {
+			continue
+		}
+		audit.Tags[*tag.Key] = *tag.Value
+	}
+	return audit, nil
+}
+
 func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {
 	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 	if err != nil {

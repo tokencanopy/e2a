@@ -384,7 +384,19 @@ func main() {
 			}),
 			provider,
 			senderIdentityEventFirer(outboxPublisher),
-			senderidentity.Config{LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat},
+			senderidentity.Config{
+				LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat,
+				// Orphan reclaim reads the SAME deployment name the tags were
+				// written with, so an identity can only ever be reclaimed by
+				// the deployment that created it.
+				Reclaim: senderidentity.ReclaimConfig{
+					Enabled:     cfg.SenderIdentity.ReapOrphans,
+					Deployment:  cfg.DeploymentName,
+					Zones:       cfg.SenderIdentity.ReclaimZones,
+					MinAge:      cfg.SenderIdentity.ReclaimMinAge,
+					MaxPerSweep: cfg.SenderIdentity.ReclaimMaxPerSweep,
+				},
+			},
 		)
 		registrars = append(registrars, senderMgr)
 	}
