@@ -55,16 +55,16 @@ test("marketplaces expose the supported plugin set and release versions", async 
   assert.deepEqual(claudeMarket.plugins.map((plugin) => plugin.name).sort(), ["e2a", "e2a-labs"]);
   assert.deepEqual(codexMarket.plugins.map((plugin) => plugin.name).sort(), ["e2a", "e2a-labs"]);
   assert.deepEqual(cursorMarket.plugins.map((plugin) => plugin.name), ["e2a"]);
-  assert.equal(claudeMarket.metadata.version, "0.9.4");
-  assert.equal(cursorMarket.metadata.version, "0.9.4");
+  assert.equal(claudeMarket.metadata.version, "0.9.5");
+  assert.equal(cursorMarket.metadata.version, "0.9.5");
 
   for (const client of [".claude-plugin", ".codex-plugin", ".cursor-plugin"]) {
     const core = JSON.parse(await readFile(`plugins/e2a/${client}/plugin.json`, "utf8"));
-    assert.equal(core.version, "0.9.4");
+    assert.equal(core.version, "0.9.5");
   }
   for (const client of [".claude-plugin", ".codex-plugin"]) {
     const labs = JSON.parse(await readFile(`plugins/e2a-labs/${client}/plugin.json`, "utf8"));
-    assert.equal(labs.version, "0.3.0");
+    assert.equal(labs.version, "0.3.1");
   }
 });
 

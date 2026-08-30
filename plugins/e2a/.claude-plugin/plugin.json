@@ -1,7 +1,7 @@
 {
   "name": "e2a",
   "displayName": "e2a",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Open-source email API for applications and AI agents — transactional sending from any product, per-agent two-way inboxes, structured SPF/DKIM/DMARC evidence, and a queryable event log. 78 MCP tools over hosted streamable HTTP with OAuth.",
   "author": {
     "name": "TokenCanopy",
