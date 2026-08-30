@@ -277,6 +277,12 @@ func main() {
 	var jobsClient *jobs.Client
 	var registrars []jobs.Registrar
 
+	// Read-side usage store. Built up here rather than beside the limits
+	// enforcer that also consumes it, because the sender-identity registrar
+	// below reads account classes through it to classify (tag) the SES
+	// identities it provisions.
+	usageStore := usage.NewStore(pool)
+
 	// Usage tracking is hosted-deployment infrastructure (counts every
 	// inbound/outbound message into usage_events + usage_summaries for downstream
 	// billing reconciliation). Self-hosters get the no-op tracker by default — the
@@ -367,8 +373,15 @@ func main() {
 		if perr != nil {
 			log.Fatalf("sender identity: build SES provider: %v", perr)
 		}
+		// Classification tags on every identity e2a provisions, so a cleanup
+		// pass can judge one from AWS alone. Reuses the metrics build label as
+		// the provisioner stamp — it is already the deployed release string.
+		provider = provider.WithIdentityTags(cfg.DeploymentName, cfg.Metrics.Build, cfg.SenderIdentity.FixtureTTL)
 		senderMgr = senderidentity.NewManager(
-			senderidentity.NewStoreAdapter(store),
+			senderidentity.NewStoreAdapter(store, func(ctx context.Context, userID string) (string, error) {
+				class, err := usageStore.GetAccountClass(ctx, userID)
+				return string(class), err
+			}),
 			provider,
 			senderIdentityEventFirer(outboxPublisher),
 			senderidentity.Config{LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat},
@@ -689,7 +702,6 @@ func main() {
 	// run a provisioner get the generous config defaults applied to
 	// every user — effectively unlimited unless they tighten the
 	// `limits:` config block.
-	usageStore := usage.NewStore(pool)
 	enforcer := limits.NewEnforcer(
 		limits.NewStore(pool),
 		usageStore,

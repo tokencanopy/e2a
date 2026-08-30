@@ -32,11 +32,35 @@ type RawStore interface {
 	DomainExists(ctx context.Context, domain string) (bool, error)
 }
 
+// AccountClassFunc resolves a user's usage account class ("standard",
+// "internal", "system", "demo"). *usage.Store's GetAccountClass satisfies it
+// after a one-line string conversion at the wiring site — kept as a plain func
+// over plain strings for the same reason RawStore is, so this package does not
+// import internal/usage.
+type AccountClassFunc func(ctx context.Context, userID string) (string, error)
+
 // NewStoreAdapter bridges a RawStore (e.g. *identity.Store) to the typed
 // Store the workers use, converting Status ↔ string and DNSRecord ↔ JSON.
-func NewStoreAdapter(raw RawStore) Store { return &storeAdapter{raw: raw} }
+//
+// accountClass is OPTIONAL and may be nil: the account class exists only to
+// classify provisioned provider identities (see tags.go), so a deployment that
+// does not wire it reads as "class unknown" and loses one tag, rather than
+// erroring on a path that verifies customer domains.
+func NewStoreAdapter(raw RawStore, accountClass AccountClassFunc) Store {
+	return &storeAdapter{raw: raw, accountClass: accountClass}
+}
 
-type storeAdapter struct{ raw RawStore }
+type storeAdapter struct {
+	raw          RawStore
+	accountClass AccountClassFunc
+}
+
+func (a *storeAdapter) AccountClassForUser(ctx context.Context, userID string) (string, error) {
+	if a.accountClass == nil {
+		return "", nil
+	}
+	return a.accountClass(ctx, userID)
+}
 
 func (a *storeAdapter) WithSendingIdentityMutationLock(ctx context.Context, domain string, fn func(context.Context) error) error {
 	return a.raw.WithSendingIdentityMutationLock(ctx, domain, fn)

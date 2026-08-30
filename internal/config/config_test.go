@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestOutboundModeConfigurationRemoved is a source-level contract guard. Outbound
@@ -885,4 +886,130 @@ func TestNotificationsFromAddress(t *testing.T) {
 			t.Errorf("Validate rejected a valid bare reply_to: %v", err)
 		}
 	})
+}
+
+// TestDeploymentNameDefaultOverridesAndFallback covers the deployment name that
+// feeds the e2a-env classification tag on provisioned SES sender identities.
+// The load-time behavior that matters is the LAST case: a typo must degrade to
+// unset, never abort startup — nothing about serving mail depends on this value,
+// so refusing to boot over it would trade a cosmetic tag for an outage.
+func TestDeploymentNameDefaultOverridesAndFallback(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// Absent → unset (the self-host default: no env tag at all).
+	cfg, err := Load(write("default.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DeploymentName != "" {
+		t.Errorf("default DeploymentName = %q, want \"\"", cfg.DeploymentName)
+	}
+
+	// YAML override, both accepted names.
+	for _, name := range []string{"prod", "staging"} {
+		cfg, err = Load(write(name+".yaml", "env: \"development\"\ndeployment_name: \""+name+"\"\n"))
+		if err != nil {
+			t.Fatalf("Load(%s): %v", name, err)
+		}
+		if cfg.DeploymentName != name {
+			t.Errorf("DeploymentName = %q, want %q", cfg.DeploymentName, name)
+		}
+	}
+
+	// Env override wins over yaml.
+	t.Setenv("E2A_DEPLOYMENT_NAME", "staging")
+	cfg, err = Load(write("env.yaml", "env: \"development\"\ndeployment_name: \"prod\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DeploymentName != "staging" {
+		t.Errorf("env DeploymentName = %q, want \"staging\"", cfg.DeploymentName)
+	}
+	t.Setenv("E2A_DEPLOYMENT_NAME", "")
+
+	// An unrecognized value loads clean and reads as unset. "production" is the
+	// realistic typo: it is the legal value of the adjacent `env` field.
+	cfg, err = Load(write("bogus.yaml", "env: \"development\"\ndeployment_name: \"production\"\n"))
+	if err != nil {
+		t.Fatalf("Load must not reject an unrecognized deployment_name: %v", err)
+	}
+	if cfg.DeploymentName != "" {
+		t.Errorf("unrecognized DeploymentName = %q, want \"\" (treated as unset)", cfg.DeploymentName)
+	}
+	t.Setenv("E2A_DEPLOYMENT_NAME", "PROD")
+	cfg, err = Load(write("bogus-env.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load must not reject an unrecognized E2A_DEPLOYMENT_NAME: %v", err)
+	}
+	if cfg.DeploymentName != "" {
+		t.Errorf("unrecognized E2A_DEPLOYMENT_NAME left %q, want \"\"", cfg.DeploymentName)
+	}
+}
+
+// TestSenderIdentityFixtureTTL covers the TTL behind the e2a-expires tag on
+// fixture (internal/system) identities. A malformed env override is ignored
+// rather than fatal, for the same reason as the deployment name above.
+func TestSenderIdentityFixtureTTL(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	cfg, err := Load(write("default.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 24*time.Hour {
+		t.Errorf("default FixtureTTL = %v, want 24h", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	cfg, err = Load(write("yaml.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 2h\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 2*time.Hour {
+		t.Errorf("yaml FixtureTTL = %v, want 2h", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	// An explicit zero disables the expiry tag and must survive defaulting.
+	// It has to be spelled as a duration ("0s"): yaml.v3 decodes a duration
+	// field from a STRING only, so a bare `0` is a type error like any other.
+	cfg, err = Load(write("zero.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 0s\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 0 {
+		t.Errorf("explicit zero FixtureTTL = %v, want 0", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	t.Setenv("E2A_SENDER_IDENTITY_FIXTURE_TTL", "90m")
+	cfg, err = Load(write("env.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 2h\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 90*time.Minute {
+		t.Errorf("env FixtureTTL = %v, want 90m", cfg.SenderIdentity.FixtureTTL)
+	}
+
+	t.Setenv("E2A_SENDER_IDENTITY_FIXTURE_TTL", "not-a-duration")
+	cfg, err = Load(write("bad-env.yaml", "env: \"development\"\nsender_identity:\n  fixture_ttl: 2h\n"))
+	if err != nil {
+		t.Fatalf("Load must not reject a malformed E2A_SENDER_IDENTITY_FIXTURE_TTL: %v", err)
+	}
+	if cfg.SenderIdentity.FixtureTTL != 2*time.Hour {
+		t.Errorf("malformed env override changed FixtureTTL to %v, want the yaml 2h", cfg.SenderIdentity.FixtureTTL)
+	}
 }

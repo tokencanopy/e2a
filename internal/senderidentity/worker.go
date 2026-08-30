@@ -97,6 +97,12 @@ type Store interface {
 	// it to ALERT on provider identities that are neither ledgered nor backed
 	// by a row (pre-upgrade orphans the migration backfill could not see).
 	DomainExists(ctx context.Context, domain string) (bool, error)
+	// AccountClassForUser returns the owner's usage account class
+	// ("standard" | "internal" | "system" | "demo") for the provider's
+	// classification tags. An empty string means "not known" and is NOT an
+	// error: a store with no account-class source wired (self-host, tests)
+	// answers that way, and the provider simply omits the purpose tag.
+	AccountClassForUser(ctx context.Context, userID string) (string, error)
 }
 
 // SendingIdentityState is the incarnation-consistent desired-state snapshot
@@ -125,6 +131,33 @@ type SendingIdentityState struct {
 // could each get it wrong differently (batch C finding 5).
 func adoptionEvidence(state SendingIdentityState) AdoptionEvidence {
 	return AdoptionEvidence{Selector: state.Selector, HasPrivateKey: len(state.PrivateKey) > 0}
+}
+
+// provisionMeta resolves the classification metadata the provider stamps onto
+// an identity it creates (see tags.go). Deliberately returns no error: this is
+// cosmetic-until-the-reaper-lands metadata, and the whole design fails OPEN
+// here — a class lookup that errors, or an owner the ledger never recorded,
+// costs the identity one tag, never a customer's domain verification. The
+// eventual deletion decision fails CLOSED on the same missing tag, so nothing
+// dangerous follows from a partial answer.
+//
+// An absent owner short-circuits the lookup rather than passing "" down to it:
+// the account-class read resolves an unknown user to "standard" (see
+// usage.Store.GetAccountClass, which fails toward metering on purpose), and
+// letting that default through here would stamp a confident purpose=customer
+// derived from nothing.
+func provisionMeta(ctx context.Context, store Store, state SendingIdentityState) ProvisionMeta {
+	meta := ProvisionMeta{UserID: state.Owner}
+	if state.Owner == "" {
+		return meta
+	}
+	class, err := store.AccountClassForUser(ctx, state.Owner)
+	if err != nil {
+		log.Printf("[senderidentity:worker] account class lookup failed for owner %s — provisioning without purpose/expires tags: %v", state.Owner, err)
+		return meta
+	}
+	meta.AccountClass = class
+	return meta
 }
 
 // EventFirer publishes a domain.sending_verified / domain.sending_failed
@@ -670,7 +703,7 @@ func syncProviderIdentityWithInspection(ctx context.Context, domain string, stor
 		if err := store.MarkSendingIdentityManaged(lockedCtx, domain, state.Incarnation); err != nil {
 			return err
 		}
-		res, err := provider.Provision(lockedCtx, domain, state.Selector, state.PrivateKey)
+		res, err := provider.Provision(lockedCtx, domain, state.Selector, state.PrivateKey, provisionMeta(lockedCtx, store, state))
 		if errors.Is(err, ErrIdentityNotOwned) {
 			const reason = "provider identity exists but is not managed by e2a"
 			// See the identical comment in reconcileProviderIdentity's
