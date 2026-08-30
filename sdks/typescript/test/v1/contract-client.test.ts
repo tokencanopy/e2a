@@ -219,7 +219,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     try {
       // A future sendAt is accepted immediately as status=scheduled (the
       // contract server's outbound worker is not started, so it never fires).
-      const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const future = new Date(Date.now() + 60 * 60 * 1000);
       const res = await client.messages.send(email, {
         to: ["recipient@example.net"],
         subject: "scheduled client contract",
