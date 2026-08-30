@@ -17,6 +17,10 @@ import { mutate } from "swr";
 export const agentsKey = "agents";
 export const domainsKey = "domains";
 export const pendingMessagesKey = "pending-messages";
+// Account-scoped scheduled-send queue (GET /v1/scheduled): outbound messages
+// accepted and awaiting a future send_at. Shown as a tab on the Pending page,
+// alongside pendingMessagesKey. Its own key so the two tabs cache separately.
+export const scheduledMessagesKey = "scheduled-messages";
 export const accountUnreadKey = "account-unread";
 
 // Account plan + entitlements + month-to-date usage (GET /v1/account),
