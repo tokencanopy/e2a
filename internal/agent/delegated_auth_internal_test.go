@@ -23,14 +23,14 @@ func TestIsDelegatedRequestCancellation(t *testing.T) {
 		}
 	})
 
-	t.Run("request deadline is suppressed", func(t *testing.T) {
+	t.Run("request deadline remains an availability failure", func(t *testing.T) {
 		ctx, cancel := context.WithDeadline(context.Background(), time.Unix(1, 0))
 		defer cancel()
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			t.Fatalf("ctx.Err() = %v, want deadline exceeded", ctx.Err())
 		}
-		if !isDelegatedRequestCancellation(ctx, fmt.Errorf("lookup: %w", context.DeadlineExceeded)) {
-			t.Fatal("wrapped request deadline was not recognized")
+		if isDelegatedRequestCancellation(ctx, fmt.Errorf("lookup: %w", context.DeadlineExceeded)) {
+			t.Fatal("request deadline must not be suppressed as a caller disconnect")
 		}
 	})
 
