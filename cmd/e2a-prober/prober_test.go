@@ -247,6 +247,22 @@ func TestConfigRequireMCP(t *testing.T) {
 	}
 }
 
+func TestConfigDelegatedAuth(t *testing.T) {
+	t.Setenv("E2A_PROBE_DELEGATED_TOKEN_URL", "https://issuer.example.test/internal/probe")
+	t.Setenv("E2A_PROBE_DELEGATED_TOKEN_SECRET", "synthetic-secret")
+	t.Setenv("E2A_PROBE_REQUIRE_DELEGATED_AUTH", "true")
+	cfg := configFromEnv()
+	if cfg.DelegatedTokenURL != "https://issuer.example.test/internal/probe" ||
+		cfg.DelegatedTokenSecret != "synthetic-secret" || !cfg.RequireDelegatedAuth {
+		t.Fatalf("delegated config not loaded: %+v", cfg)
+	}
+	probe := newProber(cfg).probe()
+	if probe.DelegatedTokenURL != cfg.DelegatedTokenURL ||
+		probe.DelegatedTokenSecret != cfg.DelegatedTokenSecret || !probe.RequireDelegatedAuth {
+		t.Fatalf("delegated config not threaded to probe: %+v", probe)
+	}
+}
+
 func TestConfigMetricsBuild(t *testing.T) {
 	t.Setenv("E2A_METRICS_BUILD", "v1.3.0")
 	if got := configFromEnv().MetricsBuild; got != "v1.3.0" {

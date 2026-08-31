@@ -198,13 +198,21 @@ endpoint (`E2A_PROBE_LISTEN`, default `:8090`) exposes:
 | `e2a_selftest_duration_seconds` | gauge | Total battery duration. |
 
 Scenarios (all non-destructive; see `internal/selftest/scenarios.go`):
-`liveness`, `auth_read`, `inbound_round_trip` (SMTP→webhook→HMAC),
+`liveness`, `auth_read`, `delegated_auth` (trusted issuer token vending →
+JWKS verification → external-principal mapping → account read),
+`inbound_round_trip` (SMTP→webhook→HMAC),
 `outbound_send` (real submit to the SES mailbox simulator),
 `self_send_loopback`, `websocket_round_trip` (WS handshake + live push),
 `agent_lifecycle` (self-cleaning ephemeral agent), `mcp_http_round_trip`
 (tools/list + whoami over the deployed MCP endpoint). Set
 `E2A_PROBE_REQUIRE_MCP=true` on stacks where MCP must be probed — it turns
 the skip-as-pass on an unset `E2A_PROBE_MCP_URL` into a failure.
+The delegated-auth scenario similarly skips when its token URL/secret are
+absent unless `E2A_PROBE_REQUIRE_DELEGATED_AUTH=true`. Its vending endpoint
+must own one fixed synthetic principal and accept no caller-selected identity,
+audience, scope, role, or lifetime. The prober fetches a fresh token for one
+read-only `GET /v1/agents?limit=1`, never emits the token or response body, and
+discards it after the request.
 
 `/status` (recent runs + `consecutive_green`) is the deploy bake-gate
 contract and also the natural feed for a hosted status page: scenario names
@@ -375,6 +383,18 @@ sum(rate(e2a_selftest_scenario_runs_total{
   scenario="mcp_http_round_trip",outcome="pass"}[6h]))
 / sum(rate(e2a_selftest_scenario_runs_total{
   scenario="mcp_http_round_trip"}[6h]))
+```
+
+**Delegated console authentication** — this is the page-safe signal for the
+trusted issuer/verifier/mapping path. Public invalid-token counters are useful
+diagnostics but are attacker-influenceable and therefore are not availability
+evidence by themselves:
+
+```promql
+sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="delegated_auth",outcome="pass"}[6h]))
+/ sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="delegated_auth"}[6h]))
 ```
 
 ## Initial SLO targets

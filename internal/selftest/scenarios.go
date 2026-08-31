@@ -34,6 +34,12 @@ const defaultRoundTripTimeout = 30 * time.Second
 var All = []Scenario{
 	{Name: "liveness", SmokeSafe: true, Run: scenarioLiveness},
 	{Name: "auth_read", SmokeSafe: true, Run: scenarioAuthRead},
+	// delegated_auth obtains a fresh issuer-signed token from a trusted,
+	// fixed-principal vending endpoint and uses it for one read-only account
+	// request. It is the page-safe availability signal for delegated auth:
+	// unlike verifier failure counters, arbitrary public callers cannot choose
+	// the token or subject this scenario exercises.
+	{Name: "delegated_auth", SmokeSafe: true, Run: scenarioDelegatedAuth},
 	{Name: "inbound_round_trip", SmokeSafe: true, Run: scenarioInboundRoundTrip},
 	// outbound_send does a REAL SES submit, but only to the mailbox simulator
 	// (no real recipient, no cost, no owner notification, system-class = no
@@ -100,6 +106,80 @@ func scenarioAuthRead(ctx context.Context, p *Probe) Result {
 		return fail("GET agent: HTTP %d", resp.StatusCode)
 	}
 	return pass("authenticated read ok")
+}
+
+const maxDelegatedTokenResponseBytes = 20 * 1024
+
+// scenarioDelegatedAuth exercises the active issuer → JWKS → claim policy →
+// external-principal mapping → account authorization path. The vending
+// endpoint owns the synthetic principal and token shape; this client supplies
+// no identity, audience, scope, role, or lifetime input. Neither response body
+// is ever included in a result detail.
+func scenarioDelegatedAuth(ctx context.Context, p *Probe) Result {
+	configured := p.DelegatedTokenURL != "" && p.DelegatedTokenSecret != ""
+	if !configured {
+		if p.RequireDelegatedAuth {
+			return fail("delegated token vending is required but incomplete")
+		}
+		return pass("skipped: delegated token vending unset")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.DelegatedTokenURL, nil)
+	if err != nil {
+		return fail("delegated token request configuration invalid")
+	}
+	req.Header.Set("Authorization", "Bearer "+p.DelegatedTokenSecret)
+	resp, err := p.httpClient().Do(req)
+	if err != nil {
+		return fail("delegated token endpoint unavailable")
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxDelegatedTokenResponseBytes+1))
+	if readErr != nil {
+		return fail("delegated token response unreadable")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fail("delegated token endpoint: HTTP %d", resp.StatusCode)
+	}
+	if len(body) > maxDelegatedTokenResponseBytes {
+		return fail("delegated token response too large")
+	}
+	var exchanged struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		ExpiresIn   int    `json:"expires_in"`
+		Scope       string `json:"scope"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := dec.Decode(&exchanged); err != nil {
+		return fail("delegated token response malformed")
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return fail("delegated token response malformed")
+	}
+	if exchanged.AccessToken == "" || len(exchanged.AccessToken) > 16*1024 ||
+		strings.ContainsAny(exchanged.AccessToken, " \t\r\n") ||
+		exchanged.TokenType != "Bearer" || exchanged.Scope != "account" ||
+		exchanged.ExpiresIn < 1 || exchanged.ExpiresIn > 120 {
+		return fail("delegated token response malformed")
+	}
+
+	readURL := p.HTTPBaseURL + "/v1/agents?limit=1"
+	readReq, err := http.NewRequestWithContext(ctx, http.MethodGet, readURL, nil)
+	if err != nil {
+		return fail("delegated auth read configuration invalid")
+	}
+	readReq.Header.Set("Authorization", "Bearer "+exchanged.AccessToken)
+	readResp, err := p.httpClient().Do(readReq)
+	if err != nil {
+		return fail("delegated auth read unavailable")
+	}
+	defer readResp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(readResp.Body, 1<<20))
+	if readResp.StatusCode != http.StatusOK {
+		return fail("delegated auth read: HTTP %d", readResp.StatusCode)
+	}
+	return pass("delegated issuer, verification, mapping, and account read ok")
 }
 
 // scenarioInboundRoundTrip is the core check: inject a unique inbound message
