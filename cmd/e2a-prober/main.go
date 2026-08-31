@@ -65,16 +65,19 @@ usage: e2a-prober <seed|seed-conformance|validate|run-once|serve>
 env:
   E2A_DATABASE_URL              Postgres URL (seed, seed-conformance, validate)
   E2A_CONFORMANCE_AGENT_EMAIL   primary agent for the conformance account (seed-conformance)
-  E2A_PROBE_BASE_URL        e2a HTTP base, e.g. http://e2a:8080 (run-once, serve)
-  E2A_PROBE_SMTP_ADDR       e2a SMTP listener host:port (run-once, serve)
-  E2A_PROBE_AGENT_EMAIL     synthetic probe agent address
-  E2A_PROBE_API_KEY         probe agent API key (Bearer)
-  E2A_PROBE_WEBHOOK_SECRET  probe webhook signing secret (HMAC verify)
-  E2A_PROBE_SINK_URL        URL the probe webhook posts to (== this prober's /sink)
-  E2A_PROBE_LISTEN          serve/run-once sink bind addr (default :8090)
-  E2A_PROBE_INTERVAL        serve probe interval (default 30s)
-  E2A_PROBE_TIMEOUT         round-trip await timeout (default 30s)
-  E2A_METRICS_BUILD         release/image identifier attached to every metric
+  E2A_PROBE_BASE_URL               e2a HTTP base, e.g. http://e2a:8080 (run-once, serve)
+  E2A_PROBE_SMTP_ADDR              e2a SMTP listener host:port (run-once, serve)
+  E2A_PROBE_AGENT_EMAIL            synthetic probe agent address
+  E2A_PROBE_API_KEY                probe agent API key (Bearer)
+  E2A_PROBE_WEBHOOK_SECRET         probe webhook signing secret (HMAC verify)
+  E2A_PROBE_DELEGATED_TOKEN_URL    trusted fixed-principal token endpoint
+  E2A_PROBE_DELEGATED_TOKEN_SECRET dedicated Bearer credential for that endpoint
+  E2A_PROBE_REQUIRE_DELEGATED_AUTH fail rather than skip when delegated config is absent
+  E2A_PROBE_SINK_URL               URL the probe webhook posts to (== this prober's /sink)
+  E2A_PROBE_LISTEN                 serve/run-once sink bind addr (default :8090)
+  E2A_PROBE_INTERVAL               serve probe interval (default 30s)
+  E2A_PROBE_TIMEOUT                round-trip await timeout (default 30s)
+  E2A_METRICS_BUILD                release/image identifier attached to every metric
 `)
 }
 

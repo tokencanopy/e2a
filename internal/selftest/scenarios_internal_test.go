@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,6 +61,83 @@ func TestScenarioAuthRead_Fail(t *testing.T) {
 	}))
 	defer srv.Close()
 	mustFail(t, "auth 401", scenarioAuthRead(context.Background(), failProbe(srv.URL, "", nil)))
+}
+
+func TestScenarioDelegatedAuth_ReadsWithFreshVendedToken(t *testing.T) {
+	const token = "synthetic.jwt.value"
+	var tokenCalls, apiCalls int
+	var api *httptest.Server
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls++
+		if r.Method != http.MethodPost || r.URL.RawQuery != "" {
+			t.Fatalf("token request = %s %s, want POST without query", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer probe-secret" {
+			t.Fatalf("token authorization = %q", got)
+		}
+		if r.ContentLength > 0 {
+			t.Fatalf("token request body length = %d, want empty", r.ContentLength)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer","expires_in":60,"scope":"account"}`, token)
+	}))
+	defer tokenServer.Close()
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/agents" || r.URL.Query().Get("limit") != "1" {
+			t.Fatalf("API request = %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("API authorization = %q", got)
+		}
+		fmt.Fprint(w, `{"agents":[{"email":"must-not-be-reported@example.test"}]}`)
+	}))
+	defer api.Close()
+
+	p := failProbe(api.URL, "", nil)
+	p.DelegatedTokenURL = tokenServer.URL
+	p.DelegatedTokenSecret = "probe-secret"
+	p.RequireDelegatedAuth = true
+	result := scenarioDelegatedAuth(context.Background(), p)
+	if result.Status != StatusPass {
+		t.Fatalf("status = %s detail=%q, want pass", result.Status, result.Detail)
+	}
+	if tokenCalls != 1 || apiCalls != 1 {
+		t.Fatalf("calls token=%d api=%d, want 1/1", tokenCalls, apiCalls)
+	}
+	if strings.Contains(result.Detail, token) || strings.Contains(result.Detail, "must-not-be-reported") {
+		t.Fatalf("result leaked token or response body: %q", result.Detail)
+	}
+}
+
+func TestScenarioDelegatedAuth_ConfigurationAndOpaqueFailures(t *testing.T) {
+	p := failProbe("http://127.0.0.1:1", "", nil)
+	if result := scenarioDelegatedAuth(context.Background(), p); result.Status != StatusPass || !strings.Contains(result.Detail, "skipped") {
+		t.Fatalf("optional unconfigured result = %+v, want skipped pass", result)
+	}
+	p.RequireDelegatedAuth = true
+	mustFail(t, "required config missing", scenarioDelegatedAuth(context.Background(), p))
+
+	const sensitive = "sensitive-upstream-body"
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, sensitive)
+	}))
+	defer tokenServer.Close()
+	p.DelegatedTokenURL = tokenServer.URL
+	p.DelegatedTokenSecret = "probe-secret"
+	result := scenarioDelegatedAuth(context.Background(), p)
+	mustFail(t, "token endpoint unavailable", result)
+	if strings.Contains(result.Detail, sensitive) || strings.Contains(result.Detail, "probe-secret") {
+		t.Fatalf("failure leaked body or secret: %q", result.Detail)
+	}
+
+	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"access_token":"","token_type":"Bearer","expires_in":60,"scope":"account"}`)
+	}))
+	defer malformed.Close()
+	p.DelegatedTokenURL = malformed.URL
+	mustFail(t, "malformed token response", scenarioDelegatedAuth(context.Background(), p))
 }
 
 func TestScenarioSelfSendLoopback_Fail(t *testing.T) {
