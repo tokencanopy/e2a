@@ -221,7 +221,9 @@ type API struct {
 	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
 	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
 	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
-	billingHookURL        string                // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
+
+	delegatedLookup DelegatedIdentityLookup // external-principal store seam; defaults to store
+	billingHookURL  string                  // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
 	// Optional — when nil, those endpoints return 404 (the rest of
@@ -601,7 +603,7 @@ func (a *API) SetDomainTeardownHook(h func(ctx context.Context, tx pgx.Tx, domai
 }
 
 func NewAPI(store *identity.Store, sender *outbound.Sender, smtpRelay *outbound.SMTPRelay, userAuth *auth.UserAuth, usage usage.UsageTracker, smtpDomain, fromDomain, sharedDomain, publicURL string, production bool) *API {
-	return &API{
+	api := &API{
 		store:         store,
 		sender:        sender,
 		screen:        buildAgentScreenEngine(),
@@ -630,6 +632,8 @@ func NewAPI(store *identity.Store, sender *outbound.Sender, smtpRelay *outbound.
 		downloadLimit:    ratelimit.New(1*time.Minute, 120),                          // 120 attachment downloads per IP per minute
 		unsubscribeLimit: ratelimit.New(1*time.Minute, unsubscribeRequestsPerMinute), // provider-friendly one-click budget
 	}
+	api.delegatedLookup = store
+	return api
 }
 
 // SetPollRateLimit sets the per-user poll budget to perMinute requests per

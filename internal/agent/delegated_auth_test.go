@@ -91,6 +91,15 @@ type stubDelegatedVerifier struct {
 	err    error
 }
 
+type stubDelegatedIdentityLookup struct {
+	user *identity.User
+	err  error
+}
+
+func (s *stubDelegatedIdentityLookup) GetUserByExternalPrincipal(context.Context, string, string) (*identity.User, error) {
+	return s.user, s.err
+}
+
 func (s *stubDelegatedVerifier) Verify(context.Context, string) (*delegated.Claims, error) {
 	return s.claims, s.err
 }
@@ -336,7 +345,7 @@ func TestDelegatedUnknownSubjectIs401NotOracle(t *testing.T) {
 	}
 }
 
-func TestDelegatedAvailabilitySplits503(t *testing.T) {
+func TestDelegatedVerifierAvailabilityIs503(t *testing.T) {
 	f := newAgentIDFixture(t)
 	metrics := &delegatedMetricsRecorder{}
 	f.api.SetMetrics(metrics)
@@ -350,17 +359,39 @@ func TestDelegatedAvailabilitySplits503(t *testing.T) {
 	if got := metrics.last(t); got != "verifier_unavailable" {
 		t.Fatalf("category = %q, want verifier_unavailable", got)
 	}
+}
 
-	// Identity-store failure: token verified, mapping unreadable — 503
-	// class (a canceled request context makes the store query fail).
+func TestDelegatedRequestCancellationDoesNotCountAsStoreFailure(t *testing.T) {
+	f := newAgentIDFixture(t)
+	metrics := &delegatedMetricsRecorder{}
+	f.api.SetMetrics(metrics)
 	f.api.SetDelegatedVerifier(&stubDelegatedVerifier{
-		claims: &delegated.Claims{Issuer: "https://issuer.example.test/oidc", Subject: "principal-1"},
+		claims: &delegated.Claims{Issuer: "https://issuer.example.test/oidc", Subject: "principal-cancelled"},
 	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = f.api.AuthenticatePrincipal(bearerRequest(t, atJWTBearer(t)).WithContext(ctx))
+	_, err := f.api.AuthenticatePrincipal(bearerRequest(t, atJWTBearer(t)).WithContext(ctx))
 	if !errors.Is(err, identity.ErrAuthUnavailable) {
-		t.Fatalf("store outage err = %v, want ErrAuthUnavailable", err)
+		t.Fatalf("canceled request err = %v, want ErrAuthUnavailable", err)
+	}
+	if got := metrics.count(); got != 0 {
+		t.Fatalf("canceled request recorded %d delegated failure(s), want 0", got)
+	}
+}
+
+func TestDelegatedIdentityStoreFailureUpdatesCounter(t *testing.T) {
+	f := newAgentIDFixture(t)
+	metrics := &delegatedMetricsRecorder{}
+	f.api.SetMetrics(metrics)
+	f.api.SetDelegatedVerifier(&stubDelegatedVerifier{
+		claims: &delegated.Claims{Issuer: "https://issuer.example.test/oidc", Subject: "principal-store-failure"},
+	})
+	f.api.SetDelegatedIdentityLookup(&stubDelegatedIdentityLookup{err: errors.New("synthetic store unavailable")})
+
+	_, err := f.api.AuthenticatePrincipal(bearerRequest(t, atJWTBearer(t)))
+	if !errors.Is(err, identity.ErrAuthUnavailable) {
+		t.Fatalf("store failure err = %v, want ErrAuthUnavailable", err)
 	}
 	if got := metrics.last(t); got != "identity_store_failure" {
 		t.Fatalf("category = %q, want identity_store_failure", got)
