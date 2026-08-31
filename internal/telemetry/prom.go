@@ -395,6 +395,19 @@ func NewProm(build string) *Prom {
 		}),
 	}
 
+	// These bounded counter families feed increase()-based alert policies.
+	// Materialize every allowed child (plus the collapsed "other" child) at
+	// zero so failures between process start and the first scrape are observed
+	// as deltas instead of becoming an unobservable initial counter value.
+	for category := range delegatedFailSet {
+		p.delegatedFailures.WithLabelValues(category).Add(0)
+	}
+	p.delegatedFailures.WithLabelValues("other").Add(0)
+	for outcome := range delegatedRefreshSet {
+		p.delegatedRefresh.WithLabelValues(outcome).Add(0)
+	}
+	p.delegatedRefresh.WithLabelValues("other").Add(0)
+
 	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,

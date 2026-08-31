@@ -101,6 +101,33 @@ func TestPromSatisfiesInterface(t *testing.T) {
 	var _ Metrics = NewProm("")
 }
 
+func TestPromPreinitializesDelegatedEnumSeries(t *testing.T) {
+	p := NewProm("")
+	out := scrape(t, p)
+
+	for _, category := range []string{
+		"invalid_token", "unknown_subject", "verifier_unavailable",
+		"identity_store_failure", "other",
+	} {
+		want := `e2a_delegated_auth_failures_total{category="` + category + `"} 0`
+		if !strings.Contains(out, want) {
+			t.Errorf("missing preinitialized delegated-auth series %q", want)
+		}
+	}
+	for _, outcome := range []string{
+		"success", "key_absent", "transport_error", "parse_error",
+		"rate_limited", "other",
+	} {
+		want := `e2a_delegated_jwks_refresh_total{outcome="` + outcome + `"} 0`
+		if !strings.Contains(out, want) {
+			t.Errorf("missing preinitialized JWKS-refresh series %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
 func TestPromEmitsHTTPSeries(t *testing.T) {
 	p := NewProm("")
 	p.HTTPRequest("GET", "/v1/agents/{email}", "2xx", 0.042)

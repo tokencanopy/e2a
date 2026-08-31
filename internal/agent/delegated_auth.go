@@ -52,6 +52,12 @@ func (a *API) principalFromDelegatedToken(r *http.Request, bearer string) (*iden
 	}
 	user, err := a.store.GetUserByExternalPrincipal(r.Context(), claims.Issuer, claims.Subject)
 	if err != nil {
+		if isDelegatedRequestCancellation(r.Context(), err) {
+			// The caller went away while the lookup was in flight. Preserve the
+			// fail-closed 503 class for any observer still waiting, but do not
+			// turn caller-controlled disconnects into an availability metric.
+			return nil, fmt.Errorf("%w: delegated request canceled", identity.ErrAuthUnavailable)
+		}
 		// The token may well be valid — the mapping store couldn't say.
 		// 503, not 401, so a database blip doesn't read as revocation.
 		a.emit().DelegatedAuthFailure("identity_store_failure")
@@ -64,4 +70,9 @@ func (a *API) principalFromDelegatedToken(r *http.Request, bearer string) (*iden
 		return nil, errDelegatedInvalid
 	}
 	return &identity.Principal{User: user, Scope: identity.ScopeAccount}, nil
+}
+
+func isDelegatedRequestCancellation(ctx context.Context, err error) bool {
+	requestErr := ctx.Err()
+	return requestErr != nil && errors.Is(err, requestErr)
 }
