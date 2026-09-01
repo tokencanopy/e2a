@@ -61,28 +61,29 @@ const placeholderHMACSecret = "change-me-in-production-this-is-not-a-real-secret
 const minHMACSecretBytes = 32
 
 type Config struct {
-	SMTP             SMTPConfig             `yaml:"smtp"`
-	HTTP             HTTPConfig             `yaml:"http"`
-	Database         DatabaseConfig         `yaml:"database"`
-	OAuth            OAuthConfig            `yaml:"oauth"`
-	OIDC             OIDCConfig             `yaml:"oidc"`
-	Delegated        DelegatedConfig        `yaml:"delegated"`
-	Provisioning     ProvisioningConfig     `yaml:"provisioning"`
-	Signing          SigningConfig          `yaml:"signing"`
-	OutboundSMTP     OutboundSMTPConfig     `yaml:"outbound_smtp"`
-	Inbound          InboundConfig          `yaml:"inbound"`
-	WebhookFanout    WebhookFanoutConfig    `yaml:"webhook_fanout"`
-	Webhook          WebhookConfig          `yaml:"webhook"`
-	SenderIdentity   SenderIdentityConfig   `yaml:"sender_identity"`
-	DeliveryFeedback DeliveryFeedbackConfig `yaml:"delivery_feedback"`
-	SendingRamp      SendingRampConfig      `yaml:"sending_ramp"`
-	Limits           LimitsConfig           `yaml:"limits"`
-	RateLimits       RateLimitsConfig       `yaml:"rate_limits"`
-	Trash            TrashConfig            `yaml:"trash"`
-	Metrics          MetricsConfig          `yaml:"metrics"`
-	OutboundFooter   OutboundFooterConfig   `yaml:"outbound_footer"`
-	Notifications    NotificationsConfig    `yaml:"notifications"`
-	Env              string                 `yaml:"env"` // "development" or "production"
+	SMTP             SMTPConfig              `yaml:"smtp"`
+	HTTP             HTTPConfig              `yaml:"http"`
+	Database         DatabaseConfig          `yaml:"database"`
+	OAuth            OAuthConfig             `yaml:"oauth"`
+	OIDC             OIDCConfig              `yaml:"oidc"`
+	Delegated        DelegatedConfig         `yaml:"delegated"`
+	Provisioning     ProvisioningConfig      `yaml:"provisioning"`
+	Signing          SigningConfig           `yaml:"signing"`
+	OutboundSMTP     OutboundSMTPConfig      `yaml:"outbound_smtp"`
+	Inbound          InboundConfig           `yaml:"inbound"`
+	WebhookFanout    WebhookFanoutConfig     `yaml:"webhook_fanout"`
+	Webhook          WebhookConfig           `yaml:"webhook"`
+	SenderIdentity   SenderIdentityConfig    `yaml:"sender_identity"`
+	DeliveryFeedback DeliveryFeedbackConfig  `yaml:"delivery_feedback"`
+	SendingRamp      SendingRampConfig       `yaml:"sending_ramp"`
+	SendingProtect   SendingProtectionConfig `yaml:"sending_protection"`
+	Limits           LimitsConfig            `yaml:"limits"`
+	RateLimits       RateLimitsConfig        `yaml:"rate_limits"`
+	Trash            TrashConfig             `yaml:"trash"`
+	Metrics          MetricsConfig           `yaml:"metrics"`
+	OutboundFooter   OutboundFooterConfig    `yaml:"outbound_footer"`
+	Notifications    NotificationsConfig     `yaml:"notifications"`
+	Env              string                  `yaml:"env"` // "development" or "production"
 	// DeploymentName names WHICH deployment of e2a this process is, for
 	// classification metadata e2a attaches to the resources it creates in
 	// external systems (today: the e2a-env tag on provisioned SES sender
@@ -491,6 +492,47 @@ type SendingRampConfig struct {
 	RampDays    int  `yaml:"ramp_days"`
 }
 
+// SendingProtectionConfig carries the non-schedule half of the sending
+// protection runtime policy. The schedule fields deliberately live in
+// SendingRampConfig and are not duplicated here: that block remains the
+// custom-domain ramp SSOT, and two sources for one number is how they drift.
+//
+// RuntimePolicySource selects where the server reads its policy. Every
+// deployment defaults to "config", including self-host; only the hosted service
+// switches to "database", where activation becomes an audited compare-and-swap
+// instead of a redeploy. This struct is plain data — the typed policy, its
+// closed enums, and its invariants are owned by internal/sendingpolicy.
+type SendingProtectionConfig struct {
+	RuntimePolicySource string `yaml:"runtime_policy_source"`
+
+	BudgetMode                string   `yaml:"budget_mode"`
+	DetectorMode              string   `yaml:"detector_mode"`
+	TenantHeaderMode          string   `yaml:"tenant_header_mode"`
+	TenantProvisioningMode    string   `yaml:"tenant_provisioning_mode"`
+	TenantSuppressionSyncMode string   `yaml:"tenant_suppression_sync_mode"`
+	TenantHeaderCanaryIDs     []string `yaml:"tenant_header_canary_account_ids"`
+
+	DefaultAccountDailyRecipients    int      `yaml:"default_account_daily_recipients"`
+	SharedDomainAccountDaily         int      `yaml:"shared_domain_account_daily_recipients"`
+	ProbationGlobalDailyRecipients   int      `yaml:"probation_global_daily_recipients"`
+	AllCustomerGlobalDailyRecipients int      `yaml:"all_customer_global_daily_recipients"`
+	CriticalOperationalDaily         int      `yaml:"critical_operational_daily_recipients"`
+	ViolationOperationalDaily        int      `yaml:"violation_operational_daily_recipients"`
+	DailyUnlimitedPlanCodes          []string `yaml:"daily_unlimited_plan_codes"`
+	BudgetHoldMaxDays                int      `yaml:"budget_hold_max_days"`
+
+	BouncePauseBasisPoints       int `yaml:"bounce_pause_basis_points"`
+	ComplaintPauseBasisPoints    int `yaml:"complaint_pause_basis_points"`
+	BounceMinOutcomes            int `yaml:"bounce_min_outcomes"`
+	SharedReputationBounceMin    int `yaml:"shared_reputation_bounce_min_outcomes"`
+	DetectorIntervalSeconds      int `yaml:"detector_interval_seconds"`
+	DetectorWindowDays           int `yaml:"detector_window_days"`
+	AuditRetentionDays           int `yaml:"sending_control_audit_retention_days"`
+	FeedbackPostAccountRetention int `yaml:"sending_feedback_post_account_retention_days"`
+
+	OperatorNoticeRecipientVersion int `yaml:"operator_notice_recipient_version"`
+}
+
 // LimitsConfig is the operator-configured fallback applied to any user
 // who does not yet have a row in account_limits. The hosted billing
 // sidecar populates rows for paying customers; self-hosted operators
@@ -591,6 +633,39 @@ func Load(path string) (*Config, error) {
 			StartDaily:  50,
 			TargetDaily: 2000,
 			RampDays:    30,
+		},
+		// These control defaults mirror generation zero, but the ramp schedule
+		// deliberately does not: the OSS/self-host SendingRamp default remains
+		// 50 while hosted generation zero explicitly seeds 150 (see the design's
+		// self-host compatibility rule). Every mode is off, so either disabled
+		// payload is inert until an operator reviews and activates its exact hash.
+		SendingProtect: SendingProtectionConfig{
+			RuntimePolicySource:       "config",
+			BudgetMode:                "disabled",
+			DetectorMode:              "disabled",
+			TenantHeaderMode:          "disabled",
+			TenantProvisioningMode:    "disabled",
+			TenantSuppressionSyncMode: "disabled",
+
+			DefaultAccountDailyRecipients:    100,
+			SharedDomainAccountDaily:         50,
+			ProbationGlobalDailyRecipients:   150,
+			AllCustomerGlobalDailyRecipients: 5000,
+			CriticalOperationalDaily:         100,
+			ViolationOperationalDaily:        100,
+			DailyUnlimitedPlanCodes:          []string{"starter", "pro", "scale"},
+			BudgetHoldMaxDays:                7,
+
+			BouncePauseBasisPoints:       400,
+			ComplaintPauseBasisPoints:    8,
+			BounceMinOutcomes:            50,
+			SharedReputationBounceMin:    1,
+			DetectorIntervalSeconds:      300,
+			DetectorWindowDays:           7,
+			AuditRetentionDays:           90,
+			FeedbackPostAccountRetention: 30,
+
+			OperatorNoticeRecipientVersion: 1,
 		},
 		RateLimits: RateLimitsConfig{PollPerMinute: 240},
 		Metrics:    MetricsConfig{ListenAddr: "127.0.0.1:9091"},
@@ -930,6 +1005,20 @@ func (c *Config) Validate() error {
 		if c.SendingRamp.RampDays < 1 {
 			return fmt.Errorf("config: sending_ramp.ramp_days must be at least 1")
 		}
+	}
+	// Only the source enum is checked here. The rest of the block is validated
+	// as one typed policy by internal/sendingpolicy, so there is a single
+	// definition of a legal policy rather than one here and one there.
+	//
+	// Empty means the documented default ("config"), not an error: a Config
+	// built in code rather than loaded from YAML has no defaults applied, and
+	// an absent sending_protection block must leave a deployment on the
+	// config source rather than refusing to start.
+	switch c.SendingProtect.RuntimePolicySource {
+	case "", "config", "database":
+	default:
+		return fmt.Errorf("config: sending_protection.runtime_policy_source must be config or database (got %q)",
+			c.SendingProtect.RuntimePolicySource)
 	}
 	if v := c.Notifications.FromAddress; v != "" {
 		addr, err := mail.ParseAddress(v)

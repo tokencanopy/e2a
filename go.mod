@@ -17,6 +17,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/go-github/v72 v72.0.0
 	github.com/gorilla/mux v1.8.1
+	github.com/gowebpki/jcs v1.0.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
 	github.com/ory/fosite v0.49.0
