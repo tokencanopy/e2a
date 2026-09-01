@@ -227,6 +227,10 @@ type OIDCConfig struct {
 	RedirectURL string `yaml:"redirect_url"`
 	// UserIDClaim names the ID-token claim containing an existing users.id.
 	UserIDClaim string `yaml:"user_id_claim"`
+	// LogoutURL is an optional fixed URL to visit after local logout. Hosted
+	// deployments can use this to cascade logout through their OIDC control
+	// plane; it is never taken from a request parameter.
+	LogoutURL string `yaml:"logout_url"`
 }
 
 type SigningConfig struct {
@@ -759,6 +763,9 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OIDC_USER_ID_CLAIM"); v != "" {
 		cfg.OIDC.UserIDClaim = v
 	}
+	if v := os.Getenv("E2A_OIDC_LOGOUT_URL"); v != "" {
+		cfg.OIDC.LogoutURL = v
+	}
 	if v := os.Getenv("E2A_DELEGATED_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Delegated.Enabled = b
@@ -977,6 +984,12 @@ func (c *Config) Validate() error {
 		redirectURL, err := absoluteHTTPURL(c.OIDC.RedirectURL)
 		if err != nil || redirectURL.Fragment != "" {
 			return fmt.Errorf("config: oidc.redirect_url must be an absolute http(s) URL without a fragment")
+		}
+	}
+	if c.OIDC.LogoutURL != "" {
+		logoutURL, err := absoluteHTTPURL(c.OIDC.LogoutURL)
+		if err != nil || logoutURL.RawQuery != "" || logoutURL.Fragment != "" {
+			return fmt.Errorf("config: oidc.logout_url must be an absolute http(s) URL without query or fragment")
 		}
 	}
 	if c.Delegated.Enabled {

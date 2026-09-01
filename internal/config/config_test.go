@@ -344,6 +344,7 @@ func TestLoadConfigOIDCEnvOverrides(t *testing.T) {
 	t.Setenv("E2A_OIDC_CLIENT_SECRET", "secret")
 	t.Setenv("E2A_OIDC_REDIRECT_URL", "https://e2a.example.com/api/auth/oidc/callback")
 	t.Setenv("E2A_OIDC_USER_ID_CLAIM", "e2a_user_id")
+	t.Setenv("E2A_OIDC_LOGOUT_URL", "https://issuer.example.com/auth/logout")
 
 	cfg, err := Load(cfgPath)
 	if err != nil {
@@ -366,6 +367,9 @@ func TestLoadConfigOIDCEnvOverrides(t *testing.T) {
 	}
 	if cfg.OIDC.UserIDClaim != "e2a_user_id" {
 		t.Errorf("OIDC.UserIDClaim = %q", cfg.OIDC.UserIDClaim)
+	}
+	if cfg.OIDC.LogoutURL != "https://issuer.example.com/auth/logout" {
+		t.Errorf("OIDC.LogoutURL = %q", cfg.OIDC.LogoutURL)
 	}
 }
 
@@ -401,6 +405,7 @@ oidc:
   client_secret: "secret"
   redirect_url: "https://e2a.example.com/api/auth/oidc/callback"
   user_id_claim: "e2a_user_id"
+  logout_url: "https://issuer.example.com/auth/logout"
 `), 0644)
 
 	cfg, err := Load(cfgPath)
@@ -410,6 +415,9 @@ oidc:
 	if !cfg.OIDC.Enabled {
 		t.Error("expected OIDC.Enabled = true")
 	}
+	if cfg.OIDC.LogoutURL != "https://issuer.example.com/auth/logout" {
+		t.Errorf("OIDC.LogoutURL = %q", cfg.OIDC.LogoutURL)
+	}
 }
 
 func TestValidateOIDCEnabledRequiresAbsoluteHTTPURLs(t *testing.T) {
@@ -417,12 +425,17 @@ func TestValidateOIDCEnabledRequiresAbsoluteHTTPURLs(t *testing.T) {
 		name        string
 		issuerURL   string
 		redirectURL string
+		logoutURL   string
 		want        string
 	}{
 		{name: "relative issuer", issuerURL: "/issuer", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", want: "issuer_url"},
 		{name: "issuer query", issuerURL: "https://issuer.example.com?tenant=one", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", want: "issuer_url"},
 		{name: "relative redirect", issuerURL: "https://issuer.example.com", redirectURL: "/api/auth/oidc/callback", want: "redirect_url"},
 		{name: "non-http redirect", issuerURL: "https://issuer.example.com", redirectURL: "javascript:alert(1)", want: "redirect_url"},
+		{name: "relative logout", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "/auth/logout", want: "logout_url"},
+		{name: "logout query", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "https://issuer.example.com/auth/logout?return_to=/", want: "logout_url"},
+		{name: "logout fragment", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "https://issuer.example.com/auth/logout#done", want: "logout_url"},
+		{name: "non-http logout", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "javascript:alert(1)", want: "logout_url"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -437,7 +450,8 @@ oidc:
   client_secret: "secret"
   redirect_url: %q
   user_id_claim: "e2a_user_id"
-`, test.issuerURL, test.redirectURL)
+  logout_url: %q
+`, test.issuerURL, test.redirectURL, test.logoutURL)
 			if err := os.WriteFile(cfgPath, []byte(body), 0644); err != nil {
 				t.Fatal(err)
 			}

@@ -49,6 +49,9 @@ type UserAuth struct {
 	secure      bool   // true in production (Secure cookie flag)
 	baseURL     string // frontend origin for post-login redirect
 	userInfoURL string // Google userinfo endpoint (overridable for testing)
+	// oidcLogoutURL is an operator-configured, fixed upstream logout endpoint.
+	// It is deliberately not derived from request input.
+	oidcLogoutURL string
 }
 
 type cliLoginHandoff struct {
@@ -153,6 +156,13 @@ func NewUserAuthWithOAuthConfig(cfg *config.OAuthConfig, oauthCfg *oauth2.Config
 		baseURL:     baseURL,
 		userInfoURL: userInfoURL,
 	}
+}
+
+// SetOIDCLogoutURL configures the fixed upstream logout endpoint used after
+// the local e2a session is revoked. The value must come from validated server
+// configuration; callers must never pass request-controlled URLs here.
+func (ua *UserAuth) SetOIDCLogoutURL(logoutURL string) {
+	ua.oidcLogoutURL = logoutURL
 }
 
 func generateNonce() string {
@@ -444,7 +454,10 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ua.baseURL+"/dashboard", http.StatusFound)
 }
 
-// HandleLogout deletes the session and clears the cookie.
+// HandleLogout deletes the session and clears the cookie. Browser callers then
+// follow a 303 to either the configured upstream OIDC logout endpoint or the
+// local application root. A native navigation is required for the upstream
+// endpoint so its cross-origin session cookies can be cleared.
 func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(SessionCookieName)
 	if err == nil {
@@ -460,6 +473,15 @@ func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
+
+	if ua.oidcLogoutURL != "" {
+		http.Redirect(w, r, ua.oidcLogoutURL, http.StatusSeeOther)
+		return
+	}
+	if ua.baseURL != "" {
+		http.Redirect(w, r, ua.baseURL+"/", http.StatusSeeOther)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 }

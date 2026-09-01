@@ -27,8 +27,11 @@ func TestHandleLogout_DeletesSessionAndClearsCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 	ua.HandleLogout(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != "http://localhost/" {
+		t.Fatalf("Location = %q, want http://localhost/", location)
 	}
 
 	// The response must expire the session cookie.
@@ -61,8 +64,31 @@ func TestHandleLogout_WithoutCookieStillSucceeds(t *testing.T) {
 	w := httptest.NewRecorder()
 	ua.HandleLogout(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (logout is idempotent)", w.Code)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303 (logout is idempotent)", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != "http://localhost/" {
+		t.Fatalf("Location = %q, want http://localhost/", location)
+	}
+}
+
+func TestHandleLogout_RedirectsToConfiguredOIDCLogoutURL(t *testing.T) {
+	ua, store, token := setupUserAuth(t)
+	const logoutURL = "https://auth.example.com/auth/logout/upstream"
+	ua.SetOIDCLogoutURL(logoutURL)
+
+	req := authedRequest("POST", "/api/auth/logout", token)
+	w := httptest.NewRecorder()
+	ua.HandleLogout(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != logoutURL {
+		t.Fatalf("Location = %q, want %q", location, logoutURL)
+	}
+	if _, err := store.GetUserSession(context.Background(), token); err == nil {
+		t.Fatal("session still resolves after upstream logout redirect")
 	}
 }
 

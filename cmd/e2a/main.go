@@ -644,6 +644,9 @@ func main() {
 	}
 	if oidcAuth != nil {
 		log.Printf("[auth] OIDC login enabled (issuer=%s); discovering issuer in the background", cfg.OIDC.IssuerURL)
+		if cfg.OIDC.LogoutURL != "" {
+			userAuth.SetOIDCLogoutURL(cfg.OIDC.LogoutURL)
+		}
 	}
 
 	// HTTP API
