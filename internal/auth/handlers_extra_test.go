@@ -105,7 +105,7 @@ func TestHandleLogout_UsesCanonicalOIDCOriginWithoutGoogleOAuth(t *testing.T) {
 		t.Fatalf("CreateUserSession: %v", err)
 	}
 	ua := auth.NewUserAuth(&config.OAuthConfig{}, store, false)
-	ua.SetLogoutOrigin("https://APP.example.com/api/auth/oidc/callback?tenant=one")
+	ua.SetLogoutOrigin("https://APP.example.com:443/api/auth/oidc/callback?tenant=one")
 	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
 
 	req := authedRequest("POST", "/api/auth/logout", token)
@@ -154,6 +154,56 @@ func TestHandleLogout_ConfiguredRejectsCrossOriginHandoff(t *testing.T) {
 	}
 	if _, err := store.GetUserSession(context.Background(), token); err == nil {
 		t.Fatal("session still resolves after cross-origin logout")
+	}
+}
+
+func TestHandleLogout_ConfiguredRejectsMissingProvenance(t *testing.T) {
+	ua, _, token := setupUserAuth(t)
+	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
+
+	req := authedRequest("POST", "/api/auth/logout", token)
+	w := httptest.NewRecorder()
+	ua.HandleLogout(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != "" {
+		t.Fatalf("Location = %q, want no upstream redirect", location)
+	}
+}
+
+func TestHandleLogout_ConfiguredRejectsMalformedReferer(t *testing.T) {
+	ua, _, token := setupUserAuth(t)
+	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
+
+	req := authedRequest("POST", "/api/auth/logout", token)
+	req.Header.Set("Referer", "not a URL")
+	w := httptest.NewRecorder()
+	ua.HandleLogout(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != "" {
+		t.Fatalf("Location = %q, want no upstream redirect", location)
+	}
+}
+
+func TestHandleLogout_ConfiguredStaleSessionDoesNotCascade(t *testing.T) {
+	ua, _, _ := setupUserAuth(t)
+	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
+
+	req := authedRequest("POST", "/api/auth/logout", "sess_stale")
+	req.Header.Set("Origin", "http://localhost")
+	w := httptest.NewRecorder()
+	ua.HandleLogout(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != "http://localhost/" {
+		t.Fatalf("Location = %q, want local root", location)
 	}
 }
 
