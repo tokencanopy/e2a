@@ -75,15 +75,15 @@ type Config struct {
 	Webhook          WebhookConfig           `yaml:"webhook"`
 	SenderIdentity   SenderIdentityConfig    `yaml:"sender_identity"`
 	DeliveryFeedback DeliveryFeedbackConfig  `yaml:"delivery_feedback"`
-	SendingRamp      SendingRampConfig        `yaml:"sending_ramp"`
+	SendingRamp      SendingRampConfig       `yaml:"sending_ramp"`
 	SendingProtect   SendingProtectionConfig `yaml:"sending_protection"`
 	Limits           LimitsConfig            `yaml:"limits"`
-	RateLimits       RateLimitsConfig         `yaml:"rate_limits"`
-	Trash            TrashConfig              `yaml:"trash"`
-	Metrics          MetricsConfig            `yaml:"metrics"`
-	OutboundFooter   OutboundFooterConfig     `yaml:"outbound_footer"`
-	Notifications    NotificationsConfig      `yaml:"notifications"`
-	Env              string                   `yaml:"env"` // "development" or "production"
+	RateLimits       RateLimitsConfig        `yaml:"rate_limits"`
+	Trash            TrashConfig             `yaml:"trash"`
+	Metrics          MetricsConfig           `yaml:"metrics"`
+	OutboundFooter   OutboundFooterConfig    `yaml:"outbound_footer"`
+	Notifications    NotificationsConfig     `yaml:"notifications"`
+	Env              string                  `yaml:"env"` // "development" or "production"
 	// DeploymentName names WHICH deployment of e2a this process is, for
 	// classification metadata e2a attaches to the resources it creates in
 	// external systems (today: the e2a-env tag on provisioned SES sender
