@@ -52,7 +52,7 @@ func baseTestDBURL() string {
 // binary's name (os.Args[0] = <package>.test — unique per package in this
 // repo), so every URL consumer in one test binary — TestDB, hand-built
 // pools, the in-process contract server — lands on the same database.
-// Non-test binaries (cmd/e2a-contract-server) and E2A_TEST_DB_SHARED=1 get
+// E2A_TEST_DB_SHARED=1 gets
 // the base URL verbatim. Missing databases self-provision on first open
 // (see OpenPreparedTestDB). Concurrent sessions, agents, and worktrees are
 // isolated by the per-workspace component below, so handing each runner its
@@ -100,7 +100,7 @@ const maxPostgresIdentifier = 63
 
 // derivedDBSuffix derives the database-name suffix beneath the configured base:
 // a per-WORKSPACE component plus a per-PACKAGE component, or "" when the process
-// is not a test binary or sharing is forced.
+// shares via E2A_TEST_DB_SHARED=1.
 //
 // Two dimensions, because per-package alone was not enough. It stops packages in
 // ONE run from truncating each other, but every checkout computed the same names,
@@ -121,9 +121,6 @@ func derivedDBSuffix() string {
 		return ""
 	}
 	bin := filepath.Base(os.Args[0])
-	if !strings.HasSuffix(bin, ".test") {
-		return ""
-	}
 	name := strings.ToLower(strings.TrimSuffix(bin, ".test"))
 	sanitized := make([]rune, 0, len(name))
 	for _, r := range name {
