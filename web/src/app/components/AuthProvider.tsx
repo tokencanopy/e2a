@@ -37,12 +37,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
-    await fetch("/api/auth/logout", {
-      method: "POST",
-      credentials: "include",
-    });
     setUser(null);
-    window.location.href = "/";
+
+    // Use a top-level native navigation instead of fetch(). The server may
+    // redirect to an OIDC provider on another origin, and fetch follows that
+    // redirect without navigating the browser or reliably applying the
+    // provider's Set-Cookie headers.
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/api/auth/logout";
+    form.hidden = true;
+    document.body.appendChild(form);
+    form.submit();
   }, []);
 
   return (

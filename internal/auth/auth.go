@@ -49,6 +49,13 @@ type UserAuth struct {
 	secure      bool   // true in production (Secure cookie flag)
 	baseURL     string // frontend origin for post-login redirect
 	userInfoURL string // Google userinfo endpoint (overridable for testing)
+	// logoutOrigin is the canonical web-app origin used for logout provenance.
+	// It is separate from baseURL because generic OIDC deployments may not
+	// configure the legacy Google OAuth callback.
+	logoutOrigin string
+	// oidcLogoutURL is an operator-configured, fixed upstream logout endpoint.
+	// It is deliberately not derived from request input.
+	oidcLogoutURL string
 }
 
 type cliLoginHandoff struct {
@@ -153,6 +160,43 @@ func NewUserAuthWithOAuthConfig(cfg *config.OAuthConfig, oauthCfg *oauth2.Config
 		baseURL:     baseURL,
 		userInfoURL: userInfoURL,
 	}
+}
+
+// SetOIDCLogoutURL configures the fixed upstream logout endpoint used after
+// the local e2a session is revoked. The value must come from validated server
+// configuration; callers must never pass request-controlled URLs here.
+func (ua *UserAuth) SetOIDCLogoutURL(logoutURL string) {
+	ua.oidcLogoutURL = logoutURL
+}
+
+// SetLogoutOrigin configures the canonical web-app origin used to validate
+// browser logout requests. The value must come from trusted server
+// configuration, never from a request parameter.
+func (ua *UserAuth) SetLogoutOrigin(origin string) {
+	ua.logoutOrigin = normalizeHTTPOrigin(origin)
+}
+
+func normalizeHTTPOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil ||
+		(u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if strings.Contains(host, ":") { // IPv6 literal
+		host = "[" + host + "]"
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return strings.ToLower(u.Scheme) + "://" + host
 }
 
 func generateNonce() string {
@@ -444,11 +488,24 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ua.baseURL+"/dashboard", http.StatusFound)
 }
 
-// HandleLogout deletes the session and clears the cookie.
+// HandleLogout deletes the session and clears the cookie. Browser callers then
+// follow a 303 to either the configured upstream OIDC logout endpoint or the
+// local application root. A native navigation is required for the upstream
+// endpoint so its cross-origin session cookies can be cleared.
 func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(SessionCookieName)
+	hasValidSession := false
 	if err == nil {
-		ua.store.DeleteUserSession(r.Context(), cookie.Value)
+		_, sessionErr := ua.store.GetUserSession(r.Context(), cookie.Value)
+		if sessionErr != nil && !errors.Is(sessionErr, pgx.ErrNoRows) {
+			http.Error(w, "logout temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		hasValidSession = sessionErr == nil
+		if err := ua.store.DeleteUserSession(r.Context(), cookie.Value); err != nil {
+			http.Error(w, "logout temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -461,7 +518,50 @@ func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 	})
 
-	w.WriteHeader(http.StatusOK)
+	if ua.oidcLogoutURL != "" && hasValidSession {
+		if !ua.isSameOriginLogoutRequest(r) {
+			http.Error(w, "logout request origin is not allowed", http.StatusForbidden)
+			return
+		}
+		http.Redirect(w, r, ua.oidcLogoutURL, http.StatusSeeOther)
+		return
+	}
+	logoutOrigin := ua.logoutOrigin
+	if logoutOrigin == "" {
+		logoutOrigin = normalizeHTTPOrigin(ua.baseURL)
+	}
+	if logoutOrigin != "" {
+		http.Redirect(w, r, logoutOrigin+"/", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// isSameOriginLogoutRequest validates the browser provenance needed before a
+// configured upstream logout handoff. Origin is preferred; Referer is a
+// compatibility fallback for browsers that omit Origin on native form posts.
+// An absent or unparsable provenance header fails closed for the upstream
+// handoff, while local session revocation has already completed.
+func (ua *UserAuth) isSameOriginLogoutRequest(r *http.Request) bool {
+	expected := ua.logoutOrigin
+	if expected == "" {
+		expected = normalizeHTTPOrigin(ua.baseURL)
+	}
+	if expected == "" {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return normalizeHTTPOrigin(origin) == expected
+	}
+	referer := r.Header.Get("Referer")
+	if referer == "" {
+		return false
+	}
+	u, err := url.Parse(referer)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return false
+	}
+	return normalizeHTTPOrigin(u.Scheme+"://"+u.Host) == expected
 }
 
 // HandleMe returns the current authenticated user's info.

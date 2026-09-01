@@ -86,6 +86,10 @@ oidc:
   client_secret: ""       # keep secret; used only at token endpoint. Override: E2A_OIDC_CLIENT_SECRET
   redirect_url: ""        # e.g. "https://e2a.example.com/api/auth/oidc/callback". Override: E2A_OIDC_REDIRECT_URL
   user_id_claim: ""       # TokenCanopy uses "e2a_user_id". Override: E2A_OIDC_USER_ID_CLAIM
+  # Optional fixed upstream logout handoff. It must be an absolute http(s)
+  # URL with no query or fragment; do not derive it from browser input.
+  # Override: E2A_OIDC_LOGOUT_URL
+  logout_url: ""
   # Enable with: E2A_OIDC_ENABLED=true
 
 # — Delegated access tokens ——————————————————————————————————————————————————
