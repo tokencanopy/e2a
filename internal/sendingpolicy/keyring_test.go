@@ -141,7 +141,7 @@ func TestKeyringErrorsAreRedacted(t *testing.T) {
 	}
 }
 
-func TestLoadOperatorRecipientsDerivesGoldenCommitments(t *testing.T) {
+func TestOperatorRecipientMapDerivesGoldenCommitments(t *testing.T) {
 	o, err := LoadOperatorRecipients(operatorV2)
 	if err != nil {
 		t.Fatalf("load operator map: %v", err)
@@ -163,7 +163,7 @@ func TestLoadOperatorRecipientsDerivesGoldenCommitments(t *testing.T) {
 // TestOperatorCommitmentIsStableAcrossMapGrowth is the rotation contract: adding
 // version 2 must not change version 1's commitment, because the registry row
 // for version 1 is append-only and can never be rewritten.
-func TestOperatorCommitmentIsStableAcrossMapGrowth(t *testing.T) {
+func TestOperatorRecipientCommitmentIsStableAcrossMapGrowth(t *testing.T) {
 	one, err := LoadOperatorRecipients(operatorV1)
 	if err != nil {
 		t.Fatalf("load v1: %v", err)
@@ -185,7 +185,7 @@ func TestOperatorCommitmentIsStableAcrossMapGrowth(t *testing.T) {
 // TestOperatorCommitmentBindsVersionAndMailbox proves the NUL-separated
 // construction actually binds both inputs — a commitment that ignored either
 // would let a rotation appear complete when the mailbox never changed.
-func TestOperatorCommitmentBindsVersionAndMailbox(t *testing.T) {
+func TestOperatorRecipientCommitmentBindsVersionAndMailbox(t *testing.T) {
 	sameMailboxDifferentVersion := `{"commitment_key":"` + fixtureCKey + `","recipients":{"2":"` + fixtureAddress1 + `"}}`
 	o, err := LoadOperatorRecipients(sameMailboxDifferentVersion)
 	if err != nil {
@@ -200,7 +200,7 @@ func TestOperatorCommitmentBindsVersionAndMailbox(t *testing.T) {
 // TestOperatorMailboxIsNormalized covers the ops harness's mixed-case case: the
 // stored commitment must be over the normalized form, so two spellings of one
 // address cannot produce two different registry rows.
-func TestOperatorMailboxIsNormalized(t *testing.T) {
+func TestOperatorRecipientMailboxIsNormalized(t *testing.T) {
 	mixed := `{"commitment_key":"` + fixtureCKey + `","recipients":{"1":"Operator-One@Example.TEST"}}`
 	o, err := LoadOperatorRecipients(mixed)
 	if err != nil {
@@ -214,7 +214,7 @@ func TestOperatorMailboxIsNormalized(t *testing.T) {
 	}
 }
 
-func TestLoadOperatorRecipientsRejects(t *testing.T) {
+func TestOperatorRecipientMapRejects(t *testing.T) {
 	withRecipient := func(addr string) string {
 		return `{"commitment_key":"` + fixtureCKey + `","recipients":{"1":"` + addr + `"}}`
 	}
@@ -257,7 +257,7 @@ func TestLoadOperatorRecipientsRejects(t *testing.T) {
 // TestOperatorRejectsControlByteInMailbox is separated out because the NUL has
 // to be written as a real byte rather than a JSON escape to exercise the
 // envelope check.
-func TestOperatorRejectsControlByteInMailbox(t *testing.T) {
+func TestOperatorRecipientRejectsControlByteInMailbox(t *testing.T) {
 	raw := "{\"commitment_key\":\"" + fixtureCKey + "\",\"recipients\":{\"1\":\"operator\x00@example.test\"}}"
 	if _, err := LoadOperatorRecipients(raw); err == nil {
 		t.Fatal("expected a mailbox containing NUL to be rejected")
@@ -267,7 +267,7 @@ func TestOperatorRejectsControlByteInMailbox(t *testing.T) {
 // TestOperatorRejectsDuplicateNormalizedMailboxes is the plan's explicit case:
 // two versions resolving to one mailbox would make an operator believe a
 // rotation moved the notice destination when it did not.
-func TestOperatorRejectsDuplicateNormalizedMailboxes(t *testing.T) {
+func TestOperatorRecipientRejectsDuplicateNormalizedMailboxes(t *testing.T) {
 	raw := `{"commitment_key":"` + fixtureCKey + `","recipients":{"1":"` + fixtureAddress1 + `","2":"Operator-One@EXAMPLE.test"}}`
 	_, err := LoadOperatorRecipients(raw)
 	if err == nil {
@@ -280,7 +280,7 @@ func TestOperatorRejectsDuplicateNormalizedMailboxes(t *testing.T) {
 
 // TestOperatorErrorsAreRedacted keeps operator addresses out of logs. They are
 // secret deployment configuration, not public account data.
-func TestOperatorErrorsAreRedacted(t *testing.T) {
+func TestOperatorRecipientErrorsAreRedacted(t *testing.T) {
 	raw := `{"commitment_key":"` + fixtureCKey + `","recipients":{"1":"operator<route>@secret-ops.test"}}`
 	err := mustFail(t, raw)
 	if strings.Contains(err.Error(), "secret-ops.test") {
@@ -302,7 +302,7 @@ func mustFail(t *testing.T, raw string) error {
 
 // TestOperatorItemLimit pins the 128-version boundary the ops resolver enforces,
 // on both sides.
-func TestOperatorItemLimit(t *testing.T) {
+func TestOperatorRecipientItemLimit(t *testing.T) {
 	build := func(n int) string {
 		var b strings.Builder
 		b.WriteString(`{"commitment_key":"` + fixtureCKey + `","recipients":{`)
@@ -345,7 +345,7 @@ func itoa(i int) string {
 // the loaded map — the capability readback hands this to a JSON encoder, and a
 // mutation there would desynchronize a slot's advertised commitment from the
 // one it actually enforces.
-func TestOperatorCommitmentsMapIsDefensiveCopy(t *testing.T) {
+func TestOperatorRecipientCommitmentsMapIsDefensiveCopy(t *testing.T) {
 	o, err := LoadOperatorRecipients(operatorV1)
 	if err != nil {
 		t.Fatalf("load: %v", err)

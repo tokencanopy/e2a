@@ -55,6 +55,46 @@ func TestRuntimeAttestationCommitResponseLossRereadsExactSuccess(t *testing.T) {
 	}
 }
 
+func TestRuntimeAttestationCommitResponseLossRereadsAfterCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool := testutil.TestDB(t)
+	m := NewModule(pool, Secrets{})
+	current, err := m.InspectAttestation(ctx)
+	if err != nil {
+		t.Fatalf("inspect prior attestation: %v", err)
+	}
+	priorHash, err := AttestationHash(current)
+	if err != nil {
+		t.Fatalf("hash prior attestation: %v", err)
+	}
+
+	m.commitAttestation = func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		cancel()
+		return errSyntheticCommitResponseLoss
+	}
+
+	next, err := m.AttestRuntime(ctx, RuntimeAttestationRequest{
+		ExpectedRevision:        current.Revision,
+		ExpectedSHA256:          priorHash,
+		ActiveBillingDigest:     responseLossDigest("1"),
+		ActiveBillingContract:   1,
+		RollbackBillingDigest:   responseLossDigest("2"),
+		RollbackBillingContract: 1,
+		Actor:                   "response-loss-test",
+		Reason:                  "caller canceled after ambiguous commit",
+	})
+	if err != nil {
+		t.Fatalf("recovery read must outlive caller cancellation: %v", err)
+	}
+	if next.Revision != current.Revision+1 || next.ActiveBillingDigest != responseLossDigest("1") {
+		t.Fatalf("reconciled attestation = %+v", next)
+	}
+}
+
 func TestRuntimeAttestationCommitFailureClassifiesUnchangedState(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)

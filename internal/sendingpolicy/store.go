@@ -56,6 +56,8 @@ var (
 	ErrAlreadyGrandfathered = errors.New("sendingpolicy: sending domains were already grandfathered")
 )
 
+const attestationCommitRecoveryTimeout = 5 * time.Second
+
 // Module is the single concrete owner of sending-protection policy state. Later
 // slices expose narrow role interfaces (Gate, FeedbackProcessor, Admin) backed
 // by this same object; the Postgres store stays private because there is only
@@ -538,7 +540,14 @@ func validateBillingDigest(digest string, contract int) error {
 }
 
 func (m *Module) reconcileAttestationCommit(ctx context.Context, req RuntimeAttestationRequest, commitErr error) (RuntimeAttestation, error) {
-	observed, err := m.InspectAttestation(ctx)
+	// A commit can become ambiguous precisely because the request deadline was
+	// exceeded or its caller disconnected. Recovery must therefore outlive that
+	// cancellation, while remaining tightly bounded so this operator command
+	// cannot hang indefinitely on a broken database connection.
+	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), attestationCommitRecoveryTimeout)
+	defer cancel()
+
+	observed, err := m.InspectAttestation(recoveryCtx)
 	if err != nil {
 		return RuntimeAttestation{}, fmt.Errorf("%w: commit returned an error and reread failed: %v", ErrAttestationCommitUnknown, err)
 	}
