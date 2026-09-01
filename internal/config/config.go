@@ -991,6 +991,9 @@ func (c *Config) Validate() error {
 		if err != nil || logoutURL.RawQuery != "" || logoutURL.Fragment != "" {
 			return fmt.Errorf("config: oidc.logout_url must be an absolute http(s) URL without query or fragment")
 		}
+		if c.IsProduction() && logoutURL.Scheme != "https" {
+			return fmt.Errorf("config: oidc.logout_url must use https in production")
+		}
 	}
 	if c.Delegated.Enabled {
 		if err := c.validateDelegated(); err != nil {

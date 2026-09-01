@@ -477,6 +477,32 @@ oidc:
 	}
 }
 
+func TestValidateOIDCLogoutURLRequiresHTTPSInProduction(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(cfgPath, []byte(`
+env: "production"
+signing:
+  hmac_secret: "0123456789abcdef0123456789abcdef"
+oidc:
+  enabled: true
+  issuer_url: "https://issuer.example.com"
+  client_id: "e2a"
+  client_secret: "secret"
+  redirect_url: "https://e2a.example.com/api/auth/oidc/callback"
+  user_id_claim: "e2a_user_id"
+  logout_url: "http://issuer.example.com/auth/logout"
+`), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Load(cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "logout_url must use https") {
+		t.Fatalf("Load error = %v, want production HTTPS logout URL validation", err)
+	}
+}
+
 func TestIsProduction(t *testing.T) {
 	prod := &Config{Env: "production"}
 	dev := &Config{Env: "development"}

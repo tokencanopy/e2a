@@ -460,8 +460,18 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 // endpoint so its cross-origin session cookies can be cleared.
 func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(SessionCookieName)
+	hasValidSession := false
 	if err == nil {
-		ua.store.DeleteUserSession(r.Context(), cookie.Value)
+		_, sessionErr := ua.store.GetUserSession(r.Context(), cookie.Value)
+		if sessionErr != nil && !errors.Is(sessionErr, pgx.ErrNoRows) {
+			http.Error(w, "logout temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		hasValidSession = sessionErr == nil
+		if err := ua.store.DeleteUserSession(r.Context(), cookie.Value); err != nil {
+			http.Error(w, "logout temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -474,7 +484,11 @@ func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 	})
 
-	if ua.oidcLogoutURL != "" {
+	if ua.oidcLogoutURL != "" && hasValidSession {
+		if !ua.isSameOriginLogoutRequest(r) {
+			http.Error(w, "logout request origin is not allowed", http.StatusForbidden)
+			return
+		}
 		http.Redirect(w, r, ua.oidcLogoutURL, http.StatusSeeOther)
 		return
 	}
@@ -482,8 +496,31 @@ func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, ua.baseURL+"/", http.StatusSeeOther)
 		return
 	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
 
-	w.WriteHeader(http.StatusOK)
+// isSameOriginLogoutRequest validates the browser provenance needed before a
+// configured upstream logout handoff. Origin is preferred; Referer is a
+// compatibility fallback for browsers that omit Origin on native form posts.
+// An absent or unparsable provenance header fails closed for the upstream
+// handoff, while local session revocation has already completed.
+func (ua *UserAuth) isSameOriginLogoutRequest(r *http.Request) bool {
+	expected := ua.baseURL
+	if expected == "" {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return origin == expected
+	}
+	referer := r.Header.Get("Referer")
+	if referer == "" {
+		return false
+	}
+	u, err := url.Parse(referer)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return false
+	}
+	return u.Scheme+"://"+u.Host == expected
 }
 
 // HandleMe returns the current authenticated user's info.
