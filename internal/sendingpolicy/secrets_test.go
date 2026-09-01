@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestAllControlsDisabled(t *testing.T) {
+func TestSendingProtectionAllControlsDisabled(t *testing.T) {
 	if !DisabledPolicy().AllControlsDisabled() {
 		t.Fatal("generation zero must report all controls disabled")
 	}
@@ -37,7 +37,7 @@ func TestAllControlsDisabled(t *testing.T) {
 	}
 }
 
-func TestLoadSecretsFromEnvPresenceRules(t *testing.T) {
+func TestSendingProtectionLoadSecretsFromEnvPresenceRules(t *testing.T) {
 	enabled := DisabledPolicy()
 	enabled.BudgetMode = ModeShadow
 

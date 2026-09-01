@@ -59,6 +59,10 @@ const (
 	spTestOperatorMap   = `{"commitment_key":"` + spTestCommitmentKey + `","recipients":{"910001":"cmd-operator@example.test"}}`
 )
 
+func spBillingDigest(hexDigit string) string {
+	return "sha256:" + strings.Repeat(hexDigit, 64)
+}
+
 func TestSendingProtectionCommands(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)
@@ -100,7 +104,17 @@ func TestSendingProtectionCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("inspect: %v", err)
 		}
-		for _, want := range []string{"stored_generation:", "config_policy_sha256:", "config_policy_canonical:"} {
+		for _, want := range []string{
+			"stored_generation:",
+			"config_policy_sha256:",
+			"config_policy_canonical:",
+			"runtime_attestation_revision:",
+			"runtime_attestation_sha256:",
+			"active_billing_digest:",
+			"active_billing_contract:",
+			"rollback_billing_digest:",
+			"rollback_billing_contract:",
+		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("inspect output missing %q", want)
 			}
@@ -194,7 +208,7 @@ func TestSendingProtectionCommands(t *testing.T) {
 			t.Fatalf("load policy operator map: %v", err)
 		}
 		activationModule := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: recipients})
-		if _, err := activationModule.RegisterOperatorRecipients(ctx, "cmd-test-bootstrap"); err != nil {
+		if _, err := activationModule.RegisterOperatorRecipients(ctx, "cmd-test-bootstrap", "register selected policy operator"); err != nil {
 			t.Fatalf("register selected policy operator: %v", err)
 		}
 		before, err := module.InspectPolicy(ctx)
@@ -277,9 +291,9 @@ func TestSendingProtectionCommands(t *testing.T) {
 			attest:                      true,
 			expectedAttestationRevision: current.Revision,
 			expectedAttestationSHA:      currentHash,
-			activeBillingDigest:         "sha256:cmd-a",
+			activeBillingDigest:         spBillingDigest("a"),
 			activeBillingContract:       1,
-			rollbackBillingDigest:       "sha256:cmd-b",
+			rollbackBillingDigest:       spBillingDigest("b"),
 			rollbackBillingContract:     1,
 			reason:                      "cmd-test attestation",
 		})

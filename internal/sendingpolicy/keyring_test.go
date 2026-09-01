@@ -345,7 +345,7 @@ func itoa(i int) string {
 // the loaded map — the capability readback hands this to a JSON encoder, and a
 // mutation there would desynchronize a slot's advertised commitment from the
 // one it actually enforces.
-func TestCommitmentsMapIsDefensiveCopy(t *testing.T) {
+func TestOperatorCommitmentsMapIsDefensiveCopy(t *testing.T) {
 	o, err := LoadOperatorRecipients(operatorV1)
 	if err != nil {
 		t.Fatalf("load: %v", err)

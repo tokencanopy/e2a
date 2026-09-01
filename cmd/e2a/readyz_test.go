@@ -52,18 +52,18 @@ func TestLatestMigrationAppliedRecognizesLegacyAlias(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	latest := latestMigration()
-	if latest != "118_sending_protection_validate_constraints.sql" {
-		t.Fatalf("latest migration = %q, want renamed B1 validation migration", latest)
-	}
+	// Migration 118 was renamed after it had already shipped under the 115
+	// prefix. Exercise that compatibility mapping directly: it must remain valid
+	// even after later migrations become the repository's latest migration.
+	renamedMigration := "118_sending_protection_validate_constraints.sql"
 	if _, err := tx.Exec(ctx,
 		"DELETE FROM schema_migrations WHERE filename = $1",
-		latest,
+		renamedMigration,
 	); err != nil {
 		t.Fatalf("remove current tracker marker: %v", err)
 	}
 
-	applied, err := latestMigrationApplied(ctx, tx, latest)
+	applied, err := latestMigrationApplied(ctx, tx, renamedMigration)
 	if err != nil {
 		t.Fatalf("check legacy-only latest migration: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestLatestMigrationAppliedRecognizesLegacyAlias(t *testing.T) {
 	); err != nil {
 		t.Fatalf("remove legacy tracker marker: %v", err)
 	}
-	applied, err = latestMigrationApplied(ctx, tx, latest)
+	applied, err = latestMigrationApplied(ctx, tx, renamedMigration)
 	if err != nil {
 		t.Fatalf("check missing latest migration: %v", err)
 	}

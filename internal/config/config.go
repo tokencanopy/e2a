@@ -634,10 +634,11 @@ func Load(path string) (*Config, error) {
 			TargetDaily: 2000,
 			RampDays:    30,
 		},
-		// Defaults mirror the generation-zero policy migration 112 seeds, so a
-		// config-source deployment and a freshly migrated database-source one
-		// describe the same disabled behavior. Every mode is off: this block
-		// existing must never, on its own, start enforcing anything.
+		// These control defaults mirror generation zero, but the ramp schedule
+		// deliberately does not: the OSS/self-host SendingRamp default remains
+		// 50 while hosted generation zero explicitly seeds 150 (see the design's
+		// self-host compatibility rule). Every mode is off, so either disabled
+		// payload is inert until an operator reviews and activates its exact hash.
 		SendingProtect: SendingProtectionConfig{
 			RuntimePolicySource:       "config",
 			BudgetMode:                "disabled",

@@ -47,7 +47,7 @@ func TestDisabledPolicyIsValid(t *testing.T) {
 // TestParseRoundTripsGenerationZero proves the stored form decodes back to the
 // same typed value, so a binary reading the seeded row agrees with a binary
 // that built the policy from config.
-func TestParseRoundTripsGenerationZero(t *testing.T) {
+func TestPolicyParseRoundTripsGenerationZero(t *testing.T) {
 	parsed, err := ParsePolicy([]byte(generationZeroCanonical))
 	if err != nil {
 		t.Fatalf("parse generation zero: %v", err)
@@ -64,7 +64,7 @@ func TestParseRoundTripsGenerationZero(t *testing.T) {
 // TestModesAreIndependent covers the plan's disabled/shadow/enforce
 // independence requirement: turning the budget on must not implicitly turn the
 // detector on, and every combination has to validate on its own.
-func TestModesAreIndependent(t *testing.T) {
+func TestPolicyModesAreIndependent(t *testing.T) {
 	modes := []Mode{ModeDisabled, ModeShadow, ModeEnforce}
 	for _, budget := range modes {
 		for _, detector := range modes {
@@ -79,7 +79,7 @@ func TestModesAreIndependent(t *testing.T) {
 }
 
 // TestTenantModesAccepted pins the closed enums for the three tenant controls.
-func TestTenantModesAccepted(t *testing.T) {
+func TestPolicyTenantModesAccepted(t *testing.T) {
 	for _, m := range []TenantHeaderMode{TenantHeaderDisabled, TenantHeaderCanary, TenantHeaderEnforce} {
 		p := DisabledPolicy()
 		p.TenantHeaderMode = m
@@ -100,7 +100,7 @@ func TestTenantModesAccepted(t *testing.T) {
 // TestValidateRejects is the table of every invariant the plan names. Each case
 // mutates exactly one field of an otherwise-valid policy, so a failure points
 // at one rule rather than at a soup of them.
-func TestValidateRejects(t *testing.T) {
+func TestPolicyValidateRejects(t *testing.T) {
 	cases := []struct {
 		name    string
 		mutate  func(*RuntimePolicy)
@@ -153,7 +153,7 @@ func TestValidateRejects(t *testing.T) {
 
 // TestBasisPointBoundsAreInclusive pins the edges the table above only
 // approaches, so a later refactor cannot quietly widen the range.
-func TestBasisPointBoundsAreInclusive(t *testing.T) {
+func TestPolicyBasisPointBoundsAreInclusive(t *testing.T) {
 	for _, bps := range []int{1, maxBasisPoints} {
 		p := DisabledPolicy()
 		p.BouncePauseBasisPoints = bps
@@ -167,7 +167,7 @@ func TestBasisPointBoundsAreInclusive(t *testing.T) {
 // TestParseRejectsUnknownField is the fail-closed rule for version skew: a
 // policy written by a newer binary carrying a control this one cannot enforce
 // must be refused, never partially applied.
-func TestParseRejectsUnknownField(t *testing.T) {
+func TestPolicyParseRejectsUnknownField(t *testing.T) {
 	withExtra := strings.TrimSuffix(generationZeroCanonical, "}") + `,"future_control_mode":"enforce"}`
 	if _, err := ParsePolicy([]byte(withExtra)); err == nil {
 		t.Fatal("expected rejection of a policy carrying an unknown control")
@@ -175,7 +175,7 @@ func TestParseRejectsUnknownField(t *testing.T) {
 }
 
 // TestParseRejectsMalformed covers the remaining decode failures.
-func TestParseRejectsMalformed(t *testing.T) {
+func TestPolicyParseRejectsMalformed(t *testing.T) {
 	for name, raw := range map[string]string{
 		"empty":            ``,
 		"not an object":    `["budget_mode"]`,
@@ -194,7 +194,7 @@ func TestParseRejectsMalformed(t *testing.T) {
 // TestParseValidatesNotJustDecodes proves a structurally valid but semantically
 // illegal stored row is refused. A database row is not trusted merely because
 // it parsed.
-func TestParseValidatesNotJustDecodes(t *testing.T) {
+func TestPolicyParseValidatesNotJustDecodes(t *testing.T) {
 	bad := strings.Replace(generationZeroCanonical, `"bounce_pause_basis_points":400`, `"bounce_pause_basis_points":0`, 1)
 	if _, err := ParsePolicy([]byte(bad)); err == nil {
 		t.Fatal("expected a stored policy with 0 basis points to be rejected")
@@ -230,7 +230,7 @@ func TestArrayOrderIsPartOfThePolicy(t *testing.T) {
 // TestNilAndEmptySetsHashAlike catches the nil-slice trap directly: Go marshals
 // a nil slice as null, but migration 112 seeded [], and the two must not
 // produce different hashes for the same meaning.
-func TestNilAndEmptySetsHashAlike(t *testing.T) {
+func TestPolicyNilAndEmptySetsHashAlike(t *testing.T) {
 	nilled := DisabledPolicy()
 	nilled.TenantHeaderCanaryAccountIDs = nil
 
@@ -247,7 +247,7 @@ func TestNilAndEmptySetsHashAlike(t *testing.T) {
 // caller's policy. An earlier version of normalized() sorted in place, which
 // would have silently reordered a slice the caller still held — and, worse,
 // changed the meaning of a policy after an operator had reviewed its hash.
-func TestCanonicalizationDoesNotMutateInput(t *testing.T) {
+func TestPolicyCanonicalizationDoesNotMutateInput(t *testing.T) {
 	codes := []string{"starter", "pro", "scale"}
 	p := DisabledPolicy()
 	p.DailyUnlimitedPlanCodes = codes
@@ -265,7 +265,7 @@ func TestCanonicalizationDoesNotMutateInput(t *testing.T) {
 // TestCanonicalSortsKeysByUTF16 pins RFC 8785's ordering rule using the
 // non-ASCII example from the specification: sorting is by UTF-16 code unit, not
 // by Go's byte-wise string order, and the two disagree above U+FFFF.
-func TestCanonicalSortsKeysByUTF16(t *testing.T) {
+func TestPolicyCanonicalSortsKeysByUTF16(t *testing.T) {
 	input := `{"€":"euro","ü":"umlaut","😂":"emoji","a":"ascii"}`
 	canonical, err := canonicalJSON([]byte(input))
 	if err != nil {
@@ -280,7 +280,7 @@ func TestCanonicalSortsKeysByUTF16(t *testing.T) {
 // TestCanonicalNormalizesNumbers pins the ECMAScript number serialization RFC
 // 8785 requires. These are the spec's own examples; getting them wrong would
 // mean two operators reviewing the same policy could compute different hashes.
-func TestCanonicalNormalizesNumbers(t *testing.T) {
+func TestPolicyCanonicalNormalizesNumbers(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{`{"n":4.50}`, `{"n":4.5}`},
 		{`{"n":2e-3}`, `{"n":0.002}`},
@@ -301,7 +301,7 @@ func TestCanonicalNormalizesNumbers(t *testing.T) {
 // TestHashBytesMatchesHash keeps the two hash entry points in agreement; the
 // store re-derives a stored row's hash with HashBytes and must reach the same
 // value the activation path computed with Hash.
-func TestHashBytesMatchesHash(t *testing.T) {
+func TestPolicyHashBytesMatchesHash(t *testing.T) {
 	canonical, err := CanonicalBytes(DisabledPolicy())
 	if err != nil {
 		t.Fatalf("canonical bytes: %v", err)
@@ -317,7 +317,7 @@ func TestHashBytesMatchesHash(t *testing.T) {
 }
 
 // TestGenerationZeroLiteralIsValidJSON is a cheap guard on the fixture itself.
-func TestGenerationZeroLiteralIsValidJSON(t *testing.T) {
+func TestPolicyGenerationZeroLiteralIsValidJSON(t *testing.T) {
 	var probe map[string]any
 	if err := json.Unmarshal([]byte(generationZeroCanonical), &probe); err != nil {
 		t.Fatalf("fixture is not valid JSON: %v", err)

@@ -24,6 +24,14 @@ var (
 	// ErrStaleAttestation means the attestation revision or its four-field
 	// hash did not match what the caller expected. Zero rows were written.
 	ErrStaleAttestation = errors.New("sendingpolicy: stale runtime attestation")
+	// ErrAttestationCommitUnchanged means Commit returned an error and the
+	// mandatory reread proved the reviewed prior revision/hash are still
+	// current. The same forward request is safe to retry if still intended.
+	ErrAttestationCommitUnchanged = errors.New("sendingpolicy: attestation commit left state unchanged")
+	// ErrAttestationCommitUnknown means Commit returned an error and the
+	// mandatory reread could not prove either the exact requested next state or
+	// the unchanged prior state. The caller must inspect and fence/restore.
+	ErrAttestationCommitUnknown = errors.New("sendingpolicy: attestation commit outcome is unknown")
 	// ErrPolicyHashMismatch means the reviewed hash does not describe the
 	// policy actually being submitted.
 	ErrPolicyHashMismatch = errors.New("sendingpolicy: policy hash mismatch")
@@ -39,6 +47,9 @@ var (
 	// attempted without both active and rollback billing images attested at
 	// sending-protection contract level 1 or higher.
 	ErrBillingContractTooLow = errors.New("sendingpolicy: billing contract is too low for budget enforcement")
+	// ErrInvalidBillingDigest means an attestation did not name a canonical
+	// immutable sha256 image digest. Empty is reserved for contract level 0.
+	ErrInvalidBillingDigest = errors.New("sendingpolicy: invalid billing image digest")
 	// ErrAlreadyGrandfathered means the one-shot ramp-grandfathering marker
 	// already exists. The retry is a documented no-op: it can never widen the
 	// grandfathered set, so it performs zero writes.
@@ -50,15 +61,22 @@ var (
 // by this same object; the Postgres store stays private because there is only
 // ever one adapter.
 type Module struct {
-	pool    *pgxpool.Pool
-	secrets Secrets
+	pool              *pgxpool.Pool
+	secrets           Secrets
+	commitAttestation func(context.Context, pgx.Tx) error
 }
 
 // NewModule binds the module to a pool and the immutable trust roots parsed at
 // startup. It performs no I/O: a server that never reads the policy (self-host
 // on config source) must not pay for a query.
 func NewModule(pool *pgxpool.Pool, secrets Secrets) *Module {
-	return &Module{pool: pool, secrets: secrets}
+	return &Module{
+		pool:    pool,
+		secrets: secrets,
+		commitAttestation: func(ctx context.Context, tx pgx.Tx) error {
+			return tx.Commit(ctx)
+		},
+	}
 }
 
 // PolicySnapshot is the stored policy plus the metadata an operator needs to
@@ -349,20 +367,17 @@ func (m *Module) requireSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx
 // transaction, which already holds the policy row lock at the expected
 // generation.
 //
-// Ordering matters and mirrors the design: LOCK TABLE domains IN SHARE ROW
-// EXCLUSIVE MODE conflicts with the ROW EXCLUSIVE writes of a concurrent
-// pending->verified sender transition, so any such transition linearizes
-// either before this transaction (and is grandfathered) or after it (and
-// meets the active ramp as inactive). The marker insert gates the UPDATE:
-// only the transaction that creates the marker may flip domains, so a retry
-// that finds it existing is a no-op that can never widen the set. The check
+// Ordering matters and mirrors the design: the marker insert comes first, so
+// a replay returns without taking a disruptive domains-table lock. The winning
+// transaction then takes SHARE ROW EXCLUSIVE, which conflicts with the ROW
+// EXCLUSIVE writes of a concurrent pending->verified sender transition. Such
+// a transition linearizes either before this transaction (and is
+// grandfathered) or after it (and meets the active ramp as inactive). Only the
+// transaction that creates the marker may flip domains, so a retry that finds
+// it existing is a no-op that can never widen the set. The check
 // deliberately reads sending_status, not domains.verified_at -- verified_at
 // records inbound ownership verification, not the later sender transition.
 func (m *Module) grandfatherLocked(ctx context.Context, tx pgx.Tx, generation int64, actor string) (GrandfatherResult, error) {
-	if _, err := tx.Exec(ctx, `LOCK TABLE domains IN SHARE ROW EXCLUSIVE MODE`); err != nil {
-		return GrandfatherResult{}, fmt.Errorf("sendingpolicy: lock domains for grandfathering: %w", err)
-	}
-
 	// The marker records the generation being activated WITH this snapshot and
 	// the actor who requested it -- not the outgoing row's generation, whose
 	// activated_by may still read 'migration'.
@@ -375,6 +390,10 @@ func (m *Module) grandfatherLocked(ctx context.Context, tx pgx.Tx, generation in
 	}
 	if tag.RowsAffected() == 0 {
 		return GrandfatherResult{}, ErrAlreadyGrandfathered
+	}
+
+	if _, err := tx.Exec(ctx, `LOCK TABLE domains IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return GrandfatherResult{}, fmt.Errorf("sendingpolicy: lock domains for grandfathering: %w", err)
 	}
 
 	updated, err := tx.Exec(ctx,
@@ -401,6 +420,12 @@ func scanAttestation(row rowScanner) (RuntimeAttestation, error) {
 		&a.RollbackBillingDigest, &a.RollbackBillingContract, &a.UpdatedAt, &a.UpdatedBy); err != nil {
 		return RuntimeAttestation{}, fmt.Errorf("sendingpolicy: read runtime attestation: %w", err)
 	}
+	if err := validateBillingDigest(a.ActiveBillingDigest, a.ActiveBillingContract); err != nil {
+		return RuntimeAttestation{}, fmt.Errorf("sendingpolicy: stored active billing image: %w", err)
+	}
+	if err := validateBillingDigest(a.RollbackBillingDigest, a.RollbackBillingContract); err != nil {
+		return RuntimeAttestation{}, fmt.Errorf("sendingpolicy: stored rollback billing image: %w", err)
+	}
 	return a, nil
 }
 
@@ -420,6 +445,12 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 	}
 	if req.ActiveBillingContract < 0 || req.RollbackBillingContract < 0 {
 		return RuntimeAttestation{}, errors.New("sendingpolicy: billing contract levels must be non-negative")
+	}
+	if err := validateBillingDigest(req.ActiveBillingDigest, req.ActiveBillingContract); err != nil {
+		return RuntimeAttestation{}, fmt.Errorf("active billing image: %w", err)
+	}
+	if err := validateBillingDigest(req.RollbackBillingDigest, req.RollbackBillingContract); err != nil {
+		return RuntimeAttestation{}, fmt.Errorf("rollback billing image: %w", err)
 	}
 	if !isLowerHexSHA256(req.ExpectedSHA256) {
 		return RuntimeAttestation{}, errors.New("sendingpolicy: expected attestation SHA-256 must be 64 lowercase hexadecimal characters")
@@ -449,6 +480,24 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 	}
 
 	next := current.Revision + 1
+	nextHash, err := AttestationHash(RuntimeAttestation{
+		ActiveBillingDigest:     req.ActiveBillingDigest,
+		ActiveBillingContract:   req.ActiveBillingContract,
+		RollbackBillingDigest:   req.RollbackBillingDigest,
+		RollbackBillingContract: req.RollbackBillingContract,
+	})
+	if err != nil {
+		return RuntimeAttestation{}, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO sending_protection_runtime_attestation_events
+			(revision, prior_revision, prior_attestation_sha256, new_attestation_sha256, actor, reason)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		next, current.Revision, currentHash, nextHash, req.Actor, req.Reason,
+	); err != nil {
+		return RuntimeAttestation{}, fmt.Errorf("sendingpolicy: record attestation event: %w", err)
+	}
+
 	var updatedAt time.Time
 	if err := tx.QueryRow(ctx,
 		`UPDATE sending_protection_runtime_attestation
@@ -463,8 +512,8 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 		return RuntimeAttestation{}, fmt.Errorf("sendingpolicy: write runtime attestation: %w", err)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return RuntimeAttestation{}, fmt.Errorf("sendingpolicy: commit attestation: %w", err)
+	if err := m.commitAttestation(ctx, tx); err != nil {
+		return m.reconcileAttestationCommit(ctx, req, err)
 	}
 
 	return RuntimeAttestation{
@@ -476,6 +525,41 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 		UpdatedAt:               updatedAt,
 		UpdatedBy:               req.Actor,
 	}, nil
+}
+
+func validateBillingDigest(digest string, contract int) error {
+	if digest == "" && contract == 0 {
+		return nil
+	}
+	if len(digest) != len("sha256:")+64 || !strings.HasPrefix(digest, "sha256:") || !isLowerHexSHA256(digest[len("sha256:"):]) {
+		return ErrInvalidBillingDigest
+	}
+	return nil
+}
+
+func (m *Module) reconcileAttestationCommit(ctx context.Context, req RuntimeAttestationRequest, commitErr error) (RuntimeAttestation, error) {
+	observed, err := m.InspectAttestation(ctx)
+	if err != nil {
+		return RuntimeAttestation{}, fmt.Errorf("%w: commit returned an error and reread failed: %v", ErrAttestationCommitUnknown, err)
+	}
+
+	if observed.Revision == req.ExpectedRevision+1 &&
+		observed.ActiveBillingDigest == req.ActiveBillingDigest &&
+		observed.ActiveBillingContract == req.ActiveBillingContract &&
+		observed.RollbackBillingDigest == req.RollbackBillingDigest &&
+		observed.RollbackBillingContract == req.RollbackBillingContract {
+		return observed, nil
+	}
+
+	observedHash, err := AttestationHash(observed)
+	if err != nil {
+		return RuntimeAttestation{}, fmt.Errorf("%w: commit returned an error and reread hashing failed: %v", ErrAttestationCommitUnknown, err)
+	}
+	if observed.Revision == req.ExpectedRevision && observedHash == req.ExpectedSHA256 {
+		return RuntimeAttestation{}, fmt.Errorf("%w: commit returned: %v", ErrAttestationCommitUnchanged, commitErr)
+	}
+	return RuntimeAttestation{}, fmt.Errorf("%w: %w: reread found revision %d",
+		ErrAttestationCommitUnknown, ErrStaleAttestation, observed.Revision)
 }
 
 func isLowerHexSHA256(value string) bool {
@@ -499,9 +583,12 @@ func isLowerHexSHA256(value string) bool {
 // That is checked explicitly and fails the whole transaction, because a partial
 // registration would leave the operator unable to tell which versions are
 // trustworthy.
-func (m *Module) RegisterOperatorRecipients(ctx context.Context, actor string) (inserted []int, err error) {
+func (m *Module) RegisterOperatorRecipients(ctx context.Context, actor, reason string) (inserted []int, err error) {
 	if strings.TrimSpace(actor) == "" {
 		return nil, errors.New("sendingpolicy: registration requires an actor")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, errors.New("sendingpolicy: registration requires a reason")
 	}
 	recipients := m.secrets.Recipients
 	if recipients == nil {
@@ -518,36 +605,39 @@ func (m *Module) RegisterOperatorRecipients(ctx context.Context, actor string) (
 	for _, version := range recipients.Versions() {
 		commitment, _ := recipients.Commitment(version)
 
-		var existingKeyID, existingCommitment string
+		var insertedVersion int
 		err := tx.QueryRow(ctx,
+			`INSERT INTO sending_operator_recipient_versions
+				(logical_version, commitment_key_id, recipient_commitment, created_by, reason)
+			 VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (logical_version) DO NOTHING
+			 RETURNING logical_version`,
+			version, keyID, commitment, actor, reason,
+		).Scan(&insertedVersion)
+		if err == nil {
+			inserted = append(inserted, version)
+			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("sendingpolicy: register version %d: %w", version, err)
+		}
+
+		// A serial or concurrent replay lost ON CONFLICT. Lock and verify the
+		// winner rather than surfacing a unique violation or trusting that the
+		// logical version means the same recipient.
+		var existingKeyID, existingCommitment string
+		if err := tx.QueryRow(ctx,
 			`SELECT commitment_key_id, recipient_commitment
 			   FROM sending_operator_recipient_versions
 			  WHERE logical_version = $1 FOR SHARE`, version,
-		).Scan(&existingKeyID, &existingCommitment)
-
-		switch {
-		case err == nil:
-			// Already registered: it must agree exactly, or the local map and
-			// recorded history describe different recipients.
-			if existingKeyID != keyID {
-				return nil, fmt.Errorf("%w: version %d was registered under a different commitment key", ErrRegistryConflict, version)
-			}
-			if existingCommitment != commitment {
-				return nil, fmt.Errorf("%w: version %d was registered with a different recipient commitment", ErrRegistryConflict, version)
-			}
-			continue
-		case errors.Is(err, pgx.ErrNoRows):
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO sending_operator_recipient_versions
-					(logical_version, commitment_key_id, recipient_commitment, created_by)
-				 VALUES ($1, $2, $3, $4)`,
-				version, keyID, commitment, actor,
-			); err != nil {
-				return nil, fmt.Errorf("sendingpolicy: register version %d: %w", version, err)
-			}
-			inserted = append(inserted, version)
-		default:
-			return nil, fmt.Errorf("sendingpolicy: read registry version %d: %w", version, err)
+		).Scan(&existingKeyID, &existingCommitment); err != nil {
+			return nil, fmt.Errorf("sendingpolicy: read registry version %d after conflict: %w", version, err)
+		}
+		if existingKeyID != keyID {
+			return nil, fmt.Errorf("%w: version %d was registered under a different commitment key", ErrRegistryConflict, version)
+		}
+		if existingCommitment != commitment {
+			return nil, fmt.Errorf("%w: version %d was registered with a different recipient commitment", ErrRegistryConflict, version)
 		}
 	}
 

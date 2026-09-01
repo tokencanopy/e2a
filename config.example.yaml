@@ -293,7 +293,10 @@ sender_identity:
 # persistently exempt; operator reset procedures are in docs/runbooks/sending-ramp.md.
 # This policy is visible read-only in the domain API and cannot be disabled by
 # end users. start_daily must be at least 50, the API's per-message recipient
-# maximum, so one accepted message can never be stranded permanently.
+# maximum, so one accepted message can never be stranded permanently. Hosted
+# database generation zero explicitly uses 150; this example keeps the
+# established self-host-compatible default of 50, so the hashes intentionally
+# differ even though both policies are disabled.
 sending_ramp:
   enabled: false
   start_daily: 50

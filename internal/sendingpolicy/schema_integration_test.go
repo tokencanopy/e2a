@@ -29,6 +29,7 @@ func TestSendingProtectionMigrationsAreIdempotent(t *testing.T) {
 		"116_sending_message_holds.sql",
 		"117_sending_suppression_provenance.sql",
 		"118_sending_protection_validate_constraints.sql",
+		"119_sending_protection_operator_audit.sql",
 	} {
 		migration, err := migrations.FS.ReadFile(name)
 		if err != nil {

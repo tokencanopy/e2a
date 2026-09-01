@@ -118,6 +118,14 @@ func runPolicyInspect(ctx context.Context, module *sendingpolicy.Module, source 
 	if err != nil {
 		return err
 	}
+	attestation, err := module.InspectAttestation(ctx)
+	if err != nil {
+		return err
+	}
+	attestationHash, err := sendingpolicy.AttestationHash(attestation)
+	if err != nil {
+		return err
+	}
 	configHash, err := sendingpolicy.Hash(policy)
 	if err != nil {
 		return err
@@ -132,6 +140,12 @@ func runPolicyInspect(ctx context.Context, module *sendingpolicy.Module, source 
 	fmt.Fprintf(stdout, "stored_policy_sha256:     %s\n", stored.PolicySHA256)
 	fmt.Fprintf(stdout, "stored_activated_at:      %s\n", stored.ActivatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(stdout, "stored_activated_by:      %s\n", stored.ActivatedBy)
+	fmt.Fprintf(stdout, "runtime_attestation_revision: %d\n", attestation.Revision)
+	fmt.Fprintf(stdout, "runtime_attestation_sha256:   %s\n", attestationHash)
+	fmt.Fprintf(stdout, "active_billing_digest:        %s\n", attestation.ActiveBillingDigest)
+	fmt.Fprintf(stdout, "active_billing_contract:      %d\n", attestation.ActiveBillingContract)
+	fmt.Fprintf(stdout, "rollback_billing_digest:      %s\n", attestation.RollbackBillingDigest)
+	fmt.Fprintf(stdout, "rollback_billing_contract:    %d\n", attestation.RollbackBillingContract)
 	fmt.Fprintf(stdout, "config_policy_sha256:     %s\n", configHash)
 	if configHash == stored.PolicySHA256 {
 		fmt.Fprintf(stdout, "status:                   config matches the stored generation\n")
@@ -197,7 +211,7 @@ func runOperatorRegister(ctx context.Context, module *sendingpolicy.Module, reci
 	if recipients == nil {
 		return fmt.Errorf("%s is not set; registration reads the local versioned secret map", sendingpolicy.EnvOperatorRecipientsMap)
 	}
-	inserted, err := module.RegisterOperatorRecipients(ctx, cliActor())
+	inserted, err := module.RegisterOperatorRecipients(ctx, cliActor(), f.reason)
 	if err != nil {
 		return err
 	}
