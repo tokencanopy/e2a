@@ -473,12 +473,24 @@ func TestHTTP_Consent_Allow_CreateNew(t *testing.T) {
 // TestHTTP_Consent_Allow_CreateNew_AtAgentCap: the auto-create path must
 // enforce the same max_agents cap the REST create path does; it previously
 // did not check at all.
+//
+// Cap is exercised with a real pre-existing agent at MaxAgents=1 rather than
+// MaxAgents=0: the atomic CreateAgentWithLimitTx path this handler now
+// shares with the REST create path (#942) treats maxAgents<=0 as unlimited
+// (see identity.Store.CreateAgentWithLimit), the same convention
+// httpapi.Deps.GetLimits documents, so a MaxAgents=0 fixture would no
+// longer exercise the cap at all.
 func TestHTTP_Consent_Allow_CreateNew_AtAgentCap(t *testing.T) {
 	f := newConsentFixture(t)
 	ctx := context.Background()
 
+	if _, err := identity.NewStore(f.pool).CreateAgent(ctx,
+		"existing@agents.e2a.dev", "agents.e2a.dev", "existing", "", "", f.userID); err != nil {
+		t.Fatalf("seed existing agent: %v", err)
+	}
+
 	if err := limits.NewStore(f.pool).Upsert(ctx, f.userID, limits.Limits{
-		PlanCode: "test", MaxAgents: 0, MaxDomains: 100000,
+		PlanCode: "test", MaxAgents: 1, MaxDomains: 100000,
 		MaxMessagesMonth: 100000, MaxStorageBytes: 1 << 40,
 	}); err != nil {
 		t.Fatalf("Upsert limits: %v", err)

@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/ory/fosite"
 	"github.com/tokencanopy/e2a/internal/identity"
-	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/oauth"
 	"golang.org/x/text/language"
 )
@@ -1225,19 +1224,6 @@ func grantConsentedScope(ar fosite.AuthorizeRequester, scope string) {
 }
 
 func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWriter, r *http.Request, ar fosite.AuthorizeRequester, userID, agentEmail, scope string) error {
-	// Same per-user agent cap the REST create path enforces (see
-	// EnforceAgentCreate in agents_write.go); this auto-create path had no
-	// enforcement at all before this check.
-	if a.enforcer != nil {
-		if err := a.enforcer.CheckAgentCreate(ctx, userID); err != nil {
-			if limErr, ok := limits.IsLimitExceeded(err); ok {
-				http.Error(w, limErr.Error(), http.StatusPaymentRequired)
-				return nil
-			}
-			return fmt.Errorf("check agent create: %w", err)
-		}
-	}
-
 	pool := a.oauthStorage.Pool()
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -1248,8 +1234,29 @@ func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWri
 	defer func() { _ = tx.Rollback(ctx) }()
 	txCtx := oauth.WithTx(ctx, tx)
 
+	// Same per-user agent cap the REST create path enforces (see
+	// CreateAgentWithLimit in agents_write.go), and atomic with the insert
+	// below: CreateAgentWithLimitTx takes the keyspace-2 advisory lock and
+	// re-checks the count inside this same tx, so a concurrent OAuth
+	// auto-provision request, or one racing a REST create, cannot both pass
+	// the check the way the old CheckAgentCreate-then-insert sequence let
+	// them (check-then-act race, same class #942 closed for the REST path).
+	maxAgents := 0
+	if a.enforcer != nil {
+		lim, err := a.enforcer.Get(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("get limits: %w", err)
+		}
+		maxAgents = lim.MaxAgents
+	}
+
 	// Agent insert via the identity package — same tx, same context.
-	if _, err := a.store.CreateAgentTx(txCtx, tx, agentEmail, a.sharedDomain, "", "", "", userID); err != nil {
+	if _, err := a.store.CreateAgentWithLimitTx(txCtx, tx, agentEmail, a.sharedDomain, "", userID, maxAgents); err != nil {
+		var limErr *identity.AgentLimitExceededError
+		if errors.As(err, &limErr) {
+			http.Error(w, limErr.Error(), http.StatusPaymentRequired)
+			return nil
+		}
 		if isUniqueViolation(err) {
 			http.Error(w, "that slug is already taken; pick another", http.StatusConflict)
 			return nil
