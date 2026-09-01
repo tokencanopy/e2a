@@ -3,11 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useAuth } from "../../components/AuthProvider";
-import { SignInLink } from "../../components/SignInLink";
-import {
-  SIGN_IN_LABEL,
-  signInURLWithReturnTo,
-} from "../../../lib/site";
+import { SignInLinks } from "../../components/SignInLinks";
 import type { DashboardAgent } from "../../components/types";
 
 // Required OAuth params the consent screen needs. If any is missing
@@ -176,19 +172,19 @@ function ConsentInner() {
   if (!user) {
     const qs = new URLSearchParams(params).toString();
     const returnTo = `/oauth2/authorize?${qs}`;
-    const loginURL = signInURLWithReturnTo(returnTo);
     return (
       <ConsentShell>
         <h1 className="text-xl font-semibold mb-3">Sign in to continue</h1>
         <p className="text-muted text-sm mb-6">
           Sign in to authorize this application.
         </p>
-        <SignInLink
-          href={loginURL}
-          className="inline-block px-4 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent-light transition"
-        >
-          {SIGN_IN_LABEL}
-        </SignInLink>
+        <div className="flex flex-col items-start gap-3">
+          <SignInLinks
+            returnTo={returnTo}
+            primaryClassName="inline-block px-4 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent-light transition"
+            secondaryClassName="text-muted text-sm underline underline-offset-2"
+          />
+        </div>
       </ConsentShell>
     );
   }

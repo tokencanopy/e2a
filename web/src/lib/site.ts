@@ -65,29 +65,38 @@ export const PRICING_PATH = process.env.NEXT_PUBLIC_PRICING_PATH || "";
 // deployment bakes in NEXT_PUBLIC_E2A_SIGN_IN_URL=/api/auth/oidc/login at
 // image build time to make the TokenCanopy OIDC door (multi-provider chooser)
 // the default. The OIDC route only exists when the server runs with
-// E2A_OIDC_ENABLED=true, so self-hosters must leave this unset — pointing it
-// at /api/auth/oidc/login without the server flag is a dead link.
+// E2A_OIDC_ENABLED=true, so operators must leave this unset unless they also
+// enable and configure the server's generic OIDC provider.
 export const LEGACY_SIGN_IN_URL = "/api/auth/login";
 export const SIGN_IN_URL =
   process.env.NEXT_PUBLIC_E2A_SIGN_IN_URL || LEGACY_SIGN_IN_URL;
 
-// Button copy derived from the same variable. The hosted deployment uses the
-// exact generic OIDC route for its TokenCanopy door; arbitrary operator URLs
-// remain provider-neutral.
+// The route alone cannot identify an OIDC provider: self-hosters use the same
+// endpoint for Entra, Okta, and other providers. Only the upstream hosted site
+// identities brand that route as TokenCanopy; every other OIDC deployment
+// remains provider-neutral.
+const TOKEN_CANOPY_HOSTED_SITE_URLS = new Set([
+  "https://e2a.dev",
+  "https://staging.e2a.dev",
+]);
 export const SIGN_IN_LABEL =
   SIGN_IN_URL === LEGACY_SIGN_IN_URL
     ? "Sign in with Google"
-    : SIGN_IN_URL === "/api/auth/oidc/login"
+    : SIGN_IN_URL === "/api/auth/oidc/login" &&
+        TOKEN_CANOPY_HOSTED_SITE_URLS.has(SITE_URL)
       ? "Sign in with TokenCanopy"
       : "Sign in";
 
-// Adds the post-login destination to whichever sign-in door this build uses.
-// SIGN_IN_URL may be a same-origin path or an absolute operator-supplied URL;
+// Adds the post-login destination to the requested sign-in door. The target
+// may be a same-origin path or an absolute operator-supplied URL;
 // a placeholder origin lets URL handle either shape without leaking into the
 // returned same-origin path.
-export function signInURLWithReturnTo(returnTo: string): string {
+export function signInURLWithReturnTo(
+  returnTo: string,
+  signInURL = SIGN_IN_URL,
+): string {
   const placeholderOrigin = "https://e2a-sign-in.invalid";
-  const url = new URL(SIGN_IN_URL, placeholderOrigin);
+  const url = new URL(signInURL, placeholderOrigin);
   url.searchParams.set("return_to", returnTo);
 
   if (url.origin === placeholderOrigin) {

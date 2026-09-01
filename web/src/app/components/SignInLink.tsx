@@ -42,6 +42,7 @@ export function SignInLink({
     setResolvedHref(
       signInURLWithReturnTo(
         window.location.pathname + window.location.search + window.location.hash,
+        href,
       ),
     );
   }, [href, preserveCurrentPaths]);
