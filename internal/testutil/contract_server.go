@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"time"
@@ -45,6 +46,18 @@ var CappedLimits = limits.Limits{
 	UpgradeURL:       "https://e2a.dev/upgrade",
 }
 
+// OverCapLimits are applied to the third account (ContractServer.OverCapAPIKey)
+// AFTER its domains/agents are already seeded past this cap, so every create
+// attempt is refused with Current strictly greater than Limit.
+var OverCapLimits = limits.Limits{
+	PlanCode:         "contract_overcap",
+	MaxAgents:        2,
+	MaxDomains:       1,
+	MaxMessagesMonth: 100000,
+	MaxStorageBytes:  1 << 40,
+	UpgradeURL:       "https://e2a.dev/upgrade",
+}
+
 type ContractServer struct {
 	BaseURL string
 	APIKey  string
@@ -63,13 +76,16 @@ type ContractServer struct {
 	// is no staleness window for a scenario to race.
 	CappedAPIKey string
 	CappedUserID string
-	DBPool       *pgxpool.Pool
-	Store        *identity.Store
-	WSHub        *ws.Hub
-	SMTPAddr     string
-	httpServer   *http.Server
-	httpLn       net.Listener
-	smtpServer   *relay.Server
+	// OverCapAPIKey authenticates the third account. See OverCapLimits.
+	OverCapAPIKey string
+	OverCapUserID string
+	DBPool        *pgxpool.Pool
+	Store         *identity.Store
+	WSHub         *ws.Hub
+	SMTPAddr      string
+	httpServer    *http.Server
+	httpLn        net.Listener
+	smtpServer    *relay.Server
 }
 
 func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, error) {
@@ -253,19 +269,77 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		return nil, err
 	}
 
+	// The over-cap account: seed unlimited (maxDomains/maxAgents <= 0), then
+	// apply OverCapLimits below so the downgrade lands on counts already over it.
+	overCapUser, err := store.CreateOrGetUser(ctx, "overcap@test.dev", "Contract OverCap", "google-contract-overcap")
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+	if _, err := store.ClaimOrCreateDomain(ctx, "overcap-1.test.dev", overCapUser.ID); err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+	if _, err := store.ClaimOrCreateDomain(ctx, "overcap-2.test.dev", overCapUser.ID); err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+	for i := 1; i <= 3; i++ {
+		agentEmail := fmt.Sprintf("overcap-bot-%d@agents.e2a.dev", i)
+		if _, err := store.CreateAgentWithLimit(ctx, agentEmail, "overcap-1.test.dev", "OverCap Bot", overCapUser.ID, 0); err != nil {
+			_ = smtpServer.Close()
+			_ = httpServer.Shutdown(context.Background())
+			_ = httpLn.Close()
+			wsHub.Close()
+			pool.Close()
+			return nil, err
+		}
+	}
+	if err := limits.NewStore(pool).Upsert(ctx, overCapUser.ID, OverCapLimits); err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+	overCapKey, err := store.CreateAPIKey(ctx, overCapUser.ID, "contract-overcap-key", nil)
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+
 	return &ContractServer{
-		BaseURL:      "http://" + httpLn.Addr().String(),
-		APIKey:       key.PlaintextKey,
-		UserID:       user.ID,
-		CappedAPIKey: cappedKey.PlaintextKey,
-		CappedUserID: cappedUser.ID,
-		DBPool:       pool,
-		Store:        store,
-		WSHub:        wsHub,
-		SMTPAddr:     smtpAddr,
-		httpServer:   httpServer,
-		httpLn:       httpLn,
-		smtpServer:   smtpServer,
+		BaseURL:       "http://" + httpLn.Addr().String(),
+		APIKey:        key.PlaintextKey,
+		UserID:        user.ID,
+		CappedAPIKey:  cappedKey.PlaintextKey,
+		CappedUserID:  cappedUser.ID,
+		OverCapAPIKey: overCapKey.PlaintextKey,
+		OverCapUserID: overCapUser.ID,
+		DBPool:        pool,
+		Store:         store,
+		WSHub:         wsHub,
+		SMTPAddr:      smtpAddr,
+		httpServer:    httpServer,
+		httpLn:        httpLn,
+		smtpServer:    smtpServer,
 	}, nil
 }
 

@@ -2198,10 +2198,12 @@ scenarios:
       the upgrade URL — the fields an SDK needs to tell a caller WHICH quota
       stopped them and how to get out of it. The two resources carry DIFFERENT
       caps (domains 1, agents 2) so a single hardcoded number cannot satisfy
-      both. `current` is asserted too, but note it is NOT independently proven
-      here: at the moment of refusal `current == limit` by definition of the
-      `count >= cap` check, so only an over-cap account (a downgrade) could
-      distinguish them. Tracked separately. Everything here runs as a SECOND, permanently
+      both. `current` is asserted too, but at the moment of refusal
+      `current == limit` by definition of the `count >= cap` check, so this
+      scenario alone cannot tell a server that reports the real resource
+      count apart from one that just echoes the cap back: see
+      account_limits_current_field_proven below for the over-cap account that
+      does. Everything here runs as a SECOND, permanently
       capped account (auth_override with {capped_api_key}) that the contract
       server seeds at startup with max_domains 1 / max_agents 1. Nothing
       mutates a cap, so this scenario cannot leak enforcement into the ones
@@ -2367,6 +2369,53 @@ scenarios:
         method: DELETE
         path: /v1/domains/capped-{scenario_token}.test.dev?confirm=DELETE
         auth_override: "Bearer {capped_api_key}"
+
+  - name: account_limits_current_field_proven
+    description: >
+      account_limits_enforced cannot independently prove `current` in the 402
+      envelope: at refusal `current == limit` by construction, so a server
+      that hardcoded Current to the cap would pass every assertion there too.
+      This scenario runs as a THIRD account (auth_override with
+      {overcap_api_key}) the contract server seeds with 2 domains and 3
+      agents BEFORE applying a downgraded cap of 1 domain / 2 agents, so it
+      starts already over both caps. A further create attempt is refused with
+      `current` strictly greater than `limit` (2 > 1 for domains, 3 > 2 for
+      agents), the only value a server actually reading the resource count
+      can produce: a hardcoded `current: limit` fails both assertions below.
+      Nothing here can succeed (the account is over cap on every resource
+      this touches), so nothing mutates and no cleanup is needed.
+    steps:
+      - id: domain_create_reports_true_overcap_current
+        action: request
+        method: POST
+        path: /v1/domains
+        auth_override: "Bearer {overcap_api_key}"
+        body:
+          domain: overcap-blocked-{scenario_token}.test.dev
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": domains
+            "error.details.limit": 1
+            "error.details.current": 2
+            "error.details.plan_code": contract_overcap
+
+      - id: agent_create_reports_true_overcap_current
+        action: request
+        method: POST
+        path: /v1/agents
+        auth_override: "Bearer {overcap_api_key}"
+        body:
+          email: overcap-blocked-bot-{scenario_token}@agents.e2a.dev
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": agents
+            "error.details.limit": 2
+            "error.details.current": 3
+            "error.details.plan_code": contract_overcap
 
   - name: messages_list_filter
     description: >

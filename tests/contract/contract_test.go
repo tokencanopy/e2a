@@ -138,6 +138,10 @@ type testEnv struct {
 	// cappedAPIKey authenticates the contract server's secondary account,
 	// seeded with testutil.CappedLimits, that quota scenarios run as.
 	cappedAPIKey string
+	// overCapAPIKey authenticates the contract server's third account,
+	// seeded with testutil.OverCapLimits over resources already exceeding
+	// it, that the current-field-proof scenario runs as.
+	overCapAPIKey string
 }
 
 func setupEnv(t *testing.T) *testEnv {
@@ -162,7 +166,8 @@ func setupEnv(t *testing.T) *testEnv {
 		apiKey:  cs.APIKey,
 		userID:  cs.UserID,
 
-		cappedAPIKey: cs.CappedAPIKey,
+		cappedAPIKey:  cs.CappedAPIKey,
+		overCapAPIKey: cs.OverCapAPIKey,
 	}
 }
 
@@ -357,6 +362,7 @@ func (r *runner) resolve(s string) string {
 	s = strings.ReplaceAll(s, "{base_url}", r.env.baseURL)
 	s = strings.ReplaceAll(s, "{api_key}", r.env.apiKey)
 	s = strings.ReplaceAll(s, "{capped_api_key}", r.env.cappedAPIKey)
+	s = strings.ReplaceAll(s, "{overcap_api_key}", r.env.overCapAPIKey)
 	for k, v := range r.vars {
 		s = strings.ReplaceAll(s, "{"+k+"}", v)
 	}
@@ -1008,6 +1014,35 @@ func scenarioUsesCappedKey(t *testing.T, sc scenario) bool {
 
 const cappedKeyPlaceholder = "{capped_api_key}"
 
+// requireOverCapKey is requireCappedKey for the over-cap account (see
+// testutil.OverCapLimits): same reasoning, same failure-not-skip rule.
+func requireOverCapKey(t *testing.T, env *testEnv, sc scenario) {
+	t.Helper()
+	if env.overCapAPIKey == "" && scenarioUsesOverCapKey(t, sc) {
+		t.Fatalf("scenario %s uses %s but the contract server supplied no over-cap API key", sc.Name, overCapKeyPlaceholder)
+	}
+}
+
+// scenarioUsesOverCapKey is scenarioUsesCappedKey for the over-cap account.
+func scenarioUsesOverCapKey(t *testing.T, sc scenario) bool {
+	t.Helper()
+	overrides := []*string{sc.AuthOverride}
+	for _, s := range sc.Steps {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, s := range sc.Cleanup {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, o := range overrides {
+		if o != nil && strings.Contains(*o, overCapKeyPlaceholder) {
+			return true
+		}
+	}
+	return false
+}
+
+const overCapKeyPlaceholder = "{overcap_api_key}"
+
 func TestScenarios(t *testing.T) {
 	scenarios := loadScenarios(t)
 	for _, sc := range scenarios {
@@ -1015,6 +1050,7 @@ func TestScenarios(t *testing.T) {
 		t.Run(sc.Name, func(t *testing.T) {
 			env := setupEnv(t)
 			requireCappedKey(t, env, sc)
+			requireOverCapKey(t, env, sc)
 			r := newRunner(env, sc)
 			t.Cleanup(func() { r.cleanup(t) })
 			r.executeSetup(t)
@@ -1121,5 +1157,67 @@ func TestLimitsScenarioShape(t *testing.T) {
 		if cleanupIDs[i] != want[i] {
 			t.Errorf("cleanup[%d] = %s, want %s", i, cleanupIDs[i], want[i])
 		}
+	}
+}
+
+// TestOverCapScenarioShape is TestLimitsScenarioShape for
+// account_limits_current_field_proven: it pins the current-strictly-greater-
+// than-limit assertion the scenario exists for.
+func TestOverCapScenarioShape(t *testing.T) {
+	var sc scenario
+	for _, candidate := range loadScenarios(t) {
+		if candidate.Name == "account_limits_current_field_proven" {
+			sc = candidate
+			break
+		}
+	}
+	if sc.Name == "" {
+		t.Fatal("scenario account_limits_current_field_proven not found: the 402 envelope's current field would have no independent proof in any runner")
+	}
+	if !scenarioUsesOverCapKey(t, sc) {
+		t.Fatalf("scenario %s no longer authenticates as the over-cap account, so current can no longer differ from limit", sc.Name)
+	}
+
+	steps := map[string]step{}
+	for _, s := range sc.Steps {
+		steps[s.ID] = s
+	}
+	matched := func(id string) map[string]interface{} {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		return s.Expect.BodyMatch
+	}
+
+	// The whole point: current strictly greater than limit, which only a
+	// server reading the real resource count can produce.
+	domainRefusal := matched("domain_create_reports_true_overcap_current")
+	for path, want := range map[string]interface{}{
+		"error.details.resource": "domains",
+		"error.details.limit":    1,
+		"error.details.current":  2,
+	} {
+		if got := domainRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("domain_create_reports_true_overcap_current body_match[%q] = %v, want %v", path, got, want)
+		}
+	}
+	if fmt.Sprint(domainRefusal["error.details.current"]) == fmt.Sprint(domainRefusal["error.details.limit"]) {
+		t.Fatalf("domain_create_reports_true_overcap_current pins current == limit, which cannot distinguish a real count from a hardcoded one")
+	}
+
+	agentRefusal := matched("agent_create_reports_true_overcap_current")
+	for path, want := range map[string]interface{}{
+		"error.details.resource": "agents",
+		"error.details.limit":    2,
+		"error.details.current":  3,
+	} {
+		if got := agentRefusal[path]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("agent_create_reports_true_overcap_current body_match[%q] = %v, want %v", path, got, want)
+		}
+	}
+	if fmt.Sprint(agentRefusal["error.details.current"]) == fmt.Sprint(agentRefusal["error.details.limit"]) {
+		t.Fatalf("agent_create_reports_true_overcap_current pins current == limit, which cannot distinguish a real count from a hardcoded one")
 	}
 }
