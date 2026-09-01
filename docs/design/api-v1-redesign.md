@@ -1017,7 +1017,8 @@ review diligence — a #206-style omission can't merge.
 >   exposes an optional `idempotency_key` tool arg so hosted-MCP callers can retry
 >   safely (the MCP hop is a network boundary the SDK auto-mint can't span). The
 >   create tools don't qualify: `create_agent` (email) and `register_domain`
->   (domain) have natural unique keys (retry → 409, never a duplicate), and creates
+>   (domain) have natural unique keys (a retry reclaims the existing row with
+>   201, never a duplicate), and creates
 >   are not the frequent/high-harm path — the rule is *mutating + duplicate-harmful
 >   + no natural dedup*, not call frequency. (`rotate_webhook_secret`, the one
 >   rare-but-dangerous non-create, is already idempotent from the GA-blockers work.)
@@ -1258,8 +1259,9 @@ worth making while we're reshaping the contract anyway, roughly in priority:
    adding it to `create_agent`/`create_webhook`/`register_domain`; on review,
    idempotency stays scoped to the send-family. The create tools don't meet the
    bar (*mutating + duplicate-harmful + no natural dedup*): `create_agent` (email)
-   and `register_domain` (domain) have natural unique keys → retry is a 409, not a
-   duplicate. The send-family already carries it (and exposes the optional tool
+   and `register_domain` (domain) have natural unique keys: a retry reclaims
+   the existing row (201), not a duplicate. The send-family already carries it (and
+   exposes the optional tool
    arg so hosted-MCP callers retry safely). Matches how mature email APIs scope it.
 8. **Consistent vocabulary — resolved.** `send_email` mixed "email" with
    `reply_to_message`/`forward_message`. Standardize the noun on the API

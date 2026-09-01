@@ -314,7 +314,8 @@ func (s *Server) registerDomains() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "registerDomain", Method: http.MethodPost, Path: "/v1/domains",
 		Summary: "Register a domain", Tags: []string{"domains"},
-		Security: []map[string][]string{{"bearer": {}}}, DefaultStatus: http.StatusCreated,
+		Description: "Registering a domain the account already owns is idempotent: it returns the existing row (still 201) and does not count against the domain cap. Registering a domain owned by a different account is a 409 domain_taken conflict.",
+		Security:    []map[string][]string{{"bearer": {}}}, DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"402": s.limitExceededResponse(),
 			"409": s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
