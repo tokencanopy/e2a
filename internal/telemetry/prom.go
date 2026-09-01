@@ -113,7 +113,7 @@ var (
 	delegatedRefreshSet = set("success", "key_absent", "transport_error", "parse_error", "rate_limited")
 	oidcDiscoverySet    = set("success", "issuer_unavailable", "discovery_invalid")
 	oidcCallbackSet     = set(
-		"success", "discovery_unavailable", "state_invalid", "provider_rejected",
+		"success", "discovery_unavailable", "state_invalid", "provider_rejected", "provider_failed",
 		"response_invalid", "token_exchange_failed", "id_token_invalid",
 		"claim_invalid", "unknown_user", "session_failed", "post_login_failed",
 	)

@@ -291,6 +291,17 @@ func (oa *OIDCAuth) recordCallback(outcome, trust string, status int, logFailure
 	}
 }
 
+// oidcProviderErrorOutcome deliberately exposes only the operational split we
+// need. access_denied is the standards-defined user refusal/cancellation path;
+// every other provider error is actionable and fails into one bounded bucket.
+// Callers must never log or label the raw provider code or description.
+func oidcProviderErrorOutcome(providerError string) string {
+	if providerError == "access_denied" {
+		return "provider_rejected"
+	}
+	return "provider_failed"
+}
+
 // oidcResume carries the optional post-login instructions HandleLogin
 // accepts from the query string through the provider round trip. It mirrors
 // the legacy Google door's OAuthState fields: ReturnTo is a same-origin
@@ -484,8 +495,8 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// Authorization codes remain single-use at the provider as required by OIDC.
 	oa.clearTransactionCookies(w)
 
-	if r.URL.Query().Get("error") != "" {
-		oa.recordCallback("provider_rejected", "trusted", http.StatusBadRequest, true)
+	if providerError := r.URL.Query().Get("error"); providerError != "" {
+		oa.recordCallback(oidcProviderErrorOutcome(providerError), "trusted", http.StatusBadRequest, true)
 		http.Error(w, "login rejected", http.StatusBadRequest)
 		return
 	}

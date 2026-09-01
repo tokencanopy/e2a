@@ -862,18 +862,56 @@ func TestOIDCCallbackRejectsMissingTransactionCookie(t *testing.T) {
 	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "state_invalid", trust: "public", statusClass: "4xx"})
 }
 
-func TestOIDCCallbackRejectsProviderErrorAndDeletesCookies(t *testing.T) {
-	fx := setupOIDC(t)
-	tx := beginOIDCLogin(t, fx)
-	w := httptest.NewRecorder()
-	fx.oidc.HandleCallback(w, callbackRequest(tx, "error=access_denied&state="+url.QueryEscape(tx.state)))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
+func TestOIDCCallbackClassifiesProviderErrorsWithoutLoggingDetails(t *testing.T) {
+	tests := []struct {
+		name        string
+		providerErr string
+		wantOutcome string
+	}{
+		{name: "user access denied", providerErr: "access_denied", wantOutcome: "provider_rejected"},
+		{name: "provider server error", providerErr: "server_error", wantOutcome: "provider_failed"},
+		{name: "provider temporarily unavailable", providerErr: "temporarily_unavailable", wantOutcome: "provider_failed"},
 	}
-	if findCookie(w.Result().Cookies(), "e2a_oidc_state") == nil {
-		t.Fatal("provider error must clear transaction cookies")
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fx := setupOIDC(t)
+			tx := beginOIDCLogin(t, fx)
+			providerDescription := "provider-description-marker token=opaque-secret email=person@example.test"
+			callbackQuery := url.Values{
+				"error":             {test.providerErr},
+				"error_description": {providerDescription},
+				"state":             {tx.state},
+			}.Encode()
+
+			var logs bytes.Buffer
+			previousOutput := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+			w := httptest.NewRecorder()
+			fx.oidc.HandleCallback(w, callbackRequest(tx, callbackQuery))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", w.Code)
+			}
+			if findCookie(w.Result().Cookies(), "e2a_oidc_state") == nil {
+				t.Fatal("provider error must clear transaction cookies")
+			}
+			assertCallbackMetric(t, fx, oidcMetricEvent{outcome: test.wantOutcome, trust: "trusted", statusClass: "4xx"})
+
+			line := logs.String()
+			for _, forbidden := range []string{test.providerErr, providerDescription, "provider-description-marker", "opaque-secret", "person@example.test"} {
+				if strings.Contains(line, forbidden) {
+					t.Fatalf("provider-controlled value %q leaked into callback log: %q", forbidden, line)
+				}
+			}
+			for _, want := range []string{"category=" + test.wantOutcome, "trust=trusted", "status_class=4xx"} {
+				if !strings.Contains(line, want) {
+					t.Errorf("bounded callback log missing %q: %q", want, line)
+				}
+			}
+		})
 	}
-	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "provider_rejected", trust: "trusted", statusClass: "4xx"})
 }
 
 func TestOIDCCallbackRejectsMissingCode(t *testing.T) {

@@ -126,7 +126,7 @@ func TestPromEmitsAllOIDCAndProvisioningOutcomeCategories(t *testing.T) {
 		p.OIDCDiscovery(outcome, "5xx")
 	}
 	for _, outcome := range []string{
-		"success", "discovery_unavailable", "state_invalid", "provider_rejected",
+		"success", "discovery_unavailable", "state_invalid", "provider_rejected", "provider_failed",
 		"response_invalid", "token_exchange_failed", "id_token_invalid",
 		"claim_invalid", "unknown_user", "session_failed", "post_login_failed",
 	} {
@@ -148,6 +148,7 @@ func TestPromEmitsAllOIDCAndProvisioningOutcomeCategories(t *testing.T) {
 		`e2a_oidc_callback_total{outcome="discovery_unavailable",status_class="4xx",trust="trusted"} 1`,
 		`e2a_oidc_callback_total{outcome="state_invalid",status_class="4xx",trust="trusted"} 1`,
 		`e2a_oidc_callback_total{outcome="provider_rejected",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="provider_failed",status_class="4xx",trust="trusted"} 1`,
 		`e2a_oidc_callback_total{outcome="response_invalid",status_class="4xx",trust="trusted"} 1`,
 		`e2a_oidc_callback_total{outcome="token_exchange_failed",status_class="4xx",trust="trusted"} 1`,
 		`e2a_oidc_callback_total{outcome="id_token_invalid",status_class="4xx",trust="trusted"} 1`,
