@@ -1224,6 +1224,19 @@ func grantConsentedScope(ar fosite.AuthorizeRequester, scope string) {
 }
 
 func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWriter, r *http.Request, ar fosite.AuthorizeRequester, userID, agentEmail, scope string) error {
+	// Same per-user agent cap the REST create path enforces (see
+	// CreateAgentWithLimit in agents_write.go). Looked up before BeginTx,
+	// same order as the REST path's GetLimits call, so this connection
+	// releases before the tx below acquires its own.
+	maxAgents := 0
+	if a.enforcer != nil {
+		lim, err := a.enforcer.Get(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("get limits: %w", err)
+		}
+		maxAgents = lim.MaxAgents
+	}
+
 	pool := a.oauthStorage.Pool()
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -1234,21 +1247,12 @@ func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWri
 	defer func() { _ = tx.Rollback(ctx) }()
 	txCtx := oauth.WithTx(ctx, tx)
 
-	// Same per-user agent cap the REST create path enforces (see
-	// CreateAgentWithLimit in agents_write.go), and atomic with the insert
-	// below: CreateAgentWithLimitTx takes the keyspace-2 advisory lock and
-	// re-checks the count inside this same tx, so a concurrent OAuth
-	// auto-provision request, or one racing a REST create, cannot both pass
-	// the check the way the old CheckAgentCreate-then-insert sequence let
-	// them (check-then-act race, same class #942 closed for the REST path).
-	maxAgents := 0
-	if a.enforcer != nil {
-		lim, err := a.enforcer.Get(ctx, userID)
-		if err != nil {
-			return fmt.Errorf("get limits: %w", err)
-		}
-		maxAgents = lim.MaxAgents
-	}
+	// Atomic with the insert below: CreateAgentWithLimitTx takes the
+	// keyspace-2 advisory lock and re-checks the count inside this same
+	// tx, so a concurrent OAuth auto-provision request, or one racing a
+	// REST create, cannot both pass the check the way the old
+	// CheckAgentCreate-then-insert sequence let them (check-then-act
+	// race, same class #942 closed for the REST path).
 
 	// Agent insert via the identity package — same tx, same context.
 	if _, err := a.store.CreateAgentWithLimitTx(txCtx, tx, agentEmail, a.sharedDomain, "", userID, maxAgents); err != nil {
