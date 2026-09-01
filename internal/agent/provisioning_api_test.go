@@ -23,6 +23,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/usage"
 )
@@ -33,6 +34,40 @@ import (
 // inside the test or they'll wipe their own setup.
 func setupAPIWithProvisioning(t *testing.T, provisioningEnabled bool, provisioningSecret string) (*httptest.Server, *identity.Store) {
 	t.Helper()
+	server, store, _ := setupAPIWithProvisioningMetrics(t, provisioningEnabled, provisioningSecret)
+	return server, store
+}
+
+type provisioningMetricEvent struct {
+	outcome     string
+	trust       string
+	statusClass string
+}
+
+type provisioningMetricsRecorder struct {
+	telemetry.NoOp
+	mu     sync.Mutex
+	events []provisioningMetricEvent
+}
+
+func (m *provisioningMetricsRecorder) Provisioning(outcome, trust, statusClass string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, provisioningMetricEvent{outcome: outcome, trust: trust, statusClass: statusClass})
+}
+
+func (m *provisioningMetricsRecorder) last(t *testing.T) provisioningMetricEvent {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.events) == 0 {
+		t.Fatal("no provisioning metric recorded")
+	}
+	return m.events[len(m.events)-1]
+}
+
+func setupAPIWithProvisioningMetrics(t *testing.T, provisioningEnabled bool, provisioningSecret string) (*httptest.Server, *identity.Store, *provisioningMetricsRecorder) {
+	t.Helper()
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	smtpRelay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{})
@@ -41,12 +76,14 @@ func setupAPIWithProvisioning(t *testing.T, provisioningEnabled bool, provisioni
 
 	api := agent.NewAPI(store, sender, smtpRelay, userAuth, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
 	api.ConfigureProvisioning(provisioningEnabled, provisioningSecret)
+	metrics := &provisioningMetricsRecorder{}
+	api.SetMetrics(metrics)
 
 	router := mux.NewRouter()
 	api.RegisterRoutes(router)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	return server, store
+	return server, store, metrics
 }
 
 func provisionRequest(t *testing.T, server *httptest.Server, secret string, body []byte) *http.Response {
@@ -325,5 +362,60 @@ func TestProvisionUser_RejectsOversizedBody(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("oversized body: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestProvisionUserMetricsDistinguishPublicAndAuthenticatedOutcomes(t *testing.T) {
+	secret := "provision-secret-metrics"
+	server, _, metrics := setupAPIWithProvisioningMetrics(t, true, secret)
+
+	assertLast := func(want provisioningMetricEvent) {
+		t.Helper()
+		if got := metrics.last(t); got != want {
+			t.Fatalf("provisioning metric = %+v, want %+v", got, want)
+		}
+	}
+
+	missingSig := []byte(`{"external_ref":"public_missing_sig","email":"public@example.test"}`)
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/internal/users/provision", bytes.NewReader(missingSig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	assertLast(provisioningMetricEvent{outcome: "unauthorized", trust: "public", statusClass: "4xx"})
+
+	malformed := []byte(`{"external_ref":`)
+	resp = provisionRequest(t, server, secret, malformed)
+	resp.Body.Close()
+	assertLast(provisioningMetricEvent{outcome: "malformed_request", trust: "authenticated", statusClass: "4xx"})
+
+	rejected := []byte(`{"external_ref":"authenticated_rejected","email":"not-an-email"}`)
+	resp = provisionRequest(t, server, secret, rejected)
+	resp.Body.Close()
+	assertLast(provisioningMetricEvent{outcome: "rejected", trust: "authenticated", statusClass: "4xx"})
+
+	created := []byte(`{"external_ref":"authenticated_created","email":"created@example.test"}`)
+	resp = provisionRequest(t, server, secret, created)
+	resp.Body.Close()
+	assertLast(provisioningMetricEvent{outcome: "created", trust: "authenticated", statusClass: "2xx"})
+
+	resp = provisionRequest(t, server, secret, created)
+	resp.Body.Close()
+	assertLast(provisioningMetricEvent{outcome: "existing", trust: "authenticated", statusClass: "2xx"})
+}
+
+func TestProvisionUserDisabledMetricIsPublicAndIndependentlyMatchable(t *testing.T) {
+	server, _, metrics := setupAPIWithProvisioningMetrics(t, false, "configured-but-disabled")
+	body := []byte(`{"external_ref":"disabled","email":"disabled@example.test"}`)
+	resp := provisionRequest(t, server, "configured-but-disabled", body)
+	resp.Body.Close()
+
+	want := provisioningMetricEvent{outcome: "not_configured", trust: "public", statusClass: "5xx"}
+	if got := metrics.last(t); got != want {
+		t.Fatalf("provisioning metric = %+v, want %+v", got, want)
 	}
 }

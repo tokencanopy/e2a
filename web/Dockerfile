@@ -61,8 +61,9 @@ ARG NEXT_PUBLIC_PRICING_PATH=
 ARG NEXT_PUBLIC_BILLING_API=
 # Empty keeps the dashboard's sign-in links on the legacy Google door
 # (/api/auth/login), which every deployment has. The hosted deployment sets
-# this to /api/auth/oidc/login so the TokenCanopy OIDC door (multi-provider
-# chooser) is the default. Only set this when the server runs with
+# this to /api/auth/oidc/login so the generic OIDC door is the default. The
+# upstream hosted site identity brands that door as TokenCanopy; self-hosted
+# builds remain provider-neutral. Only set this when the server runs with
 # E2A_OIDC_ENABLED=true — the OIDC route doesn't exist otherwise.
 ARG NEXT_PUBLIC_E2A_SIGN_IN_URL=
 # Empty keeps the site free of web analytics. The hosted deployment sets

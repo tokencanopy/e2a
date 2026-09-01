@@ -213,15 +213,16 @@ func authorizeParams(challenge, clientID, state string) url.Values {
 
 // ──────────────────────── /authorize ────────────────────────
 
-// TestHTTP_Authorize_NoSession redirects to /api/auth/login when the
-// request lacks the session cookie, carrying the original authorize
-// request URI as return_to so the user lands back here after Google
-// callback completes. Without that bounce the user would land on
-// /dashboard and have to re-trigger the flow from their MCP client.
-func TestHTTP_Authorize_NoSession(t *testing.T) {
+// TestHTTP_Authorize_NoSessionRoutesThroughConsentChooser is the handler half
+// of the signed-out handler/UI contract. A valid request must reach the
+// provider chooser before either login door is selected, and the chooser must
+// receive the exact authorize request URI that both doors resume after login.
+func TestHTTP_Authorize_NoSessionRoutesThroughConsentChooser(t *testing.T) {
 	f := newConsentFixture(t)
 	_, challenge := newPKCE(t)
-	resp := f.authorizeRequest(t, authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1"), false)
+	q := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+	q.Set("response_mode", "query")
+	resp := f.authorizeRequest(t, q, false)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302", resp.StatusCode)
@@ -230,15 +231,17 @@ func TestHTTP_Authorize_NoSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Location parse: %v", err)
 	}
-	if !strings.HasSuffix(loc.Path, "/api/auth/login") {
-		t.Errorf("Location path = %q, want /api/auth/login", loc.Path)
+	if !strings.HasSuffix(loc.Path, "/oauth/consent") {
+		t.Errorf("Location path = %q, want /oauth/consent", loc.Path)
 	}
-	returnTo := loc.Query().Get("return_to")
-	if !strings.HasPrefix(returnTo, "/oauth2/authorize") {
-		t.Errorf("return_to should preserve the authorize request URI: got %q", returnTo)
+	wantReturnTo := "/oauth2/authorize?" + q.Encode()
+	if got := loc.Query().Get("return_to"); got != wantReturnTo {
+		t.Errorf("return_to = %q, want exact authorize request %q", got, wantReturnTo)
 	}
-	if !strings.Contains(returnTo, "client_id=") || !strings.Contains(returnTo, "code_challenge=") {
-		t.Errorf("return_to should carry the original query string: got %q", returnTo)
+	for key, values := range q {
+		if got := loc.Query()[key]; len(got) != len(values) || strings.Join(got, "\x00") != strings.Join(values, "\x00") {
+			t.Errorf("consent redirect missing/wrong %q: got %q, want %q", key, got, values)
+		}
 	}
 }
 

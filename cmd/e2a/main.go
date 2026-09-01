@@ -637,7 +637,8 @@ func main() {
 	// today NewOIDCAuth only fails to construct if E2A is misconfigured in a
 	// way config.Validate() would already have caught.
 	oidcCtx, oidcCancel := context.WithCancel(ctx)
-	oidcAuth, err := auth.NewOIDCAuth(oidcCtx, cfg.OIDC, store, cfg.IsProduction(), cfg.HTTP.PublicURL)
+	oidcAuth, err := auth.NewOIDCAuth(oidcCtx, cfg.OIDC, store, cfg.IsProduction(), cfg.HTTP.PublicURL,
+		auth.WithOIDCMetrics(metrics))
 	if err != nil {
 		log.Fatalf("Failed to initialize OIDC login: %v", err)
 	}

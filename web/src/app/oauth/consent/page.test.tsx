@@ -15,6 +15,14 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ConsentPage from "./page";
 
+// Exercise the actual hosted chooser configuration. The handler contract test
+// starts at /oauth2/authorize and pins the redirect query consumed here.
+jest.mock("../../../lib/site", () => ({
+  ...jest.requireActual("../../../lib/site"),
+  SIGN_IN_URL: "/api/auth/oidc/login",
+  SIGN_IN_LABEL: "Sign in with TokenCanopy",
+}));
+
 // ── Mocks ────────────────────────────────────────────────
 
 // useSearchParams is mocked per test via __setSearchParams.
@@ -145,24 +153,28 @@ describe("ConsentPage", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  test("shows sign-in CTA carrying return_to when no session", () => {
-    __setSearchParams(VALID_QS);
+  test("renders both hosted login doors with the handler-provided authorize return_to", () => {
+    const authorizeReturnTo = `/oauth2/authorize?${VALID_QS}`;
+    __setSearchParams(
+      `${VALID_QS}&return_to=${encodeURIComponent(authorizeReturnTo)}`,
+    );
     __setAuth({ user: null, loading: false });
 
     render(<ConsentPage />);
     expect(screen.getByText(/Sign in to continue/i)).toBeInTheDocument();
-    const linkWithReturnTo = screen.getByRole("link", {
+    const tokenCanopy = screen.getByRole("link", {
+      name: /^Sign in with TokenCanopy$/i,
+    }) as HTMLAnchorElement;
+    const google = screen.getByRole("link", {
       name: /^Sign in with Google$/i,
     }) as HTMLAnchorElement;
-    expect(linkWithReturnTo.getAttribute("href")).toMatch(
-      /^\/api\/auth\/login\?return_to=/,
+
+    expect(tokenCanopy.getAttribute("href")).toBe(
+      `/api/auth/oidc/login?return_to=${encodeURIComponent(authorizeReturnTo)}`,
     );
-    // return_to must preserve every original OAuth param.
-    const u = new URL(linkWithReturnTo.href, "http://localhost");
-    const ret = u.searchParams.get("return_to") ?? "";
-    expect(ret).toContain("client_id=mcp_abc123");
-    expect(ret).toContain("code_challenge=test_challenge_value");
-    expect(ret).toContain("response_type=code");
+    expect(google.getAttribute("href")).toBe(
+      `/api/auth/login?return_to=${encodeURIComponent(authorizeReturnTo)}`,
+    );
   });
 
   test("renders 'unknown client' when the lookup 404s", async () => {
