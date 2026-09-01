@@ -97,6 +97,9 @@ func (a *API) buildPendingApprovalEvent(
 		"conversation_id":     req.ConversationID,
 		"approval_expires_at": msg.ApprovalExpiresAt,
 	}
+	if msg.ScheduledAt != nil {
+		data["scheduled_at"] = msg.ScheduledAt
+	}
 	attachReviewLifecycle(data, msg.LifecycleTransitions)
 	return webhookpub.Event{
 		ID:             generateEventIDForAgent(),
@@ -130,6 +133,9 @@ func (a *API) buildApprovedEvent(
 	}
 	if sent.ProviderMessageID != "" && sent.Method != "loopback" {
 		data["provider_message_id"] = sent.ProviderMessageID
+	}
+	if sent.ScheduledAt != nil {
+		data["scheduled_at"] = sent.ScheduledAt
 	}
 	attachReviewLifecycle(data, sent.LifecycleTransitions)
 	return webhookpub.Event{
