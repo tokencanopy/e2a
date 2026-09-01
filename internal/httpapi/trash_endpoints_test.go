@@ -675,7 +675,7 @@ func TestAgentScopedCannotManageAgentTrash(t *testing.T) {
 func TestCreateAgentTrashedAddressConflict(t *testing.T) {
 	var createCalled string
 	srv := testServer(t, func(d *Deps) {
-		d.CreateAgent = func(ctx context.Context, email, domain, name, webhookURL, agentMode, userID string) (*identity.AgentIdentity, error) {
+		d.CreateAgentWithLimit = func(ctx context.Context, email, domain, name, userID string, maxAgents int) (*identity.AgentIdentity, error) {
 			createCalled = email
 			return nil, &pgconn.PgError{Code: "23505", Message: "duplicate key value"}
 		}
@@ -691,7 +691,7 @@ func TestCreateAgentTrashedAddressConflict(t *testing.T) {
 		t.Fatalf("want 409 address_in_trash, got %d %v", code, body)
 	}
 	if createCalled != "support@acme.com" {
-		t.Fatalf("CreateAgent not invoked with the trashed address; got %q", createCalled)
+		t.Fatalf("CreateAgentWithLimit not invoked with the trashed address; got %q", createCalled)
 	}
 }
 
@@ -701,7 +701,7 @@ func TestCreateAgentTrashedAddressConflict(t *testing.T) {
 // reveal another account's trashed inbox.
 func TestCreateAgentTrashedByOtherUserIsAgentTaken(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.CreateAgent = func(ctx context.Context, email, domain, name, webhookURL, agentMode, userID string) (*identity.AgentIdentity, error) {
+		d.CreateAgentWithLimit = func(ctx context.Context, email, domain, name, userID string, maxAgents int) (*identity.AgentIdentity, error) {
 			return nil, &pgconn.PgError{Code: "23505", Message: "duplicate key value"}
 		}
 		other := trashedSampleAgent()

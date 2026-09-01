@@ -157,6 +157,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		GetConversation:   p.Store.GetConversationByID,
 
 		CreateAgent:          p.Store.CreateAgent,
+		CreateAgentWithLimit: p.Store.CreateAgentWithLimit,
 		LookupDomain:         p.Store.LookupDomain,
 		LookupCoveringDomain: p.Store.LookupCoveringDomain,
 		// Exact-domain MX probe for the create-time two-way-inbox gate.
