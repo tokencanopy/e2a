@@ -49,6 +49,10 @@ type UserAuth struct {
 	secure      bool   // true in production (Secure cookie flag)
 	baseURL     string // frontend origin for post-login redirect
 	userInfoURL string // Google userinfo endpoint (overridable for testing)
+	// logoutOrigin is the canonical web-app origin used for logout provenance.
+	// It is separate from baseURL because generic OIDC deployments may not
+	// configure the legacy Google OAuth callback.
+	logoutOrigin string
 	// oidcLogoutURL is an operator-configured, fixed upstream logout endpoint.
 	// It is deliberately not derived from request input.
 	oidcLogoutURL string
@@ -163,6 +167,36 @@ func NewUserAuthWithOAuthConfig(cfg *config.OAuthConfig, oauthCfg *oauth2.Config
 // configuration; callers must never pass request-controlled URLs here.
 func (ua *UserAuth) SetOIDCLogoutURL(logoutURL string) {
 	ua.oidcLogoutURL = logoutURL
+}
+
+// SetLogoutOrigin configures the canonical web-app origin used to validate
+// browser logout requests. The value must come from trusted server
+// configuration, never from a request parameter.
+func (ua *UserAuth) SetLogoutOrigin(origin string) {
+	ua.logoutOrigin = normalizeHTTPOrigin(origin)
+}
+
+func normalizeHTTPOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil ||
+		(u.Scheme != "http" && u.Scheme != "https") || u.RawQuery != "" || u.Fragment != "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if strings.Contains(host, ":") { // IPv6 literal
+		host = "[" + host + "]"
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return strings.ToLower(u.Scheme) + "://" + host
 }
 
 func generateNonce() string {
@@ -492,8 +526,12 @@ func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, ua.oidcLogoutURL, http.StatusSeeOther)
 		return
 	}
-	if ua.baseURL != "" {
-		http.Redirect(w, r, ua.baseURL+"/", http.StatusSeeOther)
+	logoutOrigin := ua.logoutOrigin
+	if logoutOrigin == "" {
+		logoutOrigin = normalizeHTTPOrigin(ua.baseURL)
+	}
+	if logoutOrigin != "" {
+		http.Redirect(w, r, logoutOrigin+"/", http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -505,12 +543,15 @@ func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 // An absent or unparsable provenance header fails closed for the upstream
 // handoff, while local session revocation has already completed.
 func (ua *UserAuth) isSameOriginLogoutRequest(r *http.Request) bool {
-	expected := ua.baseURL
+	expected := ua.logoutOrigin
+	if expected == "" {
+		expected = normalizeHTTPOrigin(ua.baseURL)
+	}
 	if expected == "" {
 		return false
 	}
 	if origin := r.Header.Get("Origin"); origin != "" {
-		return origin == expected
+		return normalizeHTTPOrigin(origin) == expected
 	}
 	referer := r.Header.Get("Referer")
 	if referer == "" {
@@ -520,7 +561,7 @@ func (ua *UserAuth) isSameOriginLogoutRequest(r *http.Request) bool {
 	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
 		return false
 	}
-	return u.Scheme+"://"+u.Host == expected
+	return normalizeHTTPOrigin(u.Scheme+"://"+u.Host) == expected
 }
 
 // HandleMe returns the current authenticated user's info.

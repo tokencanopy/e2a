@@ -93,6 +93,34 @@ func TestHandleLogout_RedirectsToConfiguredOIDCLogoutURL(t *testing.T) {
 	}
 }
 
+func TestHandleLogout_UsesCanonicalOIDCOriginWithoutGoogleOAuth(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	user, err := store.CreateOrGetUser(context.Background(), "oidc@example.test", "OIDC User", "oidc-subject")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	token, err := store.CreateUserSession(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("CreateUserSession: %v", err)
+	}
+	ua := auth.NewUserAuth(&config.OAuthConfig{}, store, false)
+	ua.SetLogoutOrigin("https://APP.example.com:443")
+	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
+
+	req := authedRequest("POST", "/api/auth/logout", token)
+	req.Header.Set("Origin", "https://app.example.com")
+	w := httptest.NewRecorder()
+	ua.HandleLogout(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != "https://auth.example.com/auth/logout/upstream" {
+		t.Fatalf("Location = %q, want upstream logout URL", location)
+	}
+}
+
 func TestHandleLogout_ConfiguredWithoutCookieDoesNotCascade(t *testing.T) {
 	ua, _, _ := setupUserAuth(t)
 	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
