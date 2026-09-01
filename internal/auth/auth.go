@@ -179,7 +179,7 @@ func (ua *UserAuth) SetLogoutOrigin(origin string) {
 func normalizeHTTPOrigin(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil ||
-		(u.Scheme != "http" && u.Scheme != "https") || u.RawQuery != "" || u.Fragment != "" {
+		(u.Scheme != "http" && u.Scheme != "https") {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())

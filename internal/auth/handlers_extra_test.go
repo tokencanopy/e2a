@@ -105,7 +105,7 @@ func TestHandleLogout_UsesCanonicalOIDCOriginWithoutGoogleOAuth(t *testing.T) {
 		t.Fatalf("CreateUserSession: %v", err)
 	}
 	ua := auth.NewUserAuth(&config.OAuthConfig{}, store, false)
-	ua.SetLogoutOrigin("https://APP.example.com:443")
+	ua.SetLogoutOrigin("https://APP.example.com/api/auth/oidc/callback?tenant=one")
 	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
 
 	req := authedRequest("POST", "/api/auth/logout", token)
@@ -142,6 +142,7 @@ func TestHandleLogout_ConfiguredRejectsCrossOriginHandoff(t *testing.T) {
 
 	req := authedRequest("POST", "/api/auth/logout", token)
 	req.Header.Set("Origin", "https://attacker.test")
+	req.Header.Set("Referer", "http://localhost/dashboard")
 	w := httptest.NewRecorder()
 	ua.HandleLogout(w, req)
 
@@ -153,6 +154,23 @@ func TestHandleLogout_ConfiguredRejectsCrossOriginHandoff(t *testing.T) {
 	}
 	if _, err := store.GetUserSession(context.Background(), token); err == nil {
 		t.Fatal("session still resolves after cross-origin logout")
+	}
+}
+
+func TestHandleLogout_ConfiguredAcceptsSameOriginReferer(t *testing.T) {
+	ua, _, token := setupUserAuth(t)
+	ua.SetOIDCLogoutURL("https://auth.example.com/auth/logout/upstream")
+
+	req := authedRequest("POST", "/api/auth/logout", token)
+	req.Header.Set("Referer", "http://localhost/dashboard")
+	w := httptest.NewRecorder()
+	ua.HandleLogout(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if location := w.Header().Get("Location"); location != "https://auth.example.com/auth/logout/upstream" {
+		t.Fatalf("Location = %q, want upstream logout URL", location)
 	}
 }
 
