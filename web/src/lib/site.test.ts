@@ -35,11 +35,12 @@ describe("site config — sign-in door", () => {
     );
   });
 
-  it("points at the configured door with provider-neutral copy when set", () => {
+  it("identifies the TokenCanopy door when the hosted OIDC route is set", () => {
     process.env[ENV_KEY] = "/api/auth/oidc/login";
     const site = loadSite();
     expect(site.SIGN_IN_URL).toBe("/api/auth/oidc/login");
-    expect(site.SIGN_IN_LABEL).toBe("Sign in");
+    expect(site.SIGN_IN_LABEL).toBe("Sign in with TokenCanopy");
+    expect(site.LEGACY_SIGN_IN_URL).toBe("/api/auth/login");
     expect(
       site.signInURLWithReturnTo(
         "/oauth2/authorize?client_id=mcp_abc&state=opaque",

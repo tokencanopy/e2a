@@ -148,7 +148,7 @@ The Next.js dashboard ships as a static export, so its config is inlined at buil
 | `NEXT_PUBLIC_FEEDBACK_EMAIL` | Address shown on the feedback form. Empty hides the "or email us at …" line. |
 | `NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION` | Google Search Console token. Only emitted into `<head>` when set, so forks don't inherit upstream's property. |
 | `NEXT_PUBLIC_PRICING_PATH` | Site-relative path of the pricing page, when the deployment serves one (the hosted deployment sets `/pricing`). Only used to add the page to the sitemap. Leave empty if there is no pricing route — a sitemap entry that 404s is a crawl-quality problem. |
-| `NEXT_PUBLIC_E2A_SIGN_IN_URL` | Sign-in door for the dashboard's "Sign in" links. Default: `/api/auth/login` (legacy Google OAuth). Set to `/api/auth/oidc/login` to make the generic OIDC door the default — only when the server runs with `E2A_OIDC_ENABLED=true`, otherwise the link 404s. Button copy follows: "Sign in with Google" for the legacy door, provider-neutral "Sign in" otherwise. |
+| `NEXT_PUBLIC_E2A_SIGN_IN_URL` | Sign-in door for the dashboard's "Sign in" links. Default: `/api/auth/login` (legacy Google OAuth). Set to `/api/auth/oidc/login` to make the hosted TokenCanopy OIDC door the default — only when the server runs with `E2A_OIDC_ENABLED=true`, otherwise the link 404s. Button copy follows: "Sign in with Google" for the legacy door, "Sign in with TokenCanopy" for the hosted OIDC route, and provider-neutral "Sign in" for any other configured URL. |
 
 ## MCP HTTP server
 

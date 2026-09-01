@@ -71,11 +71,15 @@ export const LEGACY_SIGN_IN_URL = "/api/auth/login";
 export const SIGN_IN_URL =
   process.env.NEXT_PUBLIC_E2A_SIGN_IN_URL || LEGACY_SIGN_IN_URL;
 
-// Button copy derived from the same variable: the legacy door IS Google, but
-// the OIDC door leads to a multi-provider chooser (Google/Microsoft/GitHub),
-// so naming Google there would be wrong.
+// Button copy derived from the same variable. The hosted deployment uses the
+// exact generic OIDC route for its TokenCanopy door; arbitrary operator URLs
+// remain provider-neutral.
 export const SIGN_IN_LABEL =
-  SIGN_IN_URL === LEGACY_SIGN_IN_URL ? "Sign in with Google" : "Sign in";
+  SIGN_IN_URL === LEGACY_SIGN_IN_URL
+    ? "Sign in with Google"
+    : SIGN_IN_URL === "/api/auth/oidc/login"
+      ? "Sign in with TokenCanopy"
+      : "Sign in";
 
 // Adds the post-login destination to whichever sign-in door this build uses.
 // SIGN_IN_URL may be a same-origin path or an absolute operator-supplied URL;
