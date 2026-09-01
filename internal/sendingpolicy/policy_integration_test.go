@@ -3,6 +3,7 @@ package sendingpolicy_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,7 +19,15 @@ import (
 func newModule(t *testing.T) (*sendingpolicy.Module, *pgxpool.Pool) {
 	t.Helper()
 	pool := testutil.TestDB(t)
-	return sendingpolicy.NewModule(pool), pool
+	recipients, err := sendingpolicy.LoadOperatorRecipients(testOperatorV1)
+	if err != nil {
+		t.Fatalf("load default operator map: %v", err)
+	}
+	m := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: recipients})
+	if _, err := m.RegisterOperatorRecipients(context.Background(), "integration-test-bootstrap"); err != nil {
+		t.Fatalf("register default operator map: %v", err)
+	}
+	return m, pool
 }
 
 func mustInspect(t *testing.T, m *sendingpolicy.Module) sendingpolicy.PolicySnapshot {
@@ -50,9 +59,38 @@ func TestInspectPolicyVerifiesStoredHash(t *testing.T) {
 	}
 }
 
+func TestPolicyCASCorruptFailClosed(t *testing.T) {
+	ctx := context.Background()
+
+	for name, corrupt := range map[string]func(*testing.T, *pgxpool.Pool){
+		"hash mismatch": func(t *testing.T, pool *pgxpool.Pool) {
+			if _, err := pool.Exec(ctx,
+				`UPDATE sending_protection_runtime_policy SET policy_sha256 = $1 WHERE singleton`,
+				strings.Repeat("0", 64)); err != nil {
+				t.Fatalf("corrupt policy hash: %v", err)
+			}
+		},
+		"unsupported schema": func(t *testing.T, pool *pgxpool.Pool) {
+			if _, err := pool.Exec(ctx,
+				`UPDATE sending_protection_runtime_policy SET schema_version = $1 WHERE singleton`,
+				sendingpolicy.SchemaVersion+1); err != nil {
+				t.Fatalf("corrupt schema version: %v", err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, pool := newModule(t)
+			corrupt(t, pool)
+			if _, err := m.InspectPolicy(ctx); err == nil {
+				t.Fatal("expected corrupt runtime policy to fail closed")
+			}
+		})
+	}
+}
+
 // TestActivatePolicyAdvancesOneGeneration is the happy path, and asserts the
 // audit event is written in the same transaction as the policy itself.
-func TestActivatePolicyAdvancesOneGeneration(t *testing.T) {
+func TestPolicyCASAdvancesOneGeneration(t *testing.T) {
 	ctx := context.Background()
 	m, pool := newModule(t)
 	before := mustInspect(t, m)
@@ -102,7 +140,7 @@ func TestActivatePolicyAdvancesOneGeneration(t *testing.T) {
 // TestActivatePolicyRejectsStaleGeneration is the core safety property: an
 // operator who reviewed generation N cannot write over generation N+1 that
 // someone else activated in the meantime.
-func TestActivatePolicyRejectsStaleGeneration(t *testing.T) {
+func TestPolicyCASRejectsStaleGeneration(t *testing.T) {
 	ctx := context.Background()
 	m, pool := newModule(t)
 	current := mustInspect(t, m)
@@ -142,7 +180,7 @@ func TestActivatePolicyRejectsStaleGeneration(t *testing.T) {
 // TestActivatePolicyRequiresActorAndReason keeps the audit trail meaningful.
 // The database CHECK would also reject these, but failing before the
 // transaction opens gives the operator a usable message.
-func TestActivatePolicyRequiresActorAndReason(t *testing.T) {
+func TestPolicyCASRequiresActorAndReason(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newModule(t)
 	current := mustInspect(t, m)
@@ -161,7 +199,7 @@ func TestActivatePolicyRequiresActorAndReason(t *testing.T) {
 
 // TestActivatePolicyRejectsInvalidPolicy proves validation runs before any
 // database work, so an illegal policy can never reach the row.
-func TestActivatePolicyRejectsInvalidPolicy(t *testing.T) {
+func TestPolicyCASRejectsInvalidPolicy(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newModule(t)
 	current := mustInspect(t, m)
@@ -186,7 +224,7 @@ func TestActivatePolicyRejectsInvalidPolicy(t *testing.T) {
 // TestConcurrentActivationsSerialize proves the row lock makes exactly one of
 // two racing activations win. Both start from the same generation, so the
 // loser must be told it is stale rather than silently overwriting the winner.
-func TestConcurrentActivationsSerialize(t *testing.T) {
+func TestPolicyCASConcurrentActivationsSerialize(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newModule(t)
 	start := mustInspect(t, m)
@@ -232,6 +270,131 @@ func TestConcurrentActivationsSerialize(t *testing.T) {
 	}
 }
 
+// TestActivatePolicyRejectsUnregisteredSelectedOperatorRecipient pins the
+// registry precondition on policy CAS itself. A reviewed payload must not be
+// selectable merely because its operator version is a positive integer: that
+// version's non-secret commitment has to exist in the permanent registry
+// before the policy generation can advance.
+func TestPolicyCASRejectsUnregisteredSelectedOperatorRecipient(t *testing.T) {
+	ctx := context.Background()
+	m, pool := newModule(t)
+	current := mustInspect(t, m)
+
+	next := current.Policy
+	next.OperatorNoticeRecipientVersion = 910101
+
+	var eventsBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sending_protection_policy_events`).Scan(&eventsBefore); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if _, err := m.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration: current.Generation,
+		Policy:             next,
+		Actor:              "integration-test",
+		Reason:             "unregistered recipient must not be selected",
+	}); err == nil {
+		t.Fatal("expected an unregistered operator recipient version to be rejected")
+	}
+
+	after := mustInspect(t, m)
+	if after.Generation != current.Generation || after.PolicySHA256 != current.PolicySHA256 {
+		t.Error("an unregistered recipient version advanced the policy")
+	}
+	var eventsAfter int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sending_protection_policy_events`).Scan(&eventsAfter); err != nil {
+		t.Fatalf("count events after rejection: %v", err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Errorf("an unregistered recipient version wrote %d policy events", eventsAfter-eventsBefore)
+	}
+}
+
+func TestPolicyCASRejectsMismatchedSelectedOperatorRecipient(t *testing.T) {
+	ctx := context.Background()
+	_, pool := newModule(t) // registers version 1 under testOperatorV1
+
+	changed, err := sendingpolicy.LoadOperatorRecipients(
+		`{"commitment_key":"` + testCommitmentKey + `","recipients":{"1":"changed-operator@example.test"}}`,
+	)
+	if err != nil {
+		t.Fatalf("load changed operator map: %v", err)
+	}
+	m := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: changed})
+	current := mustInspect(t, m)
+
+	if _, err := m.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration: current.Generation,
+		Policy:             current.Policy,
+		Actor:              "integration-test",
+		Reason:             "mismatched commitment must not be selected",
+	}); !errors.Is(err, sendingpolicy.ErrRegistryConflict) {
+		t.Fatalf("expected ErrRegistryConflict, got %v", err)
+	}
+	if after := mustInspect(t, m); after.Generation != current.Generation {
+		t.Error("a mismatched recipient commitment advanced the policy")
+	}
+}
+
+// TestBudgetEnforcementRequiresCompatibleBillingAttestation is the dormant
+// mechanism's most important activation interlock. Shadow remains deployable
+// on the migration-owned contract-0 attestation, but the first transition to
+// enforce must lock that row and reject either billing contract below 1.
+func TestPolicyCASBudgetEnforcementRequiresCompatibleBillingAttestation(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newModule(t)
+	current := mustInspect(t, m)
+
+	shadow := current.Policy
+	shadow.BudgetMode = sendingpolicy.ModeShadow
+	shadowSnapshot, err := m.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration: current.Generation,
+		Policy:             shadow,
+		Actor:              "integration-test",
+		Reason:             "shadow is compatible with contract zero",
+	})
+	if err != nil {
+		t.Fatalf("activate shadow policy: %v", err)
+	}
+
+	enforce := shadowSnapshot.Policy
+	enforce.BudgetMode = sendingpolicy.ModeEnforce
+	if _, err := m.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration: shadowSnapshot.Generation,
+		Policy:             enforce,
+		Actor:              "integration-test",
+		Reason:             "contract zero must block enforcement",
+	}); err == nil {
+		t.Fatal("expected contract-0 billing attestation to block budget enforcement")
+	}
+
+	after := mustInspect(t, m)
+	if after.Generation != shadowSnapshot.Generation || after.PolicySHA256 != shadowSnapshot.PolicySHA256 {
+		t.Error("a rejected enforcement transition advanced the policy")
+	}
+
+	attestation, hash := mustAttestation(t, m)
+	if _, err := m.AttestRuntime(ctx, sendingpolicy.RuntimeAttestationRequest{
+		ExpectedRevision:        attestation.Revision,
+		ExpectedSHA256:          hash,
+		ActiveBillingDigest:     "sha256:active-compatible",
+		ActiveBillingContract:   1,
+		RollbackBillingDigest:   "sha256:rollback-compatible",
+		RollbackBillingContract: 1,
+		Actor:                   "integration-test",
+		Reason:                  "attest compatible billing pair",
+	}); err != nil {
+		t.Fatalf("attest compatible billing pair: %v", err)
+	}
+	if _, err := m.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration: shadowSnapshot.Generation,
+		Policy:             enforce,
+		Actor:              "integration-test",
+		Reason:             "contract one permits enforcement",
+	}); err != nil {
+		t.Fatalf("activate enforcement with compatible billing: %v", err)
+	}
+}
+
 // --- Runtime attestation --------------------------------------------------
 
 func mustAttestation(t *testing.T, m *sendingpolicy.Module) (sendingpolicy.RuntimeAttestation, string) {
@@ -247,7 +410,7 @@ func mustAttestation(t *testing.T, m *sendingpolicy.Module) (sendingpolicy.Runti
 	return current, hash
 }
 
-func TestAttestRuntimeForwardCAS(t *testing.T) {
+func TestRuntimeAttestationForwardCAS(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newModule(t)
 	current, hash := mustAttestation(t, m)
@@ -273,7 +436,7 @@ func TestAttestRuntimeForwardCAS(t *testing.T) {
 	}
 }
 
-func TestAttestRuntimeRejectsStaleRevisionAndHash(t *testing.T) {
+func TestRuntimeAttestationRejectsStaleRevisionAndHash(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newModule(t)
 	current, hash := mustAttestation(t, m)
@@ -312,7 +475,7 @@ func TestAttestRuntimeRejectsStaleRevisionAndHash(t *testing.T) {
 // hash(P). Its four expected fields DO match the current state at r3, so a CAS
 // on content alone would accept it and silently resurrect a superseded write.
 // The revision comparison is what makes it stale.
-func TestAttestRuntimeRejectsABARetry(t *testing.T) {
+func TestRuntimeAttestationRejectsABARetry(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newModule(t)
 
@@ -385,16 +548,129 @@ func TestAttestRuntimeRejectsABARetry(t *testing.T) {
 	}
 }
 
+func TestRuntimeAttestationConcurrentWinnerAndLoser(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newModule(t)
+	current, hash := mustAttestation(t, m)
+
+	requests := []sendingpolicy.RuntimeAttestationRequest{
+		{
+			ExpectedRevision: current.Revision, ExpectedSHA256: hash,
+			ActiveBillingDigest: "sha256:concurrent-a", ActiveBillingContract: 1,
+			RollbackBillingDigest: "sha256:concurrent-a-rollback", RollbackBillingContract: 1,
+			Actor: "integration-test", Reason: "concurrent A",
+		},
+		{
+			ExpectedRevision: current.Revision, ExpectedSHA256: hash,
+			ActiveBillingDigest: "sha256:concurrent-b", ActiveBillingContract: 1,
+			RollbackBillingDigest: "sha256:concurrent-b-rollback", RollbackBillingContract: 1,
+			Actor: "integration-test", Reason: "concurrent B",
+		},
+	}
+
+	results := make(chan error, 2)
+	for _, req := range requests {
+		go func(r sendingpolicy.RuntimeAttestationRequest) {
+			_, err := m.AttestRuntime(ctx, r)
+			results <- err
+		}(req)
+	}
+	var wins, stales int
+	for range requests {
+		switch err := <-results; {
+		case err == nil:
+			wins++
+		case errors.Is(err, sendingpolicy.ErrStaleAttestation):
+			stales++
+		default:
+			t.Fatalf("unexpected attestation result: %v", err)
+		}
+	}
+	if wins != 1 || stales != 1 {
+		t.Fatalf("expected one winner and one stale loser, got wins=%d stales=%d", wins, stales)
+	}
+	if after, _ := mustAttestation(t, m); after.Revision != current.Revision+1 {
+		t.Errorf("concurrent attestation advanced revision by more than one: %d -> %d", current.Revision, after.Revision)
+	}
+}
+
+func TestRuntimeAttestationAbortFenceBothOrders(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fence first makes delayed forward stale", func(t *testing.T) {
+		m, _ := newModule(t)
+		prior, priorHash := mustAttestation(t, m)
+		fence := sendingpolicy.RuntimeAttestationRequest{
+			ExpectedRevision: prior.Revision, ExpectedSHA256: priorHash,
+			ActiveBillingDigest: prior.ActiveBillingDigest, ActiveBillingContract: prior.ActiveBillingContract,
+			RollbackBillingDigest: prior.RollbackBillingDigest, RollbackBillingContract: prior.RollbackBillingContract,
+			Actor: "integration-test", Reason: "ambiguous abort fence",
+		}
+		if _, err := m.AttestRuntime(ctx, fence); err != nil {
+			t.Fatalf("write fence: %v", err)
+		}
+		delayedForward := sendingpolicy.RuntimeAttestationRequest{
+			ExpectedRevision: prior.Revision, ExpectedSHA256: priorHash,
+			ActiveBillingDigest: "sha256:delayed", ActiveBillingContract: 1,
+			RollbackBillingDigest: "sha256:delayed-rollback", RollbackBillingContract: 1,
+			Actor: "integration-test", Reason: "delayed forward",
+		}
+		if _, err := m.AttestRuntime(ctx, delayedForward); !errors.Is(err, sendingpolicy.ErrStaleAttestation) {
+			t.Fatalf("delayed forward after fence = %v, want stale", err)
+		}
+	})
+
+	t.Run("forward first makes fence stale and restores at next revision", func(t *testing.T) {
+		m, _ := newModule(t)
+		prior, priorHash := mustAttestation(t, m)
+		forwardReq := sendingpolicy.RuntimeAttestationRequest{
+			ExpectedRevision: prior.Revision, ExpectedSHA256: priorHash,
+			ActiveBillingDigest: "sha256:forward", ActiveBillingContract: 1,
+			RollbackBillingDigest: "sha256:forward-rollback", RollbackBillingContract: 1,
+			Actor: "integration-test", Reason: "forward wins",
+		}
+		forward, err := m.AttestRuntime(ctx, forwardReq)
+		if err != nil {
+			t.Fatalf("write forward: %v", err)
+		}
+		fence := sendingpolicy.RuntimeAttestationRequest{
+			ExpectedRevision: prior.Revision, ExpectedSHA256: priorHash,
+			ActiveBillingDigest: prior.ActiveBillingDigest, ActiveBillingContract: prior.ActiveBillingContract,
+			RollbackBillingDigest: prior.RollbackBillingDigest, RollbackBillingContract: prior.RollbackBillingContract,
+			Actor: "integration-test", Reason: "losing fence",
+		}
+		if _, err := m.AttestRuntime(ctx, fence); !errors.Is(err, sendingpolicy.ErrStaleAttestation) {
+			t.Fatalf("fence after forward = %v, want stale", err)
+		}
+		forwardHash, err := sendingpolicy.AttestationHash(forward)
+		if err != nil {
+			t.Fatalf("hash forward: %v", err)
+		}
+		restore := fence
+		restore.ExpectedRevision = forward.Revision
+		restore.ExpectedSHA256 = forwardHash
+		restore.Reason = "restore after winning forward"
+		restored, err := m.AttestRuntime(ctx, restore)
+		if err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+		if restored.Revision != prior.Revision+2 {
+			t.Errorf("restored revision = %d, want %d", restored.Revision, prior.Revision+2)
+		}
+	})
+}
+
 // --- Operator recipient registry -----------------------------------------
 
 const (
 	testCommitmentKey = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
 	altCommitmentKey  = "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"
+	testOperatorV1    = `{"commitment_key":"` + testCommitmentKey + `","recipients":{"1":"default-operator@example.test"}}`
 )
 
 func TestRegisterOperatorRecipientsIsAppendOnlyAndIdempotent(t *testing.T) {
 	ctx := context.Background()
-	m, pool := newModule(t)
+	_, pool := newModule(t)
 
 	// A version high enough that a shared test database cannot collide with
 	// another test's registration.
@@ -407,7 +683,8 @@ func TestRegisterOperatorRecipientsIsAppendOnlyAndIdempotent(t *testing.T) {
 		t.Fatalf("load map: %v", err)
 	}
 
-	inserted, err := m.RegisterOperatorRecipients(ctx, recipients, "integration-test")
+	registryModule := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: recipients})
+	inserted, err := registryModule.RegisterOperatorRecipients(ctx, "integration-test")
 	if err != nil {
 		t.Fatalf("first registration: %v", err)
 	}
@@ -416,7 +693,7 @@ func TestRegisterOperatorRecipientsIsAppendOnlyAndIdempotent(t *testing.T) {
 	}
 
 	// Replay is idempotent and writes nothing.
-	replayed, err := m.RegisterOperatorRecipients(ctx, recipients, "integration-test")
+	replayed, err := registryModule.RegisterOperatorRecipients(ctx, "integration-test")
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -437,7 +714,7 @@ func TestRegisterOperatorRecipientsIsAppendOnlyAndIdempotent(t *testing.T) {
 
 func TestRegisterOperatorRecipientsRejectsChangedIdentity(t *testing.T) {
 	ctx := context.Background()
-	m, _ := newModule(t)
+	_, pool := newModule(t)
 
 	const version = "900002"
 	original := `{"commitment_key":"` + testCommitmentKey +
@@ -451,7 +728,8 @@ func TestRegisterOperatorRecipientsRejectsChangedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load original: %v", err)
 	}
-	if _, err := m.RegisterOperatorRecipients(ctx, first, "integration-test"); err != nil {
+	firstModule := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: first})
+	if _, err := firstModule.RegisterOperatorRecipients(ctx, "integration-test"); err != nil {
 		t.Fatalf("register original: %v", err)
 	}
 
@@ -464,11 +742,49 @@ func TestRegisterOperatorRecipientsRejectsChangedIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			_, err = m.RegisterOperatorRecipients(ctx, recipients, "integration-test")
+			changedModule := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: recipients})
+			_, err = changedModule.RegisterOperatorRecipients(ctx, "integration-test")
 			if !errors.Is(err, sendingpolicy.ErrRegistryConflict) {
 				t.Fatalf("expected ErrRegistryConflict, got %v", err)
 			}
 		})
+	}
+}
+
+func TestOperatorRecipientRegistryNeverReusesVersion(t *testing.T) {
+	ctx := context.Background()
+	_, pool := newModule(t) // version 1 is now permanently registered
+
+	retiredMap, err := sendingpolicy.LoadOperatorRecipients(
+		`{"commitment_key":"` + testCommitmentKey + `","recipients":{"2":"replacement-operator@example.test"}}`,
+	)
+	if err != nil {
+		t.Fatalf("load post-retirement map: %v", err)
+	}
+	retiredModule := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: retiredMap})
+	if _, err := retiredModule.RegisterOperatorRecipients(ctx, "integration-test"); err != nil {
+		t.Fatalf("register replacement version: %v", err)
+	}
+
+	reusedV1, err := sendingpolicy.LoadOperatorRecipients(
+		`{"commitment_key":"` + testCommitmentKey + `","recipients":{"1":"reused-version@example.test"}}`,
+	)
+	if err != nil {
+		t.Fatalf("load attempted reuse: %v", err)
+	}
+	reuseModule := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: reusedV1})
+	if _, err := reuseModule.RegisterOperatorRecipients(ctx, "integration-test"); !errors.Is(err, sendingpolicy.ErrRegistryConflict) {
+		t.Fatalf("reusing retired logical version 1 = %v, want ErrRegistryConflict", err)
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM sending_operator_recipient_versions WHERE logical_version = 1`,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count permanent v1 row: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("retired version 1 registry rows = %d, want 1 permanent row", rows)
 	}
 }
 
@@ -478,7 +794,7 @@ func TestRegisterOperatorRecipientsRejectsChangedIdentity(t *testing.T) {
 // the policy CAS and the domain flip commit together, only currently
 // sending-verified + ramp-inactive domains are exempted, and a second attempt
 // is rejected by the marker with zero writes.
-func TestGrandfatherFlipsOnlyVerifiedInactiveDomains(t *testing.T) {
+func TestPolicyCASGrandfatherFlipsOnlyVerifiedInactiveDomains(t *testing.T) {
 	ctx := context.Background()
 	m, pool := newModule(t)
 

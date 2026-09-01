@@ -55,6 +55,7 @@ func spTestConfig() *config.Config {
 
 const (
 	spTestCommitmentKey = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+	spPolicyOperatorMap = `{"commitment_key":"` + spTestCommitmentKey + `","recipients":{"1":"policy-operator@example.test"}}`
 	spTestOperatorMap   = `{"commitment_key":"` + spTestCommitmentKey + `","recipients":{"910001":"cmd-operator@example.test"}}`
 )
 
@@ -62,11 +63,23 @@ func TestSendingProtectionCommands(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)
 	cfg := spTestConfig()
-	module := sendingpolicy.NewModule(pool)
+	module := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{})
 
 	run := func(f *sendingProtectionFlags) (string, error) {
 		var out bytes.Buffer
-		err := runSendingProtectionCommand(ctx, cfg, pool, f, &out)
+		policy, err := sendingpolicy.FromConfig(cfg)
+		if err != nil {
+			return "", err
+		}
+		source, err := sendingpolicy.SourceFromConfig(cfg)
+		if err != nil {
+			return "", err
+		}
+		secrets, err := sendingpolicy.LoadSecretsFromEnv(source, policy)
+		if err != nil {
+			return "", err
+		}
+		err = runSendingProtectionCommand(ctx, cfg, pool, secrets, f, &out)
 		return out.String(), err
 	}
 
@@ -119,7 +132,39 @@ func TestSendingProtectionCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid reviewed hashes are rejected without echoing input", func(t *testing.T) {
+		injected := "not-a-hash\nforged-log-line"
+		_, err := run(&sendingProtectionFlags{
+			activate:           true,
+			expectedGeneration: 0,
+			expectedPolicySHA:  injected,
+			reason:             "invalid hash",
+		})
+		if err == nil {
+			t.Fatal("expected malformed policy hash to be rejected")
+		}
+		if strings.Contains(err.Error(), "forged-log-line") {
+			t.Errorf("policy hash error echoed untrusted input: %v", err)
+		}
+
+		_, err = run(&sendingProtectionFlags{
+			attest:                      true,
+			expectedAttestationRevision: 0,
+			expectedAttestationSHA:      injected,
+			activeBillingContract:       0,
+			rollbackBillingContract:     0,
+			reason:                      "invalid hash",
+		})
+		if err == nil {
+			t.Fatal("expected malformed attestation hash to be rejected")
+		}
+		if strings.Contains(err.Error(), "forged-log-line") {
+			t.Errorf("attestation hash error echoed untrusted input: %v", err)
+		}
+	})
+
 	t.Run("activate rejects a wrong reviewed hash with zero writes", func(t *testing.T) {
+		t.Setenv(sendingpolicy.EnvOperatorRecipientsMap, spPolicyOperatorMap)
 		before, err := module.InspectPolicy(ctx)
 		if err != nil {
 			t.Fatalf("inspect: %v", err)
@@ -143,6 +188,15 @@ func TestSendingProtectionCommands(t *testing.T) {
 	})
 
 	t.Run("activate with the reviewed hash advances one generation", func(t *testing.T) {
+		t.Setenv(sendingpolicy.EnvOperatorRecipientsMap, spPolicyOperatorMap)
+		recipients, err := sendingpolicy.LoadOperatorRecipients(spPolicyOperatorMap)
+		if err != nil {
+			t.Fatalf("load policy operator map: %v", err)
+		}
+		activationModule := sendingpolicy.NewModule(pool, sendingpolicy.Secrets{Recipients: recipients})
+		if _, err := activationModule.RegisterOperatorRecipients(ctx, "cmd-test-bootstrap"); err != nil {
+			t.Fatalf("register selected policy operator: %v", err)
+		}
 		before, err := module.InspectPolicy(ctx)
 		if err != nil {
 			t.Fatalf("inspect: %v", err)

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/user"
 	"strings"
 
@@ -63,11 +62,24 @@ func cliActor() string {
 	return "cli:local-operator"
 }
 
+func normalizeSHA256(raw string) (string, error) {
+	if len(raw) != 64 {
+		return "", errors.New("expected SHA-256 must be exactly 64 hexadecimal characters")
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return "", errors.New("expected SHA-256 must be exactly 64 hexadecimal characters")
+		}
+	}
+	return strings.ToLower(raw), nil
+}
+
 // runSendingProtectionCommand executes the selected command and returns once
 // it is done; the caller exits. Every mutation is CAS-guarded in the store —
 // this layer's job is explicit arguments, the reviewed-hash equality check,
 // and printing nothing secret.
-func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, f *sendingProtectionFlags, stdout io.Writer) error {
+func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, secrets sendingpolicy.Secrets, f *sendingProtectionFlags, stdout io.Writer) error {
 	if f.selectedCount() != 1 {
 		return errors.New("exactly one sending-protection command may be given per invocation")
 	}
@@ -80,7 +92,7 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 	if err != nil {
 		return err
 	}
-	module := sendingpolicy.NewModule(pool)
+	module := sendingpolicy.NewModule(pool, secrets)
 
 	switch {
 	case f.inspect:
@@ -88,11 +100,11 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 	case f.activate:
 		return runPolicyActivate(ctx, module, policy, f, stdout)
 	case f.register:
-		return runOperatorRegister(ctx, module, f, stdout)
+		return runOperatorRegister(ctx, module, secrets.Recipients, f, stdout)
 	case f.attest:
 		return runRuntimeAttest(ctx, module, f, stdout)
 	case f.capabilities:
-		return runPrintCapabilities(source, policy, stdout)
+		return runPrintCapabilities(source, secrets, stdout)
 	}
 	return errors.New("no sending-protection command selected")
 }
@@ -144,14 +156,17 @@ func runPolicyActivate(ctx context.Context, module *sendingpolicy.Module, policy
 	if f.expectedPolicySHA == "" {
 		return errors.New("-activate-sending-protection-policy requires -expected-policy-sha256")
 	}
+	reviewedHash, err := normalizeSHA256(f.expectedPolicySHA)
+	if err != nil {
+		return fmt.Errorf("-expected-policy-sha256: %w", err)
+	}
 
 	configHash, err := sendingpolicy.Hash(policy)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(f.expectedPolicySHA, configHash) {
-		return fmt.Errorf("reviewed hash %s does not match this config's policy (%s); zero writes performed",
-			f.expectedPolicySHA, configHash)
+	if reviewedHash != configHash {
+		return fmt.Errorf("reviewed hash does not match this config's policy (%s); zero writes performed", configHash)
 	}
 
 	snapshot, err := module.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{
@@ -175,20 +190,14 @@ func runPolicyActivate(ctx context.Context, module *sendingpolicy.Module, policy
 // runOperatorRegister reads the local operator map and inserts only absent
 // registry rows. The map itself is never printed; the registry stores only
 // commitments.
-func runOperatorRegister(ctx context.Context, module *sendingpolicy.Module, f *sendingProtectionFlags, stdout io.Writer) error {
+func runOperatorRegister(ctx context.Context, module *sendingpolicy.Module, recipients *sendingpolicy.OperatorRecipients, f *sendingProtectionFlags, stdout io.Writer) error {
 	if strings.TrimSpace(f.reason) == "" {
 		return errors.New("-register-sending-protection-operator-recipients requires a nonblank -reason")
 	}
-	raw, ok := os.LookupEnv(sendingpolicy.EnvOperatorRecipientsMap)
-	if !ok {
+	if recipients == nil {
 		return fmt.Errorf("%s is not set; registration reads the local versioned secret map", sendingpolicy.EnvOperatorRecipientsMap)
 	}
-	recipients, err := sendingpolicy.LoadOperatorRecipients(raw)
-	if err != nil {
-		return err
-	}
-
-	inserted, err := module.RegisterOperatorRecipients(ctx, recipients, cliActor())
+	inserted, err := module.RegisterOperatorRecipients(ctx, cliActor())
 	if err != nil {
 		return err
 	}
@@ -215,13 +224,17 @@ func runRuntimeAttest(ctx context.Context, module *sendingpolicy.Module, f *send
 	if f.expectedAttestationSHA == "" {
 		return errors.New("-attest-sending-protection-runtime requires -expected-attestation-sha256")
 	}
+	expectedHash, err := normalizeSHA256(f.expectedAttestationSHA)
+	if err != nil {
+		return fmt.Errorf("-expected-attestation-sha256: %w", err)
+	}
 	if f.activeBillingContract < 0 || f.rollbackBillingContract < 0 {
 		return errors.New("-attest-sending-protection-runtime requires -active-billing-contract and -rollback-billing-contract")
 	}
 
 	attestation, err := module.AttestRuntime(ctx, sendingpolicy.RuntimeAttestationRequest{
 		ExpectedRevision:        f.expectedAttestationRevision,
-		ExpectedSHA256:          strings.ToLower(f.expectedAttestationSHA),
+		ExpectedSHA256:          expectedHash,
 		ActiveBillingDigest:     f.activeBillingDigest,
 		ActiveBillingContract:   f.activeBillingContract,
 		RollbackBillingDigest:   f.rollbackBillingDigest,
@@ -244,11 +257,7 @@ func runRuntimeAttest(ctx context.Context, module *sendingpolicy.Module, f *send
 // runPrintCapabilities emits the machine-readable capability marker the ops
 // deploy gate compares across slots. Commitments only — never addresses, key
 // material, or customer data.
-func runPrintCapabilities(source sendingpolicy.PolicySource, policy sendingpolicy.RuntimePolicy, stdout io.Writer) error {
-	secrets, err := sendingpolicy.LoadSecretsFromEnv(source, policy)
-	if err != nil {
-		return err
-	}
+func runPrintCapabilities(source sendingpolicy.PolicySource, secrets sendingpolicy.Secrets, stdout io.Writer) error {
 	payload, err := json.Marshal(sendingpolicy.BuildCapabilities(source, secrets))
 	if err != nil {
 		return err

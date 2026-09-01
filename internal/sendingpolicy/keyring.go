@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,6 +64,9 @@ type keyringPayload struct {
 // up believing it can.
 func LoadKeyring(raw string) (*Keyring, error) {
 	if err := checkSecretEnvelope(raw, "hmac keyring"); err != nil {
+		return nil, err
+	}
+	if err := rejectDuplicateJSONKeys(raw, "hmac keyring"); err != nil {
 		return nil, err
 	}
 
@@ -162,6 +166,9 @@ func LoadOperatorRecipients(raw string) (*OperatorRecipients, error) {
 	if err := checkSecretEnvelope(raw, "operator recipient map"); err != nil {
 		return nil, err
 	}
+	if err := rejectDuplicateJSONKeys(raw, "operator recipient map"); err != nil {
+		return nil, err
+	}
 
 	var payload operatorPayload
 	dec := json.NewDecoder(strings.NewReader(raw))
@@ -217,6 +224,74 @@ func LoadOperatorRecipients(raw string) (*OperatorRecipients, error) {
 		recipients:  recipients,
 		commitments: commitments,
 	}, nil
+}
+
+// rejectDuplicateJSONKeys performs a structural pass before decoding into Go
+// maps. encoding/json deliberately accepts repeated object keys and keeps the
+// last value; that would let two textual versions of a secret payload mean
+// different things to different validators. This pass rejects duplicates at
+// every object depth without ever echoing the key or value.
+func rejectDuplicateJSONKeys(raw, what string) error {
+	dec := json.NewDecoder(strings.NewReader(raw))
+
+	var walkValue func() error
+	walkValue = func() error {
+		tok, err := dec.Token()
+		if err != nil {
+			return errRedacted("%s is not valid JSON", what)
+		}
+		delim, compound := tok.(json.Delim)
+		if !compound {
+			return nil
+		}
+
+		switch delim {
+		case '{':
+			seen := make(map[string]struct{})
+			for dec.More() {
+				keyToken, err := dec.Token()
+				if err != nil {
+					return errRedacted("%s is not valid JSON", what)
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errRedacted("%s is not valid JSON", what)
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return errRedacted("%s contains a duplicate object key", what)
+				}
+				seen[key] = struct{}{}
+				if err := walkValue(); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim('}') {
+				return errRedacted("%s is not valid JSON", what)
+			}
+		case '[':
+			for dec.More() {
+				if err := walkValue(); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim(']') {
+				return errRedacted("%s is not valid JSON", what)
+			}
+		default:
+			return errRedacted("%s is not valid JSON", what)
+		}
+		return nil
+	}
+
+	if err := walkValue(); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errRedacted("%s has trailing content", what)
+	}
+	return nil
 }
 
 // KeyID is the lowercase HMAC-SHA256 of the commitment key over a fixed label.

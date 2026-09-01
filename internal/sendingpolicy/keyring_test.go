@@ -105,6 +105,7 @@ func TestLoadKeyringRejects(t *testing.T) {
 		"no keys":                 `{"active":1,"keys":{}}`,
 		"zero version":            `{"active":1,"keys":{"0":"` + fixtureKey1 + `"}}`,
 		"leading zero version":    `{"active":1,"keys":{"01":"` + fixtureKey1 + `"}}`,
+		"duplicate version":       `{"active":1,"keys":{"1":"` + fixtureKey1 + `","1":"` + fixtureKey2 + `"}}`,
 		"oversized version":       `{"active":1,"keys":{"1234567890":"` + fixtureKey1 + `"}}`,
 		"key too short":           `{"active":1,"keys":{"1":"` + shortKey + `"}}`,
 		"key not base64url":       `{"active":1,"keys":{"1":"AAAA+AAA/AAA=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}`,
@@ -228,6 +229,7 @@ func TestLoadOperatorRecipientsRejects(t *testing.T) {
 		"commitment key too short": `{"commitment_key":"YWJj","recipients":{"1":"` + fixtureAddress1 + `"}}`,
 		"commitment key missing":   `{"recipients":{"1":"` + fixtureAddress1 + `"}}`,
 		"zero version":             `{"commitment_key":"` + fixtureCKey + `","recipients":{"0":"` + fixtureAddress1 + `"}}`,
+		"duplicate version":        `{"commitment_key":"` + fixtureCKey + `","recipients":{"1":"` + fixtureAddress1 + `","1":"` + fixtureAddress2 + `"}}`,
 		"oversized version":        `{"commitment_key":"` + fixtureCKey + `","recipients":{"1234567890":"` + fixtureAddress1 + `"}}`,
 
 		"display syntax":      withRecipient("operator<route>@example.test"),

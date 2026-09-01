@@ -143,7 +143,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Sending protection config invalid: %v", err)
 	}
-	if _, err := sendingpolicy.LoadSecretsFromEnv(spSource, spPolicy); err != nil {
+	spSecrets, err := sendingpolicy.LoadSecretsFromEnv(spSource, spPolicy)
+	if err != nil {
 		log.Fatalf("Sending protection startup validation failed: %v", err)
 	}
 
@@ -189,7 +190,7 @@ func main() {
 	// Sending-protection operator command mode: run the selected command and
 	// exit. Placed after migrations so the singleton rows exist.
 	if spFlags.commandRequested() {
-		if err := runSendingProtectionCommand(ctx, cfg, pool, &spFlags, os.Stdout); err != nil {
+		if err := runSendingProtectionCommand(ctx, cfg, pool, spSecrets, &spFlags, os.Stdout); err != nil {
 			log.Fatalf("Sending protection command failed: %v", err)
 		}
 		return

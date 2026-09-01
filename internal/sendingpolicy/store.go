@@ -31,6 +31,14 @@ var (
 	// with a different key identity or commitment. Append-only history is
 	// never rewritten, so this is always zero writes.
 	ErrRegistryConflict = errors.New("sendingpolicy: operator recipient registry conflict")
+	// ErrOperatorRecipientUnavailable means the policy-selected logical
+	// version is absent from either this process's immutable secret map or the
+	// permanent registry. Policy activation must fail before writing anything.
+	ErrOperatorRecipientUnavailable = errors.New("sendingpolicy: selected operator recipient is unavailable")
+	// ErrBillingContractTooLow means a budget-enforcement transition was
+	// attempted without both active and rollback billing images attested at
+	// sending-protection contract level 1 or higher.
+	ErrBillingContractTooLow = errors.New("sendingpolicy: billing contract is too low for budget enforcement")
 	// ErrAlreadyGrandfathered means the one-shot ramp-grandfathering marker
 	// already exists. The retry is a documented no-op: it can never widen the
 	// grandfathered set, so it performs zero writes.
@@ -42,12 +50,16 @@ var (
 // by this same object; the Postgres store stays private because there is only
 // ever one adapter.
 type Module struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	secrets Secrets
 }
 
-// NewModule binds the module to a pool. It performs no I/O: a server that never
-// reads the policy (self-host on config source) must not pay for a query.
-func NewModule(pool *pgxpool.Pool) *Module { return &Module{pool: pool} }
+// NewModule binds the module to a pool and the immutable trust roots parsed at
+// startup. It performs no I/O: a server that never reads the policy (self-host
+// on config source) must not pay for a query.
+func NewModule(pool *pgxpool.Pool, secrets Secrets) *Module {
+	return &Module{pool: pool, secrets: secrets}
+}
 
 // PolicySnapshot is the stored policy plus the metadata an operator needs to
 // express the next compare-and-swap.
@@ -239,6 +251,21 @@ func (m *Module) ActivatePolicy(ctx context.Context, req ActivationRequest) (Pol
 		return PolicySnapshot{}, fmt.Errorf("%w: stored generation is %d, expected %d",
 			ErrStaleGeneration, current.Generation, req.ExpectedGeneration)
 	}
+	if err := m.requireSelectedOperatorRecipient(ctx, tx, req.Policy.OperatorNoticeRecipientVersion); err != nil {
+		return PolicySnapshot{}, err
+	}
+	if current.Policy.BudgetMode != ModeEnforce && req.Policy.BudgetMode == ModeEnforce {
+		attestation, err := scanAttestation(tx.QueryRow(ctx, attestationSelect+" FOR SHARE"))
+		if err != nil {
+			return PolicySnapshot{}, err
+		}
+		if attestation.ActiveBillingContract < 1 || attestation.RollbackBillingContract < 1 {
+			return PolicySnapshot{}, fmt.Errorf("%w: active=%d rollback=%d",
+				ErrBillingContractTooLow,
+				attestation.ActiveBillingContract,
+				attestation.RollbackBillingContract)
+		}
+	}
 
 	next := current.Generation + 1
 	if req.GrandfatherCurrentSendingDomains {
@@ -279,6 +306,43 @@ func (m *Module) ActivatePolicy(ctx context.Context, req ActivationRequest) (Pol
 		ActivatedAt:   activatedAt,
 		ActivatedBy:   req.Actor,
 	}, nil
+}
+
+// requireSelectedOperatorRecipient proves that the policy's non-secret
+// logical version means exactly the same recipient in this process and in the
+// append-only registry. The registry row is share-locked for the activation
+// transaction even though ordinary application code cannot mutate it; this
+// keeps the read/selection boundary explicit and composes with bootstrap or
+// repair tooling that might be running concurrently.
+func (m *Module) requireSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx, version int) error {
+	recipients := m.secrets.Recipients
+	if recipients == nil {
+		return fmt.Errorf("%w: local operator recipient map is not loaded", ErrOperatorRecipientUnavailable)
+	}
+	localCommitment, ok := recipients.Commitment(version)
+	if !ok {
+		return fmt.Errorf("%w: logical version %d is absent from the local map",
+			ErrOperatorRecipientUnavailable, version)
+	}
+
+	var registeredKeyID, registeredCommitment string
+	err := tx.QueryRow(ctx,
+		`SELECT commitment_key_id, recipient_commitment
+		   FROM sending_operator_recipient_versions
+		  WHERE logical_version = $1 FOR SHARE`, version,
+	).Scan(&registeredKeyID, &registeredCommitment)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: logical version %d is not registered",
+			ErrOperatorRecipientUnavailable, version)
+	}
+	if err != nil {
+		return fmt.Errorf("sendingpolicy: read selected operator recipient version %d: %w", version, err)
+	}
+	if registeredKeyID != recipients.KeyID() || registeredCommitment != localCommitment {
+		return fmt.Errorf("%w: logical version %d does not match the local map",
+			ErrRegistryConflict, version)
+	}
+	return nil
 }
 
 // grandfatherLocked runs the one-shot snapshot inside the caller's activation
@@ -357,6 +421,9 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 	if req.ActiveBillingContract < 0 || req.RollbackBillingContract < 0 {
 		return RuntimeAttestation{}, errors.New("sendingpolicy: billing contract levels must be non-negative")
 	}
+	if !isLowerHexSHA256(req.ExpectedSHA256) {
+		return RuntimeAttestation{}, errors.New("sendingpolicy: expected attestation SHA-256 must be 64 lowercase hexadecimal characters")
+	}
 
 	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -377,8 +444,8 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 		return RuntimeAttestation{}, err
 	}
 	if currentHash != req.ExpectedSHA256 {
-		return RuntimeAttestation{}, fmt.Errorf("%w: stored four-field hash is %s, expected %s",
-			ErrStaleAttestation, currentHash, req.ExpectedSHA256)
+		return RuntimeAttestation{}, fmt.Errorf("%w: stored four-field hash no longer matches the reviewed value",
+			ErrStaleAttestation)
 	}
 
 	next := current.Revision + 1
@@ -411,6 +478,19 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 	}, nil
 }
 
+func isLowerHexSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // RegisterOperatorRecipients inserts registry rows for versions that are not
 // yet recorded, and refuses any disagreement with history.
 //
@@ -419,9 +499,13 @@ func (m *Module) AttestRuntime(ctx context.Context, req RuntimeAttestationReques
 // That is checked explicitly and fails the whole transaction, because a partial
 // registration would leave the operator unable to tell which versions are
 // trustworthy.
-func (m *Module) RegisterOperatorRecipients(ctx context.Context, recipients *OperatorRecipients, actor string) (inserted []int, err error) {
+func (m *Module) RegisterOperatorRecipients(ctx context.Context, actor string) (inserted []int, err error) {
 	if strings.TrimSpace(actor) == "" {
 		return nil, errors.New("sendingpolicy: registration requires an actor")
+	}
+	recipients := m.secrets.Recipients
+	if recipients == nil {
+		return nil, errors.New("sendingpolicy: registration requires the local operator recipient map")
 	}
 
 	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{})
