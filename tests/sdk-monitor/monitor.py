@@ -58,6 +58,7 @@ from typing import Optional, Protocol
 
 from e2a.v1 import (
     E2AClient,
+    E2ANotFoundError,
     E2AWebhookSignatureError,
     construct_event,
     is_email_received,
@@ -103,6 +104,19 @@ MAX_AGE_MS = int(os.environ.get("E2A_MONITOR_MAX_AGE_MS", "900000"))
 # creates a handful of messages, so the surplus also drains backlog from
 # earlier ticks without turning the monitor into a bulk-delete client.
 SWEEP_BUDGET = int(os.environ.get("E2A_MONITOR_SWEEP_BUDGET", "50"))
+# How old a message must be before the sweep may touch it. NOT a tuning knob:
+# the sweep runs at the end of /tick, but a round trip completes LATER, on
+# /webhook, so the tick's own probes are still in flight when it runs. Below
+# this age a purge destroys the monitor's own probe and manufactures the
+# outage it exists to detect.
+#
+# MAX_AGE_MS is exactly the right floor, and provably so: a message's
+# created_at is >= the sent_ms its nonce carries (the row is written at or
+# after the send), and a leg only counts when now - sent_ms <= MAX_AGE_MS. So
+# a row older than this cutoff can no longer produce anything but
+# monitor_stale, and purging it cannot cost a success. The extra minute is
+# margin for clock skew between this container and the server.
+SWEEP_MIN_AGE_MS = MAX_AGE_MS + 60_000
 PORT = int(os.environ.get("PORT", "8080"))
 
 # Every interface this service exercises, in the fixed order /tick fires them.
@@ -641,15 +655,29 @@ def _sweep_api(path: str, method: str = "GET") -> dict:
 
 
 def _sweep_ids(inbox: str, *, deleted: bool) -> list:
-    """Up to SWEEP_BUDGET message ids from one inbox.
+    """Up to SWEEP_BUDGET message ids from one inbox, oldest first and none
+    of them younger than SWEEP_MIN_AGE_MS.
 
     direction=all and read_status=all are both load-bearing: the endpoint
     defaults to inbound-only, and for inbound to unread-only, so the defaults
     would walk straight past every outbound copy — which is precisely the
     residue this sweep exists to clear (the per-leg _cleanup trashes the
-    RECEIVED copy; the sent copy in the opposite folder was never in scope)."""
+    RECEIVED copy; the sent copy in the opposite folder was never in scope).
+
+    So are the other two. `until` is the correctness boundary: the listing is
+    newest-first by default, so an unscoped page is the tick's own in-flight
+    probes — the sweep would eat the round trip it just started and the
+    interface would go silent (see SWEEP_MIN_AGE_MS). `sort=asc` then aims
+    the budget at the oldest residue, which is what the sweep is FOR; on its
+    own it would only postpone the collision until the backlog drained below
+    one page, so both are required, not alternatives."""
+    cutoff = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime((time.time() * 1000 - SWEEP_MIN_AGE_MS) / 1000),
+    )
     q = (
-        f"direction=all&read_status=all&limit={SWEEP_BUDGET}"
+        f"direction=all&read_status=all&sort=asc&limit={SWEEP_BUDGET}"
+        f"&until={cutoff}"
         f"{'&deleted=true' if deleted else ''}"
     )
     page = _sweep_api(f"/v1/agents/{urllib.parse.quote(inbox, safe='')}/messages?{q}")
@@ -783,6 +811,16 @@ def handle_webhook(raw_body: bytes, signature: str) -> tuple[int, dict]:
 
     try:
         email = client().inbound.from_event(event)
+    except E2ANotFoundError as exc:
+        # Terminal, not transient: the message the event names is gone, and no
+        # number of redeliveries brings it back. Answering 5xx here would ask
+        # e2a to retry a delivery that can only 404 again — one purged probe
+        # becomes an unbounded redelivery loop, which is how this was found.
+        # Drop the leg with a 200 and let the iface fall silent: the
+        # absent-metric alert is the honest signal for a lost round trip.
+        log("monitor_dropped", stage="hydrate", event_id=event.id,
+            error=type(exc).__name__, detail=str(exc))
+        return 200, {"ok": False, "stage": "hydrate", "dropped": True}
     except Exception as exc:  # noqa: BLE001
         log("monitor_error", stage="hydrate", event_id=event.id, error=type(exc).__name__, detail=str(exc))
         # 5xx so e2a retries: a transient hydration failure shouldn't silently

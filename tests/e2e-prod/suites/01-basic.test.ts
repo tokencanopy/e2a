@@ -87,7 +87,7 @@ test("agents: create + read + delete (slug on shared domain)", async () => {
   assert.equal(got.body?.domain_verified, true, "slug-domain agent should be auto-verified");
 
   const del = await client.delete<{ deleted: boolean; email: string; messages_deleted: number }>(
-    `/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`,
+    `/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`,
   );
   assert.equal(del.status, 200, `delete expected 200 + deletion receipt, got ${del.status}`);
   assert.equal(del.body?.deleted, true, "deletion receipt has deleted:true");

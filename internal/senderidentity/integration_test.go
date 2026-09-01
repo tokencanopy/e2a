@@ -126,7 +126,7 @@ func TestProvisionToVerified(t *testing.T) {
 	fake.SetStatus(domain, senderidentity.Result{Status: senderidentity.StatusVerified})
 
 	rec := &recordingFire{}
-	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store), fake, rec.firer(), senderidentity.Config{})
+	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store, nil), fake, rec.firer(), senderidentity.Config{})
 	startShared(t, pool, mgr)
 
 	if err := mgr.EnqueueProvision(ctx, domain); err != nil {
@@ -157,7 +157,7 @@ func TestProvisionFailsClosed(t *testing.T) {
 	fake := senderidentity.NewFakeProvider()
 	fake.SetStatus(domain, senderidentity.Result{Status: senderidentity.StatusFailed, Error: "dkim mismatch"})
 
-	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store), fake, nil, senderidentity.Config{})
+	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store, nil), fake, nil, senderidentity.Config{})
 	startShared(t, pool, mgr)
 
 	if err := mgr.EnqueueProvision(ctx, domain); err != nil {
@@ -177,7 +177,7 @@ func TestDeprovisionTeardown(t *testing.T) {
 
 	fake := senderidentity.NewFakeProvider()
 	fake.SeedIdentity("teardown.example.com")
-	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store), fake, nil, senderidentity.Config{})
+	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store, nil), fake, nil, senderidentity.Config{})
 	startShared(t, pool, mgr)
 
 	// EnqueueDeprovisionTx requires a tx; use the pool's own.
@@ -218,7 +218,7 @@ func TestReprovisionAfterFailed(t *testing.T) {
 
 	fake := senderidentity.NewFakeProvider()
 	fake.SetStatus(domain, senderidentity.Result{Status: senderidentity.StatusFailed, Error: "dns not ready"})
-	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store), fake, nil, senderidentity.Config{})
+	mgr := senderidentity.NewManager(senderidentity.NewStoreAdapter(store, nil), fake, nil, senderidentity.Config{})
 	startShared(t, pool, mgr)
 
 	if err := mgr.EnqueueProvision(ctx, domain); err != nil {

@@ -50,10 +50,32 @@ type CurrentState = {
   status: string;
   current_period_end?: string;
   has_stripe_customer: boolean;
+  // Stored inbox add-on quantity; 0 (or absent, on an older sidecar)
+  // when the user has none.
+  addon_quantity?: number;
+};
+
+// AddOnEntry mirrors the sidecar's inbox add-on descriptor. Like
+// PlanEntry, everything the card renders — price, per-unit grants, the
+// quantity ceiling — comes from this payload so the dashboard can never
+// disagree with what the webhook actually provisions.
+type AddOnEntry = {
+  code: string;
+  display_name: string;
+  monthly_price_cents_per_unit: number;
+  max_quantity: number;
+  per_unit: {
+    max_agents: number;
+    max_messages_month: number;
+  };
+  lifts_free_daily_cap: boolean;
 };
 
 type PlanInfo = {
   catalog: PlanEntry[];
+  // Absent on sidecars that predate the add-on — the card simply
+  // doesn't render, same fail-safe posture as the rest of the page.
+  addon?: AddOnEntry;
   current: CurrentState;
 };
 
@@ -115,7 +137,7 @@ function formatPrice(cents: number): string {
 const QUOTA_DIMS: { label: string; format: (p: PlanEntry) => string }[] = [
   { label: "Inboxes", format: (p) => formatNumber(p.max_agents) },
   { label: "Domains", format: (p) => formatNumber(p.max_domains) },
-  { label: "Messages / mo", format: (p) => formatNumber(p.max_messages_month) },
+  { label: "Sends / mo", format: (p) => formatNumber(p.max_messages_month) },
   { label: "Storage", format: (p) => formatBytes(p.max_storage_bytes) },
 ];
 
@@ -340,6 +362,11 @@ export default function BillingPage() {
   useEffect(() => {
     const onShow = (e: PageTransitionEvent) => {
       if (e.persisted) {
+        // A bfcache restore also resurrects any pre-navigation
+        // actionPending (postBilling/applyAddon deliberately leave it
+        // set through the redirect) — without this reset every billing
+        // control on the restored page stays disabled forever.
+        setActionPending(null);
         void mutate();
         void mutatePlan();
       }
@@ -416,6 +443,137 @@ export default function BillingPage() {
     }
   }, [reconcile, planData]);
 
+  // ----- Inbox add-on -----------------------------------------------------
+  // The user's edited quantity. `null` means "no edit yet" — the input
+  // tracks the server's stored quantity, so a webhook-driven change
+  // (another tab, a portal edit) isn't clobbered by a stale local copy.
+  const [addonDesired, setAddonDesired] = useState<number | null>(null);
+
+  // The server quantity the current edit started from. When the server
+  // moves away from it mid-edit (another tab, the Stripe portal), the
+  // card surfaces a notice instead of letting a stale total silently
+  // downgrade the newer value — the classic lost-update on a money
+  // path. A ref is enough: it only needs reading on renders that a
+  // server change already triggers.
+  const addonEditBaseRef = useRef<number>(0);
+
+  // In-place quantity updates return {updated:true} and the caps land
+  // via the webhook a moment later — the same race as post-Checkout
+  // reconciliation, so this mirrors that machinery: poll fast until the
+  // stored quantity matches what we asked for, or time out softly.
+  const [addonSync, setAddonSync] = useState<ReconcileState>("idle");
+  const addonTargetRef = useRef<number | null>(null);
+  const addonDeadlineRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (addonSync !== "pending") {
+      addonDeadlineRef.current = null;
+      return;
+    }
+    addonDeadlineRef.current ??= Date.now() + RECONCILE_TIMEOUT_MS;
+    const id = setInterval(() => {
+      if (Date.now() >= (addonDeadlineRef.current ?? 0)) {
+        setAddonSync("timeout");
+        return;
+      }
+      void mutate();
+      void mutatePlan();
+    }, RECONCILE_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [addonSync, mutate, mutatePlan]);
+
+  // The webhook landed: stored quantity now matches the request. Clear
+  // the local edit too so the input goes back to tracking the server —
+  // but only if the user hasn't already staged a NEWER quantity during
+  // the pending window; that edit is theirs to keep.
+  useEffect(() => {
+    if (
+      addonSync !== "idle" &&
+      (planData?.current.addon_quantity ?? 0) === addonTargetRef.current
+    ) {
+      setAddonSync("idle");
+      // The server now sits at the resolved target; rebase any kept
+      // edit on it so the change we just made isn't reported as
+      // "changed elsewhere".
+      addonEditBaseRef.current = addonTargetRef.current ?? addonEditBaseRef.current;
+      setAddonDesired((d) => (d === addonTargetRef.current ? null : d));
+    }
+  }, [addonSync, planData]);
+
+  // stageAddonQty is the single entry point for edits: the first edit
+  // snapshots the server quantity it started from (see addonEditBaseRef).
+  function stageAddonQty(n: number) {
+    if (addonDesired === null) addonEditBaseRef.current = addonServerQty;
+    setAddonDesired(n);
+  }
+
+  // applyAddon sets the account's TOTAL desired quantity (not a delta).
+  // Response routing mirrors the sidecar: {url} → hosted Checkout (user
+  // had no subscription; redirect exactly like postBilling), or
+  // {updated:true} → the existing subscription was mutated in place and
+  // the webhook will provision the caps shortly.
+  async function applyAddon(target: number) {
+    const addon = planData?.addon;
+    if (!addon) return;
+    // In-place increases charge the subscription immediately (prorated
+    // by Stripe) with no hosted page in between — the one money action
+    // on this page without a Stripe-owned review step. Make the total
+    // explicit and get a confirmation before committing. Checkout-path
+    // purchases (and decreases) skip this: Stripe's page shows the
+    // price, and a reduction never charges.
+    if (target > addonServerQty && addonInPlace) {
+      const total = formatPrice(target * addon.monthly_price_cents_per_unit);
+      const ok = window.confirm(
+        `Set inbox add-ons to ${target} (${total} total)? The prorated difference is charged to your subscription immediately.`,
+      );
+      if (!ok) return;
+    }
+    setActionPending("addon");
+    try {
+      const res = await fetch(`${BILLING_API}/api/billing/addon`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quantity: target }),
+      });
+      if (!res.ok) {
+        // Translate the sidecar's documented refusals; fall through to
+        // the raw status for anything unexpected.
+        if (res.status === 503) {
+          throw new Error("the add-on isn't available on this deployment");
+        }
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
+      }
+      const json = (await res.json()) as { url?: string; updated?: boolean };
+      if (json.url) {
+        // Keep the pending state through navigation, like postBilling.
+        window.location.href = json.url;
+        return;
+      }
+      if (json.updated) {
+        addonTargetRef.current = target;
+        // Stamp a FRESH deadline here rather than relying on the sync
+        // effect's `??=`: a second update issued while the first is
+        // still pending doesn't re-run that effect (the "pending" set
+        // is a no-op), and inheriting the first update's deadline would
+        // truncate — or instantly expire — the second one's window.
+        addonDeadlineRef.current = Date.now() + RECONCILE_TIMEOUT_MS;
+        setAddonSync("pending");
+        setActionPending(null);
+        void mutate();
+        void mutatePlan();
+        return;
+      }
+      throw new Error("add-on endpoint returned neither url nor updated");
+    } catch (err) {
+      setActionPending(null);
+      alert(
+        `Could not update add-ons: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // Compute usage percentages once data is loaded. Guard zero limits
   // (treat as 0% rather than NaN/Infinity) so a misconfigured row with
   // max_*=0 doesn't paint a full red bar.
@@ -472,15 +630,42 @@ export default function BillingPage() {
     };
   }
 
+  // Add-on card state. The stepper shows the server's stored quantity
+  // until the user edits it; the action button only lights up when the
+  // desired total differs from what's already provisioned.
+  const addonServerQty = planData?.current.addon_quantity ?? 0;
+  const addonQty = addonDesired ?? addonServerQty;
+  // Statuses whose subscription the sidecar mutates in place ("Update",
+  // charged immediately) versus routing to Checkout ("Buy", Stripe
+  // shows the price first). This mirrors the sidecar's
+  // hasReusableSubscription list EXACTLY — including the pending/
+  // incomplete bring-up windows — because the label is the difference
+  // between "you'll review the price on Stripe" and "you were just
+  // charged"; the response shape still decides what actually happens.
+  const addonInPlace = [
+    "active",
+    "trialing",
+    "past_due",
+    "pending_subscription_event",
+    "incomplete",
+  ].includes(planData?.current.status ?? "");
+  // The user's server quantity moved out from under an in-progress edit
+  // (another tab, the Stripe portal). Surfaced as a notice so applying
+  // the stale total is an informed act, not a silent downgrade.
+  const addonEditConflict =
+    addonDesired !== null &&
+    addonSync === "idle" &&
+    addonServerQty !== addonEditBaseRef.current;
+
+  const currentTierEntry = planData?.catalog.find((p) => p.code === currentCode);
+
   // Human label for the current plan in the banner. "default" is the
   // operator-configured self-host plan (not a catalog tier); otherwise
   // prefer the catalog's display name, falling back to the raw code.
   const currentPlanLabel =
     data?.plan_code === "default"
       ? "Default (operator-configured)"
-      : planData?.catalog.find((p) => p.code === currentCode)?.display_name ??
-        data?.plan_code ??
-        "";
+      : currentTierEntry?.display_name ?? data?.plan_code ?? "";
 
   return (
     <PageShell
@@ -516,7 +701,7 @@ export default function BillingPage() {
           }}
           role="status"
         >
-          Finalizing your upgrade… your new plan will appear here in a moment.
+          Finalizing your purchase… your new plan and limits will appear here in a moment.
         </div>
       )}
       {reconcile === "timeout" && planData?.current.status !== "active" && (
@@ -529,7 +714,7 @@ export default function BillingPage() {
           }}
           role="status"
         >
-          Your payment went through, but the new plan hasn&apos;t appeared yet.
+          Your payment went through, but the change hasn&apos;t appeared yet.
           It usually lands within a minute — this page keeps checking, or use
           Refresh below.
         </div>
@@ -554,8 +739,23 @@ export default function BillingPage() {
                 <div className="text-xs uppercase tracking-wide text-muted">
                   Current plan
                 </div>
-                <div className="text-lg font-semibold text-foreground mt-1">
-                  {currentPlanLabel}
+                <div className="text-lg font-semibold text-foreground mt-1 flex items-baseline gap-2 flex-wrap">
+                  <span>{currentPlanLabel}</span>
+                  {/* Owned add-ons surface at the very top of the page,
+                      not only down in the purchase card — the count and
+                      its monthly cost are part of "what plan am I on". */}
+                  {BILLING_API && planData?.addon && addonServerQty > 0 && (
+                    <span
+                      className="text-xs font-medium rounded px-1.5 py-0.5 border"
+                      style={{ borderColor: "var(--accent)", color: "var(--fg)" }}
+                    >
+                      + {formatNumber(addonServerQty)} inbox add-on
+                      {addonServerQty === 1 ? "" : "s"} ·{" "}
+                      {formatPrice(
+                        addonServerQty * planData.addon.monthly_price_cents_per_unit,
+                      )}
+                    </span>
+                  )}
                 </div>
               </div>
               {BILLING_API && data.upgrade_url && (
@@ -627,6 +827,250 @@ export default function BillingPage() {
             </section>
           )}
 
+          {/* Inbox add-on: purchase/adjust the one add-on SKU. Rendered
+              only when the sidecar advertises it (older sidecars omit
+              `addon` and the card fail-safes to hidden). Everything shown
+              — price, per-unit grants, quantity ceiling — comes from the
+              catalog payload. The POST sends the desired TOTAL quantity;
+              the sidecar routes it to Checkout or an in-place mutation. */}
+          {BILLING_API && planData?.addon && (
+            <section
+              className="rounded-xl border p-5 space-y-4"
+              style={{ borderColor: "var(--border)", background: "var(--bg-panel)" }}
+            >
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  Add-on
+                </div>
+                <div className="flex items-baseline gap-2 mt-1">
+                  <span className="text-sm font-semibold text-foreground">
+                    {planData.addon.display_name}
+                  </span>
+                  <span className="text-xs text-muted">
+                    {formatPrice(planData.addon.monthly_price_cents_per_unit)} each
+                  </span>
+                </div>
+                <div className="text-sm text-muted mt-1">
+                  Each one adds {formatNumber(planData.addon.per_unit.max_agents)}{" "}
+                  inbox{planData.addon.per_unit.max_agents === 1 ? "" : "es"} and{" "}
+                  {formatNumber(planData.addon.per_unit.max_messages_month)} sends
+                  / mo to your account&apos;s shared pool. Add anytime (charged
+                  prorated); reduce anytime — reductions apply immediately with
+                  no partial-month refund.
+                </div>
+                {/* The free tier is identified structurally (price 0),
+                    like ctaFor does — never by a hardcoded plan code. */}
+                {planData.addon.lifts_free_daily_cap &&
+                  currentTierEntry &&
+                  currentTierEntry.monthly_price_cents <= 0 && (
+                    <div className="text-sm text-muted mt-1">
+                      Any add-on also removes the Free plan&apos;s daily send cap.
+                    </div>
+                  )}
+              </div>
+
+              {/* What the account owns, stated as a sentence with the
+                  grants and cost attributed — the stepper below is only
+                  the editor, and its number can be a staged edit. */}
+              {addonServerQty > 0 && (
+                <div
+                  className="rounded-lg border px-4 py-3 flex items-baseline justify-between gap-3 flex-wrap"
+                  style={{
+                    borderColor: "var(--accent)",
+                    background: "var(--bg-elev)",
+                  }}
+                >
+                  <span className="text-sm font-semibold text-foreground">
+                    You have {formatNumber(addonServerQty)} add-on
+                    {addonServerQty === 1 ? "" : "s"}
+                  </span>
+                  <span className="text-sm text-muted">
+                    +{formatNumber(addonServerQty * planData.addon.per_unit.max_agents)}{" "}
+                    inbox
+                    {addonServerQty * planData.addon.per_unit.max_agents === 1
+                      ? ""
+                      : "es"}
+                    , +
+                    {formatNumber(
+                      addonServerQty * planData.addon.per_unit.max_messages_month,
+                    )}{" "}
+                    sends / mo ·{" "}
+                    {formatPrice(
+                      addonServerQty * planData.addon.monthly_price_cents_per_unit,
+                    )}
+                  </span>
+                </div>
+              )}
+
+              {addonEditConflict && (
+                <div
+                  className="rounded-lg border px-4 py-3 text-sm"
+                  style={{
+                    borderColor: "var(--border)",
+                    background: "var(--bg-elev)",
+                    color: "var(--fg-muted)",
+                  }}
+                  role="status"
+                >
+                  Your add-on quantity changed elsewhere — the account now has{" "}
+                  {formatNumber(addonServerQty)}. Applying will set the total to
+                  the number shown here.
+                </div>
+              )}
+
+              {addonSync === "pending" && (
+                <div
+                  className="rounded-lg border px-4 py-3 text-sm"
+                  style={{
+                    borderColor: "var(--border)",
+                    background: "var(--bg-elev)",
+                    color: "var(--fg-muted)",
+                  }}
+                  role="status"
+                >
+                  Updating your add-ons… the new caps will appear here in a
+                  moment.
+                </div>
+              )}
+              {addonSync === "timeout" && (
+                <div
+                  className="rounded-lg border px-4 py-3 text-sm"
+                  style={{
+                    borderColor: "var(--border)",
+                    background: "var(--bg-elev)",
+                    color: "var(--fg-muted)",
+                  }}
+                  role="status"
+                >
+                  Your add-on change went through, but the new caps haven&apos;t
+                  appeared yet. It usually lands within a minute — this page
+                  keeps checking.
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 flex-wrap">
+                {/* The stepper holds the desired TOTAL, not a delta — a
+                    user who owns 1 and wants one more steps to 2. Say so
+                    on screen: without the label, "2" next to an owned
+                    "1" reads as "buy 2 more". */}
+                <label className="text-xs text-muted" htmlFor="addon-quantity">
+                  Total add-ons
+                </label>
+                <div
+                  role="group"
+                  aria-label="Add-on quantity stepper"
+                  className="flex items-center rounded-md border overflow-hidden"
+                  style={{ borderColor: "var(--border)" }}
+                >
+                  <button
+                    type="button"
+                    aria-label="Decrease add-on quantity"
+                    disabled={actionPending !== null || addonQty <= 0}
+                    onClick={() => stageAddonQty(Math.max(0, addonQty - 1))}
+                    className="px-3 py-1.5 text-sm hover:bg-background transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    −
+                  </button>
+                  <input
+                    id="addon-quantity"
+                    type="number"
+                    inputMode="numeric"
+                    aria-label="Add-on quantity"
+                    min={0}
+                    max={planData.addon.max_quantity}
+                    value={addonQty}
+                    disabled={actionPending !== null}
+                    onChange={(e) => {
+                      const n = Number.parseInt(e.target.value, 10);
+                      // A cleared field mid-retype must NOT stage 0 —
+                      // that would arm a one-click cancel-everything.
+                      // Hold the previous value until a digit arrives.
+                      if (Number.isNaN(n)) return;
+                      stageAddonQty(
+                        Math.min(planData.addon!.max_quantity, Math.max(0, n)),
+                      );
+                    }}
+                    className="w-16 text-center text-sm py-1.5 bg-transparent border-x outline-none"
+                    style={{ borderColor: "var(--border)", color: "var(--fg)" }}
+                  />
+                  <button
+                    type="button"
+                    aria-label="Increase add-on quantity"
+                    disabled={
+                      actionPending !== null ||
+                      addonQty >= planData.addon.max_quantity
+                    }
+                    onClick={() =>
+                      stageAddonQty(
+                        Math.min(planData.addon!.max_quantity, addonQty + 1),
+                      )
+                    }
+                    className="px-3 py-1.5 text-sm hover:bg-background transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    +
+                  </button>
+                </div>
+
+                {/* The action is also disabled through the whole `pending`
+                    window: the previous change is still provisioning, and
+                    the button being live then is how duplicate money
+                    POSTs happen. */}
+                <button
+                  type="button"
+                  disabled={
+                    actionPending !== null ||
+                    addonSync === "pending" ||
+                    addonQty === addonServerQty
+                  }
+                  onClick={() => applyAddon(addonQty)}
+                  className="px-3 py-1.5 rounded-md text-sm font-medium bg-accent text-white hover:bg-accent/90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {/* When a change is staged, the label names the TOTAL
+                      being committed ("Update to 2 add-ons"), so the
+                      action can't be misread as buying a delta. */}
+                  {actionPending === "addon"
+                    ? addonInPlace
+                      ? "Saving…"
+                      : "Opening…"
+                    : addonSync === "pending"
+                    ? "Updating…"
+                    : addonQty !== addonServerQty
+                    ? `${addonInPlace ? "Update to" : "Buy"} ${formatNumber(
+                        addonQty,
+                      )} add-on${addonQty === 1 ? "" : "s"}`
+                    : addonInPlace
+                    ? "Update add-ons"
+                    : "Buy add-ons"}
+                </button>
+
+                {/* Proposed new monthly total plus the delta from what's
+                    owned, shown the moment the staged quantity diverges —
+                    nobody should commit to a number they haven't seen,
+                    and the delta says what this click actually changes. */}
+                {addonQty !== addonServerQty && (
+                  <span className="text-xs text-foreground font-medium">
+                    New monthly total:{" "}
+                    {addonQty === 0
+                      ? "$0/mo"
+                      : formatPrice(
+                          addonQty * planData.addon.monthly_price_cents_per_unit,
+                        )}{" "}
+                    ({addonQty > addonServerQty ? "+" : "−"}
+                    {formatNumber(Math.abs(addonQty - addonServerQty))} add-on
+                    {Math.abs(addonQty - addonServerQty) === 1 ? "" : "s"},{" "}
+                    {addonQty > addonServerQty ? "+" : "−"}
+                    {formatPrice(
+                      Math.abs(addonQty - addonServerQty) *
+                        planData.addon.monthly_price_cents_per_unit,
+                    )}
+                    )
+                  </span>
+                )}
+
+              </div>
+            </section>
+          )}
+
           {/* Usage card */}
           <section
             className="rounded-xl border p-5 space-y-5"
@@ -657,7 +1101,7 @@ export default function BillingPage() {
               pct={pct(data.usage.domains, data.limits.max_domains)}
             />
             <UsageRow
-              label="Messages this month"
+              label="Sends this month"
               current={formatNumber(data.usage.messages_month)}
               limit={formatNumber(data.limits.max_messages_month)}
               pct={pct(data.usage.messages_month, data.limits.max_messages_month)}

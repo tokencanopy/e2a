@@ -199,7 +199,14 @@ self-cleaning via a deferred best-effort delete, no email/owner-notify/metering)
 and **mcp_http_round_trip** (the deployed streamable-HTTP MCP surface: a stateless
 Bearer-authed `tools/list` then a `whoami` `tools/call` over the real SSE
 transport — both read-only; skips-as-pass when `E2A_PROBE_MCP_URL` is unset, so a
-stack without an MCP endpoint stays green).
+stack without an MCP endpoint stays green); and **delegated_auth**, which asks a
+trusted fixed-principal issuer endpoint for one fresh short-lived token and
+uses it for `GET /v1/agents?limit=1`. The endpoint accepts no identity,
+audience, scope, role, or TTL input. This covers issuer signing, JWKS discovery,
+the delegated claim policy, external-principal mapping, and account
+authorization without allowing arbitrary public traffic to manufacture the
+availability signal. It skips while unset and becomes fail-closed when
+`E2A_PROBE_REQUIRE_DELEGATED_AUTH=true`.
 *(fast-follow)* 5xx SLI from `e2a:/metrics`.
 
 ### SLI exposure on `e2a` (phase 2 / fast-follow)

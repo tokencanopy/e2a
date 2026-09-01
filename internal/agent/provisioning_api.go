@@ -51,29 +51,34 @@ type provisionUserRequest struct {
 // replayed vs email-conflict).
 func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	if !a.provisioningEnabled || a.provisioningSecret == "" {
+		a.recordProvisioning("not_configured", "public", http.StatusServiceUnavailable)
 		writeProvisionError(w, http.StatusServiceUnavailable, "provisioning_not_configured")
 		return
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
 	if err != nil {
+		a.recordProvisioning("malformed_request", "public", http.StatusBadRequest)
 		writeProvisionError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 
 	sig := r.Header.Get("X-E2A-Internal-Signature")
 	if sig == "" {
+		a.recordProvisioning("unauthorized", "public", http.StatusUnauthorized)
 		writeProvisionError(w, http.StatusUnauthorized, "missing_signature")
 		return
 	}
 	expected := hmacHexSHA256([]byte(a.provisioningSecret), body)
 	if subtle.ConstantTimeCompare([]byte(sig), []byte(expected)) != 1 {
+		a.recordProvisioning("unauthorized", "public", http.StatusUnauthorized)
 		writeProvisionError(w, http.StatusUnauthorized, "invalid_signature")
 		return
 	}
 
 	var req provisionUserRequest
 	if err := json.Unmarshal(body, &req); err != nil {
+		a.recordProvisioning("malformed_request", "authenticated", http.StatusBadRequest)
 		writeProvisionError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -81,6 +86,7 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	// present, so it carries the §10.3 bound (1..128 code points, <=512
 	// UTF-8 bytes, no control characters) — the same validator attach uses.
 	if !validExternalRef(req.ExternalRef) {
+		a.recordProvisioning("rejected", "authenticated", http.StatusBadRequest)
 		writeProvisionError(w, http.StatusBadRequest, "invalid_external_ref")
 		return
 	}
@@ -91,12 +97,14 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	// never match. An unset configured issuer makes every external_issuer a
 	// mismatch (fail-closed: no unauthenticatable mapping).
 	if req.ExternalIssuer != "" && req.ExternalIssuer != a.delegatedIssuer {
+		a.recordProvisioning("rejected", "authenticated", http.StatusBadRequest)
 		writeProvisionError(w, http.StatusBadRequest, "invalid_issuer")
 		return
 	}
 	email := identity.NormalizeEmail(req.Email)
 	parsed, err := mail.ParseAddress(email)
 	if err != nil || parsed.Address != email {
+		a.recordProvisioning("rejected", "authenticated", http.StatusBadRequest)
 		writeProvisionError(w, http.StatusBadRequest, "invalid_email")
 		return
 	}
@@ -105,6 +113,7 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, identity.ErrEmailConflict) {
 		// A DIFFERENT account already holds this email. Never attach, never
 		// merge — reconciliation is the operator's/user's decision.
+		a.recordProvisioning("rejected", "authenticated", http.StatusConflict)
 		writeProvisionError(w, http.StatusConflict, "email_conflict")
 		return
 	}
@@ -112,22 +121,44 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		// The (issuer, ref) pair is mapped to a DIFFERENT user than the one
 		// this ref provisions to — a mapping/control-plane disagreement that
 		// is never auto-resolved. Nothing was written.
+		a.recordProvisioning("rejected", "authenticated", http.StatusConflict)
 		writeProvisionError(w, http.StatusConflict, "external_principal_conflict")
 		return
 	}
 	if err != nil {
 		log.Printf("[api] provision user failed: %v", err)
+		a.recordProvisioning("internal_error", "authenticated", http.StatusInternalServerError)
 		writeProvisionError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
 
 	status := http.StatusOK
+	outcome := "existing"
 	if created {
 		status = http.StatusCreated
+		outcome = "created"
 	}
+	a.recordProvisioning(outcome, "authenticated", status)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"user_id": user.ID})
+}
+
+func (a *API) recordProvisioning(outcome, trust string, status int) {
+	statusClass := "none"
+	switch status / 100 {
+	case 1:
+		statusClass = "1xx"
+	case 2:
+		statusClass = "2xx"
+	case 3:
+		statusClass = "3xx"
+	case 4:
+		statusClass = "4xx"
+	case 5:
+		statusClass = "5xx"
+	}
+	a.emit().Provisioning(outcome, trust, statusClass)
 }
 
 func writeProvisionError(w http.ResponseWriter, status int, code string) {

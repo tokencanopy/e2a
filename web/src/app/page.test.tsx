@@ -74,6 +74,15 @@ describe("Landing page", () => {
     expect(screen.getAllByText("e2a").length).toBeGreaterThan(0);
   });
 
+  // Self-host builds have no /pricing route (lib/site.PRICING_PATH is unset
+  // in jest, matching a build without NEXT_PUBLIC_PRICING_PATH), so the nav
+  // must render no Pricing link rather than a 404. The hosted branch is
+  // covered in page.pricing-nav.hosted.test.tsx.
+  it("renders no Pricing link when no pricing path is configured", () => {
+    render(<Home />);
+    expect(screen.queryByRole("link", { name: "Pricing" })).toBeNull();
+  });
+
   // The nav groups into Quick start / Product / Resources — a flat row of
   // every link wrapped onto two lines once the social icons joined it.
   it("shows resources dropdown items on hover", () => {

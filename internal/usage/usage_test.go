@@ -18,7 +18,7 @@ func TestNoopUsageTracker_AlwaysAllows(t *testing.T) {
 	tracker := usage.NewNoopUsageTracker()
 	ctx := context.Background()
 
-	allowed, err := tracker.RecordAndCheck(ctx, "user1", "agent1", "test.com", "outbound")
+	allowed, err := tracker.RecordAndCheck(ctx, "user1", "agent1", "test.com", "outbound", 1)
 	if err != nil || !allowed {
 		t.Errorf("RecordAndCheck: allowed=%v, err=%v", allowed, err)
 	}
@@ -38,7 +38,7 @@ func TestLiveUsageTracker_RecordAndCheckTxParticipatesInCallerTransaction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tracker.RecordAndCheckTx(ctx, tx, user.ID, "agent_usage", "example.test", "outbound"); err != nil {
+	if _, err = tracker.RecordAndCheckTx(ctx, tx, user.ID, "agent_usage", "example.test", "outbound", 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
@@ -55,7 +55,7 @@ func TestLiveUsageTracker_RecordAndCheckTxParticipatesInCallerTransaction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tracker.RecordAndCheckTx(ctx, tx, user.ID, "agent_usage", "example.test", "outbound"); err != nil {
+	if _, err = tracker.RecordAndCheckTx(ctx, tx, user.ID, "agent_usage", "example.test", "outbound", 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -86,12 +86,12 @@ func TestUsageSummaryIncrementAndGet(t *testing.T) {
 	}
 
 	// Increment inbound
-	if err := store.IncrementUsageSummary(ctx, user.ID, bucketDate, "inbound"); err != nil {
+	if err := store.IncrementUsageSummary(ctx, user.ID, bucketDate, "inbound", 1); err != nil {
 		t.Fatalf("IncrementUsageSummary inbound: %v", err)
 	}
 	// Increment outbound twice
 	for i := 0; i < 2; i++ {
-		if err := store.IncrementUsageSummary(ctx, user.ID, bucketDate, "outbound"); err != nil {
+		if err := store.IncrementUsageSummary(ctx, user.ID, bucketDate, "outbound", 1); err != nil {
 			t.Fatalf("IncrementUsageSummary outbound: %v", err)
 		}
 	}
@@ -126,13 +126,13 @@ func TestLiveUsageTracker_AlwaysAllows(t *testing.T) {
 	}
 
 	// Inbound always allowed
-	allowed, err := tracker.RecordAndCheck(ctx, user.ID, "agent1", "test.com", "inbound")
+	allowed, err := tracker.RecordAndCheck(ctx, user.ID, "agent1", "test.com", "inbound", 1)
 	if err != nil || !allowed {
 		t.Errorf("inbound should always be allowed: allowed=%v, err=%v", allowed, err)
 	}
 
 	// Outbound always allowed (no quota enforcement)
-	allowed, err = tracker.RecordAndCheck(ctx, user.ID, "agent1", "test.com", "outbound")
+	allowed, err = tracker.RecordAndCheck(ctx, user.ID, "agent1", "test.com", "outbound", 1)
 	if err != nil || !allowed {
 		t.Errorf("outbound should always be allowed: allowed=%v, err=%v", allowed, err)
 	}
@@ -169,7 +169,7 @@ func TestLiveUsageTracker_SystemClassNotMetered(t *testing.T) {
 	}
 
 	for _, dir := range []string{"inbound", "outbound"} {
-		allowed, err := tracker.RecordAndCheck(ctx, sysUser.ID, "agent-sys", "probe.example.com", dir)
+		allowed, err := tracker.RecordAndCheck(ctx, sysUser.ID, "agent-sys", "probe.example.com", dir, 1)
 		if err != nil || !allowed {
 			t.Errorf("system %s RecordAndCheck: allowed=%v err=%v", dir, allowed, err)
 		}
@@ -187,7 +187,7 @@ func TestLiveUsageTracker_SystemClassNotMetered(t *testing.T) {
 		t.Fatalf("CreateOrGetUser standard: %v", err)
 	}
 	for _, dir := range []string{"inbound", "outbound"} {
-		if _, err := tracker.RecordAndCheck(ctx, stdUser.ID, "agent-std", "real.example.com", dir); err != nil {
+		if _, err := tracker.RecordAndCheck(ctx, stdUser.ID, "agent-std", "real.example.com", dir, 1); err != nil {
 			t.Fatalf("standard %s RecordAndCheck: %v", dir, err)
 		}
 	}

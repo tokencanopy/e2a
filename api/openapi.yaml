@@ -2567,7 +2567,7 @@ components:
           description: The account's plan label.
           type: string
         resource:
-          description: "The AccountView usage/limits field stem the cap applies to. Key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes."
+          description: "The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (per-UTC-day send cap; no AccountView field — resets at midnight UTC)."
           type: string
         upgrade_url:
           description: An upgrade affordance URL, when the operator has configured one.
@@ -2615,6 +2615,7 @@ components:
           format: int64
           type: integer
         max_messages_month:
+          description: "Monthly send allowance in outbound recipient-deliveries: a message to N distinct recipients consumes N units. Received mail is free and does not count. Resets at the start of each calendar month (UTC). Checked against usage.messages_month."
           format: int64
           type: integer
         max_storage_bytes:
@@ -2637,6 +2638,7 @@ components:
           format: int64
           type: integer
         messages_month:
+          description: "Outbound recipient-deliveries consumed this UTC calendar month: each distinct recipient of each sent message counts one. Received mail is free and never appears here."
           format: int64
           type: integer
         storage_bytes:
@@ -5640,7 +5642,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LimitExceededEnvelope"
-          description: Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.<resource> / limits.max_<resource>. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.
+          description: "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over)."
           headers:
             RateLimit-Limit:
               $ref: "#/components/headers/RateLimitLimit"
@@ -6412,7 +6414,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LimitExceededEnvelope"
-          description: Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.<resource> / limits.max_<resource>. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.
+          description: "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over)."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6752,7 +6754,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LimitExceededEnvelope"
-          description: Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.<resource> / limits.max_<resource>. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.
+          description: "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over)."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -6933,7 +6935,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LimitExceededEnvelope"
-          description: Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.<resource> / limits.max_<resource>. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.
+          description: "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over)."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -7377,7 +7379,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LimitExceededEnvelope"
-          description: Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.<resource> / limits.max_<resource>. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.
+          description: "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over)."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"
@@ -7821,7 +7823,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LimitExceededEnvelope"
-          description: Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes), so the client can key it to usage.<resource> / limits.max_<resource>. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path.
+          description: "Payment required — a per-account resource cap was hit (code limit_exceeded). error.details.resource is the AccountView usage/limits field stem (agents, domains, messages_month, storage_bytes) or a capped resource without an AccountView field (messages_day — the per-UTC-day send cap some accounts carry; it resets at midnight UTC). Message-flow caps count outbound recipient-deliveries: a message to N recipients consumes N units, and inbound mail is free. This is a QUOTA (stock/flow) cap — distinct from a 429 rate_limited (throughput). A retry alone will not clear it; surface a quota/upgrade path (or, for messages_day, retry after the UTC day rolls over)."
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"

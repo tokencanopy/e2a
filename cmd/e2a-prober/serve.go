@@ -44,15 +44,18 @@ func newProber(cfg config) *prober {
 
 func (p *prober) probe() *selftest.Probe {
 	return &selftest.Probe{
-		HTTPBaseURL:   p.cfg.BaseURL,
-		APIKey:        p.cfg.APIKey,
-		AgentEmail:    p.cfg.AgentEmail,
-		SMTPAddr:      p.cfg.SMTPAddr,
-		WebhookSecret: p.cfg.WebhookSecret,
-		MCPBaseURL:    p.cfg.MCPBaseURL,
-		RequireMCP:    p.cfg.RequireMCP,
-		Sink:          p.sink,
-		Timeout:       p.cfg.Timeout,
+		HTTPBaseURL:          p.cfg.BaseURL,
+		APIKey:               p.cfg.APIKey,
+		AgentEmail:           p.cfg.AgentEmail,
+		SMTPAddr:             p.cfg.SMTPAddr,
+		WebhookSecret:        p.cfg.WebhookSecret,
+		MCPBaseURL:           p.cfg.MCPBaseURL,
+		RequireMCP:           p.cfg.RequireMCP,
+		DelegatedTokenURL:    p.cfg.DelegatedTokenURL,
+		DelegatedTokenSecret: p.cfg.DelegatedTokenSecret,
+		RequireDelegatedAuth: p.cfg.RequireDelegatedAuth,
+		Sink:                 p.sink,
+		Timeout:              p.cfg.Timeout,
 	}
 }
 

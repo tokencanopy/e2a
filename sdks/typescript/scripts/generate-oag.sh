@@ -49,6 +49,11 @@ find "$OUT" -name '*.ts' -print0 | xargs -0 perl -i -ne \
 # (Idempotency-Key stays unguarded — retry.ts depends on the stub; see script).
 python3 "$ROOT/scripts/guard-optional-header-params.py" "$OUT/apis"
 
+# RequestContext hands its raw url straight to new URL(), which silently
+# collapses a "." or ".." path segment before any hand-written hook sees it
+# (#792, #915). Inject the raw-string guard the generator does not emit.
+python3 "$ROOT/scripts/guard-dot-segment-path.py" "$OUT/http/http.ts"
+
 # OpenAPI Generator imports every schema into its API wrapper variants and
 # imports HttpFile into standalone models even when those symbols are unused.
 # Normalize selected generator-known unused imports so static analysis and the

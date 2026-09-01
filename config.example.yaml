@@ -10,6 +10,17 @@
 # "production" fails startup.
 env: "development"
 
+# Optional. Names WHICH deployment this is ("prod" or "staging"), for
+# classification metadata e2a attaches to resources it creates in external
+# systems — today the e2a-env tag on provisioned SES sender identities, so a
+# shared AWS account can be audited without this server's database. NOT the
+# same as `env` above: that is a development/production mode switch, and a
+# hosted staging deployment runs env: "production" too. Self-hosters leave
+# this empty and simply get no environment tag. Any other value is logged
+# once at startup and treated as empty — never a startup failure.
+# Override with E2A_DEPLOYMENT_NAME.
+deployment_name: ""
+
 # Optional. When set, users can register agents by slug (no DNS setup required)
 # and the server provisions <slug>@<shared_domain>. Leave empty on a self-host
 # that doesn't operate a shared mail domain — every agent then needs a custom
@@ -234,6 +245,45 @@ sender_identity:
   # (config-only deploy) to switch producers to the versioned v2 lane.
   # Single-instance deployments have no overlap and can leave this false.
   legacy_job_compat: false
+  # How long a FIXTURE sending identity — one provisioned for a non-customer
+  # account class (internal dogfooding, synthetic monitoring) — is assumed to
+  # still be in use. Stamped onto the identity as the e2a-expires tag so an
+  # abandoned test fixture is distinguishable from a live customer domain in
+  # the provider account alone. Customer identities never carry it. Written as
+  # a Go duration string; "0s" disables the tag. Override with
+  # E2A_SENDER_IDENTITY_FIXTURE_TTL.
+  fixture_ttl: "24h"
+  # Orphan reclaim: let the hourly reaper DELETE sending identities that exist
+  # at the provider with no ledger row and no domain row (crashed test runs
+  # leak these). Off by default, and arming it is not enough on its own — an
+  # identity is deleted only when ALL of these hold: it carries e2a's ownership
+  # tag, its e2a-env tag names THIS deployment (deployment_name must be set),
+  # its e2a-purpose tag says "fixture", its e2a-expires stamp is in the past,
+  # its e2a-created stamp clears reclaim_min_age, its name falls under a
+  # reclaim_zones entry, and the provider reports it as NOT verified for
+  # sending. Anything missing or unparseable refuses. Deletion runs through the
+  # same ownership-verifying teardown path the ledgered phase uses.
+  #
+  # With reap_orphans false the reaper still runs the whole decision and logs
+  # "WOULD DELETE <domain>" (or the refusal reason) without touching the
+  # provider — run there for a few days and read the logs before arming.
+  reap_orphans: false
+  # DNS zones that hold ONLY e2a's own test fixtures. This is the strongest
+  # guard: customer domains are never under the test zone. Matching is on a
+  # label boundary, so "example.test" covers "a.example.test" and
+  # "example.test" itself but never "evilexample.test". EMPTY (the default)
+  # reclaims NOTHING — it is never read as "any zone".
+  reclaim_zones: []
+  # Absolute age floor before an identity may be reclaimed, checked
+  # independently of its expiry tag so clock skew or a mis-set fixture_ttl
+  # cannot make a brand-new identity instantly reclaimable. Go duration string;
+  # "0s" reclaims nothing.
+  reclaim_min_age: "168h"
+  # Cap on deletions per reaper JOB (the orphan phase is paginated across
+  # jobs, so this is a per-page budget, not a global one). A systematic
+  # mistake then costs a handful of identities and a loud log, not the
+  # account. 0 reclaims nothing.
+  reclaim_max_per_sweep: 5
 
 # Operator-managed recipient-volume ramp for newly verified custom sender
 # domains. Disabled by default for self-hosts. When enabled, the schedule is
@@ -243,12 +293,50 @@ sender_identity:
 # persistently exempt; operator reset procedures are in docs/runbooks/sending-ramp.md.
 # This policy is visible read-only in the domain API and cannot be disabled by
 # end users. start_daily must be at least 50, the API's per-message recipient
-# maximum, so one accepted message can never be stranded permanently.
+# maximum, so one accepted message can never be stranded permanently. Hosted
+# database generation zero explicitly uses 150; this example keeps the
+# established self-host-compatible default of 50, so the hashes intentionally
+# differ even though both policies are disabled.
 sending_ramp:
   enabled: false
   start_daily: 50
   target_daily: 2000
   ramp_days: 30
+
+# Sending protection (abuse prevention). Every control ships DISABLED; this
+# block existing changes nothing until a control is deliberately enabled. The
+# ramp schedule above stays the custom-domain schedule SSOT and is not
+# duplicated here. runtime_policy_source selects where the server reads its
+# policy: "config" (this file — the default, right for self-host) or
+# "database" (hosted deployments, where activation is an audited CAS via
+# `e2a -activate-sending-protection-policy` instead of a redeploy). The two
+# secrets (E2A_SENDING_FEEDBACK_HMAC_KEYS, E2A_SENDING_PROTECTION_OPERATOR_EMAILS)
+# are required only for database source or when any control below is enabled.
+sending_protection:
+  runtime_policy_source: config
+  budget_mode: disabled            # disabled | shadow | enforce
+  detector_mode: disabled          # disabled | shadow | enforce
+  tenant_header_mode: disabled     # disabled | canary | enforce
+  tenant_provisioning_mode: disabled     # disabled | enforce
+  tenant_suppression_sync_mode: disabled # disabled | enforce
+  tenant_header_canary_account_ids: []
+  default_account_daily_recipients: 100
+  shared_domain_account_daily_recipients: 50
+  probation_global_daily_recipients: 150
+  all_customer_global_daily_recipients: 5000
+  critical_operational_daily_recipients: 100
+  violation_operational_daily_recipients: 100
+  daily_unlimited_plan_codes: ["starter", "pro", "scale"]
+  budget_hold_max_days: 7
+  bounce_pause_basis_points: 400      # pause strictly above 4% hard bounce
+  complaint_pause_basis_points: 8     # pause strictly above 0.08% complaints
+  bounce_min_outcomes: 50             # minimum terminal outcomes before the all-path rate can pause
+  shared_reputation_bounce_min_outcomes: 1
+  detector_interval_seconds: 300
+  detector_window_days: 7
+  sending_control_audit_retention_days: 90
+  sending_feedback_post_account_retention_days: 30
+  operator_notice_recipient_version: 1
 
 # Outbound delivery feedback (decision 9 / Slice 4b). When ses_configuration_set
 # is set, outbound mail is tagged with X-SES-CONFIGURATION-SET so SES publishes
@@ -281,7 +369,15 @@ limits:
   plan_code: "default"
   max_agents: 1000000
   max_domains: 1000000
+  # Message-flow allowances count OUTBOUND recipient-deliveries: a message
+  # sent to N distinct recipients consumes N units; received mail is free
+  # and unmetered (it never consumes the allowance).
   max_messages_month: 1000000000
+  # Optional per-UTC-day send cap for users without an account_limits row.
+  # ABSENT (the default) = no daily policy; 0 = block all sends. Hosted
+  # deployments set this to the free tier's daily allowance and let the
+  # billing provisioner override it per account.
+  # max_messages_day: 100
   max_storage_bytes: 1125899906842624  # 1 PiB — effectively unbounded
   cache_ttl_seconds: 60
   # Shared HMAC secret used to authenticate /api/internal/limits/invalidate.

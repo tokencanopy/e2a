@@ -317,8 +317,10 @@ func (a *API) emitLoopbackScreeningMetrics(gate inboundpolicy.Decision, res inbo
 }
 
 func (a *API) recordLoopbackUsage(ctx context.Context, userID string, agent *identity.AgentIdentity) {
+	// Loopback is guaranteed single-recipient (loopback.IsSelfSend rejects
+	// CC/BCC and multi-To), so each leg is exactly one recipient-delivery unit.
 	for _, direction := range []string{"outbound", "inbound"} {
-		if _, err := a.usage.RecordAndCheck(ctx, userID, agent.ID, agent.Domain, direction); err != nil {
+		if _, err := a.usage.RecordAndCheck(ctx, userID, agent.ID, agent.Domain, direction, 1); err != nil {
 			log.Printf("[api] self-send %s usage recording error: %v", direction, err)
 		}
 	}

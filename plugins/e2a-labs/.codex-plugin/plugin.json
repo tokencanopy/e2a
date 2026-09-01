@@ -1,7 +1,7 @@
 {
   "name": "e2a-labs",
   "displayName": "e2a Labs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Experimental autonomous workflows for e2a. Install the core e2a plugin first; it supplies the MCP connection and authentication.",
   "author": {
     "name": "TokenCanopy"

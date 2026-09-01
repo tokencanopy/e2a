@@ -3,11 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useAuth } from "../../components/AuthProvider";
-import { SignInLink } from "../../components/SignInLink";
-import {
-  SIGN_IN_LABEL,
-  signInURLWithReturnTo,
-} from "../../../lib/site";
+import { SignInLinks } from "../../components/SignInLinks";
 import type { DashboardAgent } from "../../components/types";
 
 // Required OAuth params the consent screen needs. If any is missing
@@ -62,14 +58,23 @@ function ConsentInner() {
   // Snapshot the params synchronously — useSearchParams returns a
   // ReadonlyURLSearchParams that we want to pass through to the form
   // verbatim, plus pluck the few fields we render.
-  const params = useMemo(() => {
+  const { params, authorizeReturnTo } = useMemo(() => {
     const out: Record<string, string> = {};
+    let returnTo = "";
     if (search) {
       search.forEach((v, k) => {
-        out[k] = v;
+        if (k === "return_to") {
+          returnTo = v;
+        } else {
+          out[k] = v;
+        }
       });
     }
-    return out;
+    const qs = new URLSearchParams(out).toString();
+    return {
+      params: out,
+      authorizeReturnTo: returnTo || `/oauth2/authorize?${qs}`,
+    };
   }, [search]);
 
   const missing = REQUIRED_PARAMS.filter((k) => !params[k]);
@@ -169,26 +174,23 @@ function ConsentInner() {
     return <ConsentShell><p className="text-muted">Loading…</p></ConsentShell>;
   }
 
-  // Not signed in → bounce through login carrying return_to so
-  // the user lands back on /oauth2/authorize (which then re-renders
-  // this page with a session). We construct return_to from the same
-  // params so the round-trip preserves everything.
+  // Not signed in → offer the configured primary provider and Google fallback.
+  // The real /oauth2/authorize handler supplies its exact validated request URI
+  // as return_to; the reconstructed value is retained for direct navigation.
   if (!user) {
-    const qs = new URLSearchParams(params).toString();
-    const returnTo = `/oauth2/authorize?${qs}`;
-    const loginURL = signInURLWithReturnTo(returnTo);
     return (
       <ConsentShell>
         <h1 className="text-xl font-semibold mb-3">Sign in to continue</h1>
         <p className="text-muted text-sm mb-6">
           Sign in to authorize this application.
         </p>
-        <SignInLink
-          href={loginURL}
-          className="inline-block px-4 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent-light transition"
-        >
-          {SIGN_IN_LABEL}
-        </SignInLink>
+        <div className="flex flex-col items-start gap-3">
+          <SignInLinks
+            returnTo={authorizeReturnTo}
+            primaryClassName="inline-block px-4 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent-light transition"
+            secondaryClassName="text-muted text-sm underline underline-offset-2"
+          />
+        </div>
       </ConsentShell>
     );
   }

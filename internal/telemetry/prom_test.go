@@ -119,6 +119,60 @@ func TestPromEmitsHTTPSeries(t *testing.T) {
 	}
 }
 
+func TestPromEmitsAllOIDCAndProvisioningOutcomeCategories(t *testing.T) {
+	p := NewProm("")
+
+	for _, outcome := range []string{"success", "issuer_unavailable", "discovery_invalid"} {
+		p.OIDCDiscovery(outcome, "5xx")
+	}
+	for _, outcome := range []string{
+		"success", "discovery_unavailable", "state_invalid", "provider_rejected", "provider_failed",
+		"response_invalid", "token_exchange_failed", "id_token_invalid",
+		"claim_invalid", "unknown_user", "session_failed", "post_login_failed",
+	} {
+		p.OIDCCallback(outcome, "trusted", "4xx")
+	}
+	for _, outcome := range []string{
+		"created", "existing", "rejected", "internal_error", "not_configured",
+		"malformed_request", "unauthorized",
+	} {
+		p.Provisioning(outcome, "authenticated", "2xx")
+	}
+
+	out := scrape(t, p)
+	for _, want := range []string{
+		`e2a_oidc_discovery_total{outcome="success",status_class="5xx"} 1`,
+		`e2a_oidc_discovery_total{outcome="issuer_unavailable",status_class="5xx"} 1`,
+		`e2a_oidc_discovery_total{outcome="discovery_invalid",status_class="5xx"} 1`,
+		`e2a_oidc_callback_total{outcome="success",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="discovery_unavailable",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="state_invalid",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="provider_rejected",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="provider_failed",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="response_invalid",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="token_exchange_failed",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="id_token_invalid",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="claim_invalid",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="unknown_user",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="session_failed",status_class="4xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="post_login_failed",status_class="4xx",trust="trusted"} 1`,
+		`e2a_provisioning_total{outcome="created",status_class="2xx",trust="authenticated"} 1`,
+		`e2a_provisioning_total{outcome="existing",status_class="2xx",trust="authenticated"} 1`,
+		`e2a_provisioning_total{outcome="rejected",status_class="2xx",trust="authenticated"} 1`,
+		`e2a_provisioning_total{outcome="internal_error",status_class="2xx",trust="authenticated"} 1`,
+		`e2a_provisioning_total{outcome="not_configured",status_class="2xx",trust="authenticated"} 1`,
+		`e2a_provisioning_total{outcome="malformed_request",status_class="2xx",trust="authenticated"} 1`,
+		`e2a_provisioning_total{outcome="unauthorized",status_class="2xx",trust="authenticated"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing series %q in exposition", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
 func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p := NewProm("")
 	p.SMTPInbound("accepted", 0.2)
@@ -257,6 +311,9 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	p.WebhookNotify(addr, secret)           // junk notify kind + outcome
 	p.WSDisconnected("some very long free text reason with details")
 	p.WSHandshakeRejected(addr) // raw address must not become a rejection-reason label
+	p.OIDCDiscovery(addr, secret)
+	p.OIDCCallback(secret, addr, "7xx")
+	p.Provisioning(addr, secret, "banana")
 	p.InboundProcess(secret, 0)
 	p.SetQueueDepth("attacker_queue", "exploded", 1)
 	p.HTTPRequest("PROPFIND", "/v1/agents/{email}", "7xx", 0.1) // unknown method + class
@@ -278,6 +335,9 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 		`e2a_webhook_notify_total{kind="other",outcome="other"} 1`,
 		`e2a_ws_disconnects_total{reason="other"} 1`,
 		`e2a_ws_handshake_rejected_total{reason="other"} 1`,
+		`e2a_oidc_discovery_total{outcome="other",status_class="other"} 1`,
+		`e2a_oidc_callback_total{outcome="other",status_class="other",trust="other"} 1`,
+		`e2a_provisioning_total{outcome="other",status_class="other",trust="other"} 1`,
 		`e2a_inbound_process_total{outcome="other"} 1`,
 		`e2a_queue_depth{queue="other",state="other"} 1`,
 		`e2a_http_requests_total{method="other",route="/v1/agents/{email}",status_class="other"} 1`,
@@ -289,6 +349,25 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing normalized series %q in exposition", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
+func TestPromOIDCCallbackLookupOutcomesAreBounded(t *testing.T) {
+	p := NewProm("")
+	p.OIDCCallback("user_lookup_failed", "trusted", "5xx")
+	p.OIDCCallback("request_canceled", "trusted", "5xx")
+
+	out := scrape(t, p)
+	for _, want := range []string{
+		`e2a_oidc_callback_total{outcome="user_lookup_failed",status_class="5xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="request_canceled",status_class="5xx",trust="trusted"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing bounded OIDC lookup series %q", want)
 		}
 	}
 	if t.Failed() {

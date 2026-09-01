@@ -167,7 +167,7 @@ export function parseCSV(input: string): string[][] {
         } else {
           quoted = false;
         }
-      } else {
+      } else if (char !== "\r") {
         field += char;
       }
       continue;

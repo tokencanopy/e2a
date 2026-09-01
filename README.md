@@ -260,6 +260,8 @@ A built-in, dependency-free **heuristics** detector flags prompt-injection, jail
 
 Turn it on with `PUT /v1/agents/{email}/protection` (the same sub-resource as HITL holds), which carries the inbound/outbound × gate/scan posture.
 
+How well does it work? The detection layers are benchmarked in the open: [**e2a-bench**](https://github.com/tokencanopy/e2a-bench) — the evaluation artifact behind the EMNLP 2026 System Demonstrations paper — renders one injection payload across eight structural-hiding surfaces (hidden HTML, multipart mismatch, quoted threads, headers, encodings, PDF attachments) and scores the heuristics engine, open-source classifiers, commercial security APIs, and LLM judges on the same corpus. The per-message judge scores are committed, so the paper's tables reproduce from the artifact alone.
+
 > [!NOTE]
 > Content screening is currently available on **self-hosted** deployments only — it is **not yet enabled on the hosted service** at [e2a.dev](https://e2a.dev). Self-host the image (see [Deployment](#deployment)) and set `E2A_CONTENT_SCAN_ENABLED=true` (off by default even self-hosted — see [docs/deployment.md](docs/deployment.md)) to use it today.
 

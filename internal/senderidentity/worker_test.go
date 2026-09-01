@@ -46,19 +46,19 @@ func (p *blockingStatusProvider) Status(ctx context.Context, domain string, evid
 	return Result{Status: StatusVerified}, nil
 }
 
-func (p *blockingStatusProvider) Provision(ctx context.Context, domain, selector string, key []byte) (Result, error) {
+func (p *blockingStatusProvider) Provision(ctx context.Context, domain, selector string, key []byte, meta ProvisionMeta) (Result, error) {
 	p.provisionOnce.Do(func() { close(p.provisionStarted) })
-	return p.FakeProvider.Provision(ctx, domain, selector, key)
+	return p.FakeProvider.Provision(ctx, domain, selector, key, meta)
 }
 
-func (p *blockingProvisionProvider) Provision(ctx context.Context, domain, selector string, key []byte) (Result, error) {
+func (p *blockingProvisionProvider) Provision(ctx context.Context, domain, selector string, key []byte, meta ProvisionMeta) (Result, error) {
 	p.once.Do(func() { close(p.started) })
 	select {
 	case <-p.release:
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
 	}
-	return p.FakeProvider.Provision(ctx, domain, selector, key)
+	return p.FakeProvider.Provision(ctx, domain, selector, key, meta)
 }
 
 // workCtxWithClient returns a context carrying a real (but DB-less) River

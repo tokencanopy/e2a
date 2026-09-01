@@ -73,7 +73,7 @@ func (f *fakeRawStore) SetDomainTeardownState(context.Context, string, domaintea
 
 func TestStoreAdapter_SetSendingStatus(t *testing.T) {
 	raw := &fakeRawStore{}
-	store := NewStoreAdapter(raw)
+	store := NewStoreAdapter(raw, nil)
 	records := []DNSRecord{{Type: "TXT", Name: "_dmarc", Value: "v=DMARC1"}}
 
 	if err := store.SetSendingStatus(context.Background(), "example.com", "inc-1", StatusVerified, StatusVerified, StatusFailed, "ok", records); err != nil {
@@ -99,7 +99,7 @@ func TestStoreAdapter_SetSendingStatus(t *testing.T) {
 
 func TestStoreAdapter_SetSendingStatus_NoRecords(t *testing.T) {
 	raw := &fakeRawStore{}
-	store := NewStoreAdapter(raw)
+	store := NewStoreAdapter(raw, nil)
 	if err := store.SetSendingStatus(context.Background(), "example.com", "inc-1", StatusPending, "", "", "", nil); err != nil {
 		t.Fatalf("SetSendingStatus: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestStoreAdapter_SetSendingStatus_NoRecords(t *testing.T) {
 
 func TestStoreAdapter_LoadSendingIdentityState(t *testing.T) {
 	raw := &fakeRawStore{getStatusReturn: "pending"}
-	store := NewStoreAdapter(raw)
+	store := NewStoreAdapter(raw, nil)
 	got, err := store.LoadSendingIdentityState(context.Background(), "example.com")
 	if err != nil {
 		t.Fatalf("GetSendingStatus: %v", err)

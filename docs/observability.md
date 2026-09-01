@@ -70,11 +70,29 @@ SES outage must not knock every instance out of rotation).
 | `e2a_http_requests_total` | counter | `method`, `route`, `status_class` | Requests served. `route` is the chi pattern; requests that fall through to the legacy (non-`/v1`) mux appear as `route="/legacy"`; `status_class` ∈ `1xx..5xx` (WebSocket upgrades count as `1xx`). |
 | `e2a_http_request_duration_seconds` | histogram | `method`, `route` | Request latency, timed across auth, Huma, handler, and legacy fallthrough. Includes an exact `0.75` second SLO bucket. Hijacked (WebSocket) connections are **excluded** — their handler runtime is the connection lifetime, which would otherwise pin the p99. |
 
+### OIDC login and control-plane provisioning
+
+These counters are the independently matchable signals for the legacy-mux
+OIDC and provisioning routes. Do not infer either surface from
+`e2a_http_requests_total{route="/legacy"}`: that route label intentionally
+collapses every non-`/v1` handler.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `e2a_oidc_discovery_total` | counter | `outcome`, `status_class` | Generic browser-login provider discovery attempts. `outcome` is `success`, `issuer_unavailable` (no response, 429, or 5xx), or `discovery_invalid` (malformed/mismatched discovery or another non-retryable response). `status_class` is the provider response class, `none` when no response was received, or `other` if an unexpected value reaches the backend. |
+| `e2a_oidc_callback_total` | counter | `outcome`, `trust`, `status_class` | Browser callback outcomes. `outcome` is `success`, `discovery_unavailable`, `state_invalid`, `provider_rejected`, `provider_failed`, `response_invalid`, `token_exchange_failed`, `id_token_invalid`, `claim_invalid`, `unknown_user`, `user_lookup_failed`, `request_canceled`, `session_failed`, or `post_login_failed`. `provider_rejected` is the expected provider-side `access_denied` refusal path; every other provider-returned OAuth error is the bounded actionable `provider_failed` category. `unknown_user` means the verified user ID has no mapping and remains a 403; `user_lookup_failed` means the identity store could not answer and returns a generic 503. `request_canceled` is a caller-canceled lookup reported as a bounded diagnostic 503 outcome but excluded from outage alerts. `trust=public` covers requests rejected before browser transaction state is validated; `trust=trusted` means the server-authenticated state and transaction cookies matched first. `status_class` is e2a's response class. Alert on sustained actionable `trusted` failures (including `provider_failed`, token exchange, invalid claim, unknown user, user lookup, or session failure), not scanner-shaped `public` traffic, provider-side `provider_rejected` refusals, or caller-side `request_canceled` callbacks. Raw provider codes, descriptions, database errors, and user IDs are never labels or log fields. |
+| `e2a_provisioning_total` | counter | `outcome`, `trust`, `status_class` | Internal `POST /api/internal/users/provision` outcomes. `outcome` is `created`, `existing`, `rejected`, `internal_error`, `not_configured`, `malformed_request`, or `unauthorized`. `trust=public` means the HMAC was absent/not yet verified; `trust=authenticated` means the request HMAC passed before the outcome. Alert on sustained `authenticated` `rejected`/`internal_error` outcomes; public malformed/auth failures are diagnostic and must not page. |
+
+All three label families are enum-allowlisted and collapse unknown values to
+`other`. Discovery and callback logs use only the same bounded category/trust/
+status fields. Provider response bodies, OAuth tokens or codes, claims,
+cookies, issuer-supplied text, and email addresses are never emitted.
+
 ### SMTP intake (relay edge)
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `e2a_smtp_inbound_total` | counter | `outcome` | SMTP intake decisions. Units differ by stage: `accepted` (250), `accepted_dedup` (250 on a lost-ack retry), and `tempfail` (451 — durable persist/enqueue failed) are one per DATA transaction; `rejected_unknown_recipient` / `rejected_unverified_domain` (550) and `rejected_quota` (552) are one per rejected RCPT command — a single transaction can emit several rejections and still accept for its remaining recipients; `rejected_line_too_long` (554 — a line over the relay's `MaxLineLength`) is one per DATA transaction aborted mid-read. Other mid-read DATA aborts (client dropped, size limit) record no outcome. |
+| `e2a_smtp_inbound_total` | counter | `outcome` | SMTP intake decisions. Units differ by stage: `accepted` (250), `accepted_dedup` (250 on a lost-ack retry), and `tempfail` (451 — durable persist/enqueue failed) are one per DATA transaction; `rejected_unknown_recipient` / `rejected_unverified_domain` (550) and `rejected_quota` (552) are one per rejected RCPT command. **Semantics change (usage-based pricing v1, e2a ≥ 1.8):** `rejected_quota` now means **storage-cap only** — message-flow caps are outbound-only and never reject inbound mail, so pre-1.8 series (which included flow-cap rejections) are not comparable — a single transaction can emit several rejections and still accept for its remaining recipients; `rejected_line_too_long` (554 — a line over the relay's `MaxLineLength`) is one per DATA transaction aborted mid-read. Other mid-read DATA aborts (client dropped, size limit) record no outcome. |
 | `e2a_smtp_inbound_duration_seconds` | histogram | — | DATA-phase processing time (accepted/tempfail outcomes only; RCPT rejections have no DATA phase). Includes an exact `2` second SLO bucket. |
 
 Policy rejections (550/552) are *correct* behavior, not failures — the
@@ -119,7 +137,7 @@ acceptance SLI below deliberately excludes them.
 | `e2a_ws_disconnects_total` | counter | `reason` | `replaced` (one-conn-per-agent takeover), `ping_timeout`, `client_close`, `error`, `shutdown`. |
 | `e2a_ws_drained_messages_total` | counter | — | Unread messages pushed during connect-drain. The prober's WS scenario trashes its own probe messages after each run so this stays customer signal, not prober noise. |
 | `e2a_ws_send_failures_total` | counter | — | Failed pushes to a registered connection. |
-| `e2a_delegated_auth_failures_total` | counter | `category` | Delegated access-token (RFC 9068 `at+jwt`) authentication failures, by category only: `invalid_token` (any 401-class rejection — bad signature/type/algorithm/issuer/audience/`azp`/scope/time/claim, or the verifier disabled), `unknown_subject` (verified token whose `(issuer, subject)` maps to no local user — a 401, no existence oracle), `verifier_unavailable` (503-class: verifier not ready, or a JWKS outage with no usable cached key), `identity_store_failure` (503-class: the mapping store could not be read). Emitted only when the delegated verifier is configured. The label never carries a subject, issuer response text, or any token/message data. |
+| `e2a_delegated_auth_failures_total` | counter | `category` | Delegated access-token (RFC 9068 `at+jwt`) authentication failures, by category only: `invalid_token` (any 401-class rejection — bad signature/type/algorithm/issuer/audience/`azp`/scope/time/claim, or the verifier disabled), `unknown_subject` (verified token whose `(issuer, subject)` maps to no local user — a 401, no existence oracle), `verifier_unavailable` (503-class: verifier not ready, or a JWKS outage with no usable cached key), `identity_store_failure` (503-class: the mapping store could not be read; caller cancellation is excluded). Emitted only when that category occurs. The label never carries a subject, issuer response text, or any token/message data. |
 | `e2a_delegated_jwks_refresh_total` | counter | `outcome` | Delegated-verifier JWKS refresh outcomes: `success`, `key_absent` (a successful refresh that did not contain the requested `kid` — the token is then a 401), `transport_error` / `parse_error` (fetch or decode failed; the last good keyset is retained), `rate_limited` (a refresh suppressed by the per-issuer cooldown or token bucket). A sustained non-`success` rate means the issuer's JWKS endpoint is unhealthy or rotating faster than the refresh policy allows. |
 
 ### Async inbound processing (`E2A_INBOUND_MODE=async`)
@@ -198,13 +216,21 @@ endpoint (`E2A_PROBE_LISTEN`, default `:8090`) exposes:
 | `e2a_selftest_duration_seconds` | gauge | Total battery duration. |
 
 Scenarios (all non-destructive; see `internal/selftest/scenarios.go`):
-`liveness`, `auth_read`, `inbound_round_trip` (SMTP→webhook→HMAC),
+`liveness`, `auth_read`, `delegated_auth` (trusted issuer token vending →
+JWKS verification → external-principal mapping → account read),
+`inbound_round_trip` (SMTP→webhook→HMAC),
 `outbound_send` (real submit to the SES mailbox simulator),
 `self_send_loopback`, `websocket_round_trip` (WS handshake + live push),
 `agent_lifecycle` (self-cleaning ephemeral agent), `mcp_http_round_trip`
 (tools/list + whoami over the deployed MCP endpoint). Set
 `E2A_PROBE_REQUIRE_MCP=true` on stacks where MCP must be probed — it turns
 the skip-as-pass on an unset `E2A_PROBE_MCP_URL` into a failure.
+The delegated-auth scenario similarly skips when its token URL/secret are
+absent unless `E2A_PROBE_REQUIRE_DELEGATED_AUTH=true`. Its vending endpoint
+must own one fixed synthetic principal and accept no caller-selected identity,
+audience, scope, role, or lifetime. The prober fetches a fresh token for one
+read-only `GET /v1/agents?limit=1`, never emits the token or response body, and
+discards it after the request.
 
 `/status` (recent runs + `consecutive_green`) is the deploy bake-gate
 contract and also the natural feed for a hosted status page: scenario names
@@ -375,6 +401,18 @@ sum(rate(e2a_selftest_scenario_runs_total{
   scenario="mcp_http_round_trip",outcome="pass"}[6h]))
 / sum(rate(e2a_selftest_scenario_runs_total{
   scenario="mcp_http_round_trip"}[6h]))
+```
+
+**Delegated console authentication** — this is the page-safe signal for the
+trusted issuer/verifier/mapping path. Public invalid-token counters are useful
+diagnostics but are attacker-influenceable and therefore are not availability
+evidence by themselves:
+
+```promql
+sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="delegated_auth",outcome="pass"}[6h]))
+/ sum(rate(e2a_selftest_scenario_runs_total{
+  scenario="delegated_auth"}[6h]))
 ```
 
 ## Initial SLO targets

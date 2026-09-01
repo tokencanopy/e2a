@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -15,11 +17,12 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/oauth2"
 
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
-	"github.com/tokencanopy/e2a/internal/logredact"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 )
 
 const (
@@ -84,6 +87,8 @@ type OIDCAuth struct {
 	discoveryMaxBackoff time.Duration
 	discoveryTimeout    time.Duration
 	discoveryDone       chan<- struct{}
+	metrics             telemetry.Metrics
+	userLookup          func(context.Context, string) (*identity.User, error)
 }
 
 // OIDCOption configures optional, non-default behavior of NewOIDCAuth.
@@ -123,6 +128,28 @@ func WithOIDCDiscoveryDone(done chan<- struct{}) OIDCOption {
 	}
 }
 
+// WithOIDCMetrics wires the bounded observability backend used for provider
+// discovery and callback outcomes. Nil leaves the default no-op backend.
+func WithOIDCMetrics(metrics telemetry.Metrics) OIDCOption {
+	return func(oa *OIDCAuth) {
+		if metrics != nil {
+			oa.metrics = metrics
+		}
+	}
+}
+
+// WithOIDCUserLookup replaces the existing-user lookup used after the ID
+// token and configured user-id claim have been verified. Production callers
+// use identity.Store.GetUserByID; this narrow option lets tests inject lookup
+// failures and cancellation without destabilizing a real database.
+func WithOIDCUserLookup(lookup func(context.Context, string) (*identity.User, error)) OIDCOption {
+	return func(oa *OIDCAuth) {
+		if lookup != nil {
+			oa.userLookup = lookup
+		}
+	}
+}
+
 // NewOIDCAuth returns nil without performing discovery when OIDC is disabled.
 // Enabled configurations construct the handler synchronously -- this call
 // never touches the network -- and start one background goroutine that
@@ -150,6 +177,10 @@ func NewOIDCAuth(ctx context.Context, cfg config.OIDCConfig, store *identity.Sto
 		discoveryBackoff:    oidcDiscoveryInitialBackoff,
 		discoveryMaxBackoff: oidcDiscoveryMaxBackoff,
 		discoveryTimeout:    oidcDiscoveryAttemptTimeout,
+		metrics:             telemetry.NoOp{},
+	}
+	if store != nil {
+		oa.userLookup = store.GetUserByID
 	}
 	for _, opt := range opts {
 		opt(oa)
@@ -193,7 +224,8 @@ func (oa *OIDCAuth) discoverWithRetry(ctx context.Context) {
 				},
 				verifier: provider.Verifier(&oidc.Config{ClientID: oa.cfg.ClientID}),
 			})
-			log.Printf("[auth] OIDC issuer discovered: %s", oa.cfg.IssuerURL)
+			oa.metrics.OIDCDiscovery("success", "2xx")
+			log.Printf("[auth] OIDC issuer discovery category=success status_class=2xx")
 			return
 		}
 
@@ -203,10 +235,12 @@ func (oa *OIDCAuth) discoverWithRetry(ctx context.Context) {
 			return
 		}
 
+		category, statusClass := classifyOIDCDiscoveryFailure(err)
 		if attempt == 1 || time.Since(lastLogged) >= oidcDiscoveryFailureLogGap {
-			log.Printf("[auth] OIDC issuer discovery failed, retrying in background (attempt %d): %v", attempt, err)
+			log.Printf("[auth] OIDC issuer discovery failed category=%s status_class=%s", category, statusClass)
 			lastLogged = time.Now()
 		}
+		oa.metrics.OIDCDiscovery(category, statusClass)
 
 		timer := time.NewTimer(backoff)
 		select {
@@ -221,6 +255,68 @@ func (oa *OIDCAuth) discoverWithRetry(ctx context.Context) {
 			backoff = oa.discoveryMaxBackoff
 		}
 	}
+}
+
+// classifyOIDCDiscoveryFailure converts a go-oidc error into a fixed category
+// and status class without returning any provider-controlled text. go-oidc's
+// non-200 error string includes the full discovery response body, so callers
+// must never log err itself.
+func classifyOIDCDiscoveryFailure(err error) (category, statusClass string) {
+	var mismatch *oidc.IssuerMismatchError
+	if errors.As(err, &mismatch) || strings.HasPrefix(err.Error(), "oidc: failed to decode provider discovery object:") {
+		return "discovery_invalid", "2xx"
+	}
+
+	message := err.Error()
+	if len(message) >= 4 && message[3] == ' ' &&
+		message[0] >= '0' && message[0] <= '9' &&
+		message[1] >= '0' && message[1] <= '9' &&
+		message[2] >= '0' && message[2] <= '9' {
+		status := int(message[0]-'0')*100 + int(message[1]-'0')*10 + int(message[2]-'0')
+		statusClass = oidcStatusClass(status)
+		if status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+			return "issuer_unavailable", statusClass
+		}
+		return "discovery_invalid", statusClass
+	}
+
+	return "issuer_unavailable", "none"
+}
+
+func oidcStatusClass(status int) string {
+	switch status / 100 {
+	case 1:
+		return "1xx"
+	case 2:
+		return "2xx"
+	case 3:
+		return "3xx"
+	case 4:
+		return "4xx"
+	case 5:
+		return "5xx"
+	default:
+		return "none"
+	}
+}
+
+func (oa *OIDCAuth) recordCallback(outcome, trust string, status int, logFailure bool) {
+	statusClass := oidcStatusClass(status)
+	oa.metrics.OIDCCallback(outcome, trust, statusClass)
+	if logFailure {
+		log.Printf("[auth] OIDC callback outcome category=%s trust=%s status_class=%s", outcome, trust, statusClass)
+	}
+}
+
+// oidcProviderErrorOutcome deliberately exposes only the operational split we
+// need. access_denied is the standards-defined user refusal/cancellation path;
+// every other provider error is actionable and fails into one bounded bucket.
+// Callers must never log or label the raw provider code or description.
+func oidcProviderErrorOutcome(providerError string) string {
+	if providerError == "access_denied" {
+		return "provider_rejected"
+	}
+	return "provider_failed"
 }
 
 // oidcResume carries the optional post-login instructions HandleLogin
@@ -338,6 +434,7 @@ func (oa *OIDCAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "login unavailable", http.StatusInternalServerError)
 		return
 	}
+	state = oa.bindOIDCState(state)
 	nonce, err := randomOIDCValue()
 	if err != nil {
 		log.Printf("[auth] OIDC login initialization failed: %v", err)
@@ -378,6 +475,7 @@ func (oa *OIDCAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	rs := oa.ready.Load()
 	if rs == nil {
+		oa.recordCallback("discovery_unavailable", "public", http.StatusServiceUnavailable, false)
 		http.Error(w, "login temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -387,6 +485,7 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	verifierCookie, verifierErr := r.Cookie(oidcVerifierCookieName)
 	if stateErr != nil || nonceErr != nil || verifierErr != nil {
 		oa.clearTransactionCookies(w)
+		oa.recordCallback("state_invalid", "public", http.StatusBadRequest, false)
 		http.Error(w, "invalid login transaction", http.StatusBadRequest)
 		return
 	}
@@ -402,8 +501,9 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestState := r.URL.Query().Get("state")
-	if requestState == "" || subtle.ConstantTimeCompare([]byte(requestState), []byte(stateCookie.Value)) != 1 {
+	if !oa.validOIDCState(stateCookie.Value) || requestState == "" || subtle.ConstantTimeCompare([]byte(requestState), []byte(stateCookie.Value)) != 1 {
 		oa.clearTransactionCookies(w)
+		oa.recordCallback("state_invalid", "public", http.StatusBadRequest, false)
 		http.Error(w, "invalid login transaction", http.StatusBadRequest)
 		return
 	}
@@ -412,79 +512,89 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// Authorization codes remain single-use at the provider as required by OIDC.
 	oa.clearTransactionCookies(w)
 
-	if r.URL.Query().Get("error") != "" {
-		log.Printf("[auth] OIDC provider rejected authorization")
+	if providerError := r.URL.Query().Get("error"); providerError != "" {
+		oa.recordCallback(oidcProviderErrorOutcome(providerError), "trusted", http.StatusBadRequest, true)
 		http.Error(w, "login rejected", http.StatusBadRequest)
 		return
 	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		oa.recordCallback("response_invalid", "trusted", http.StatusBadRequest, true)
 		http.Error(w, "invalid login response", http.StatusBadRequest)
 		return
 	}
 
 	token, err := rs.oauthConfig.Exchange(r.Context(), code, oauth2.VerifierOption(verifierCookie.Value))
 	if err != nil {
-		// A *oauth2.RetrieveError formats the provider's FULL raw HTTP response
-		// body into its Error() string — third-party text of unbounded size that
-		// must not land in logs verbatim. Log the status + RFC 6749 error code
-		// only, and truncate that too: ErrorCode is parsed straight out of the
-		// provider's response body, so it is provider-controlled and unbounded
-		// just like the Error() string in the sibling branch.
-		var retrieveErr *oauth2.RetrieveError
-		if errors.As(err, &retrieveErr) {
-			status := 0
-			if retrieveErr.Response != nil {
-				status = retrieveErr.Response.StatusCode
-			}
-			log.Printf("[auth] OIDC code exchange failed: provider returned HTTP %d (oauth error=%q)", status, logredact.Truncate(retrieveErr.ErrorCode, 200))
-		} else {
-			log.Printf("[auth] OIDC code exchange failed: %s", logredact.Truncate(err.Error(), 200))
-		}
+		// oauth2.RetrieveError contains the provider's full response body and
+		// parsed OAuth error code. Neither is safe to log; the bounded outcome
+		// is sufficient for alerting and diagnosis.
+		oa.recordCallback("token_exchange_failed", "trusted", http.StatusUnauthorized, true)
 		http.Error(w, "login verification failed", http.StatusUnauthorized)
 		return
 	}
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		log.Printf("[auth] OIDC token response omitted id_token")
+		oa.recordCallback("id_token_invalid", "trusted", http.StatusUnauthorized, true)
 		http.Error(w, "login verification failed", http.StatusUnauthorized)
 		return
 	}
 	idToken, err := rs.verifier.Verify(r.Context(), rawIDToken)
 	if err != nil {
-		log.Printf("[auth] OIDC ID token verification failed: %v", err)
+		oa.recordCallback("id_token_invalid", "trusted", http.StatusUnauthorized, true)
 		http.Error(w, "login verification failed", http.StatusUnauthorized)
 		return
 	}
 	if idToken.Nonce == "" || subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(nonceCookie.Value)) != 1 {
-		log.Printf("[auth] OIDC nonce verification failed")
+		oa.recordCallback("id_token_invalid", "trusted", http.StatusUnauthorized, true)
 		http.Error(w, "login verification failed", http.StatusUnauthorized)
 		return
 	}
 
 	var claims map[string]any
 	if err := idToken.Claims(&claims); err != nil {
-		log.Printf("[auth] OIDC claims decoding failed: %v", err)
+		oa.recordCallback("claim_invalid", "trusted", http.StatusUnauthorized, true)
 		http.Error(w, "login verification failed", http.StatusUnauthorized)
 		return
 	}
 	rawUserID, ok := claims[oa.cfg.UserIDClaim].(string)
 	userID := strings.TrimSpace(rawUserID)
 	if !ok || userID == "" {
-		log.Printf("[auth] OIDC ID token missing a valid user mapping claim")
+		oa.recordCallback("claim_invalid", "trusted", http.StatusUnauthorized, true)
 		http.Error(w, "login verification failed", http.StatusUnauthorized)
 		return
 	}
 
-	user, err := oa.store.GetUserByID(r.Context(), userID)
-	if err != nil || user == nil {
-		log.Printf("[auth] OIDC login referenced an unknown e2a user")
+	var user *identity.User
+	var lookupErr error
+	if oa.userLookup == nil {
+		lookupErr = errors.New("OIDC user lookup is not configured")
+	} else {
+		user, lookupErr = oa.userLookup(r.Context(), userID)
+	}
+	if errors.Is(lookupErr, pgx.ErrNoRows) {
+		oa.recordCallback("unknown_user", "trusted", http.StatusForbidden, true)
 		http.Error(w, "user not found", http.StatusForbidden)
+		return
+	}
+	if lookupErr != nil && isOIDCRequestCancellation(r.Context(), lookupErr) {
+		// The browser went away while the lookup was in flight. Preserve the
+		// temporary wire class for any observer still waiting, but keep this
+		// caller-controlled path out of outage-shaped failure logs and alerts.
+		oa.recordCallback("request_canceled", "trusted", http.StatusServiceUnavailable, false)
+		http.Error(w, "login temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if lookupErr != nil || user == nil {
+		// The verified identity may be valid, but the store could not answer.
+		// Never expose or log the raw database error or provider-derived user ID.
+		oa.recordCallback("user_lookup_failed", "trusted", http.StatusServiceUnavailable, true)
+		http.Error(w, "login temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	sessionToken, err := oa.store.CreateUserSession(r.Context(), user.ID)
 	if err != nil {
-		log.Printf("[auth] OIDC session creation failed: %v", err)
+		oa.recordCallback("session_failed", "trusted", http.StatusInternalServerError, true)
 		http.Error(w, "failed to create session", http.StatusInternalServerError)
 		return
 	}
@@ -506,6 +616,7 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	if resume.CLICallback != "" {
 		callbackURL, err := validateCLICallbackURL(resume.CLICallback)
 		if err != nil {
+			oa.recordCallback("post_login_failed", "trusted", http.StatusBadRequest, true)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -514,8 +625,11 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			State:       resume.CLIState,
 		}
 		if err := writeCLIHandoffPage(oa.store, w, r, user, handoff); err != nil {
+			oa.recordCallback("post_login_failed", "trusted", http.StatusInternalServerError, true)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
+		oa.recordCallback("success", "trusted", http.StatusOK, false)
 		return
 	}
 
@@ -524,12 +638,44 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// passes — the legacy door's exact fallback.
 	if resume.ReturnTo != "" {
 		if err := validateReturnToPath(resume.ReturnTo); err == nil {
+			oa.recordCallback("success", "trusted", http.StatusFound, false)
 			http.Redirect(w, r, oa.baseURL+resume.ReturnTo, http.StatusFound)
 			return
 		}
 	}
 
+	oa.recordCallback("success", "trusted", http.StatusFound, false)
 	http.Redirect(w, r, oa.baseURL+"/dashboard", http.StatusFound)
+}
+
+func isOIDCRequestCancellation(ctx context.Context, err error) bool {
+	return errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled)
+}
+
+// bindOIDCState authenticates the otherwise-opaque state value with the OIDC
+// client secret. The provider echoes this exact value and the browser stores it
+// in an HttpOnly cookie. Verification on callback means a scanner cannot mint
+// a "trusted" outcome merely by choosing matching query and cookie strings.
+func (oa *OIDCAuth) bindOIDCState(state string) string {
+	mac := hmac.New(sha256.New, []byte(oa.cfg.ClientSecret))
+	_, _ = mac.Write([]byte("e2a-oidc-state-v1\x00"))
+	_, _ = mac.Write([]byte(state))
+	return state + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (oa *OIDCAuth) validOIDCState(bound string) bool {
+	state, encodedMAC, ok := strings.Cut(bound, ".")
+	if !ok || state == "" || encodedMAC == "" {
+		return false
+	}
+	providedMAC, err := base64.RawURLEncoding.DecodeString(encodedMAC)
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(oa.cfg.ClientSecret))
+	_, _ = mac.Write([]byte("e2a-oidc-state-v1\x00"))
+	_, _ = mac.Write([]byte(state))
+	return hmac.Equal(providedMAC, mac.Sum(nil))
 }
 
 func randomOIDCValue() (string, error) {

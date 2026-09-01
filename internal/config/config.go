@@ -3,15 +3,34 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// defaultSenderIdentityFixtureTTL is how long a fixture sending identity is
+// assumed to still be in use. A conformance or prober fixture that outlives a
+// day has been abandoned by the run that made it.
+const defaultSenderIdentityFixtureTTL = 24 * time.Hour
+
+// defaultSenderIdentityReclaimMinAge is the age floor for reclaiming an
+// orphaned fixture identity. A week is far longer than any test run and far
+// longer than any plausible clock skew, so an identity that clears it is
+// abandoned rather than merely idle.
+const defaultSenderIdentityReclaimMinAge = 168 * time.Hour
+
+// defaultSenderIdentityReclaimMaxPerSweep bounds deletions per reaper job. Set
+// so a systematic mistake costs a handful of identities and a loud log rather
+// than an account's worth, while still draining a realistic leak backlog
+// (single digits, accumulated over weeks) within a couple of hourly sweeps.
+const defaultSenderIdentityReclaimMaxPerSweep = 5
 
 // splitAndTrim splits a comma-separated env value into a clean slice (trimmed,
 // no empties). Used for list-valued overrides like SNS topic ARNs.
@@ -42,28 +61,47 @@ const placeholderHMACSecret = "change-me-in-production-this-is-not-a-real-secret
 const minHMACSecretBytes = 32
 
 type Config struct {
-	SMTP             SMTPConfig             `yaml:"smtp"`
-	HTTP             HTTPConfig             `yaml:"http"`
-	Database         DatabaseConfig         `yaml:"database"`
-	OAuth            OAuthConfig            `yaml:"oauth"`
-	OIDC             OIDCConfig             `yaml:"oidc"`
-	Delegated        DelegatedConfig        `yaml:"delegated"`
-	Provisioning     ProvisioningConfig     `yaml:"provisioning"`
-	Signing          SigningConfig          `yaml:"signing"`
-	OutboundSMTP     OutboundSMTPConfig     `yaml:"outbound_smtp"`
-	Inbound          InboundConfig          `yaml:"inbound"`
-	WebhookFanout    WebhookFanoutConfig    `yaml:"webhook_fanout"`
-	Webhook          WebhookConfig          `yaml:"webhook"`
-	SenderIdentity   SenderIdentityConfig   `yaml:"sender_identity"`
-	DeliveryFeedback DeliveryFeedbackConfig `yaml:"delivery_feedback"`
-	SendingRamp      SendingRampConfig      `yaml:"sending_ramp"`
-	Limits           LimitsConfig           `yaml:"limits"`
-	RateLimits       RateLimitsConfig       `yaml:"rate_limits"`
-	Trash            TrashConfig            `yaml:"trash"`
-	Metrics          MetricsConfig          `yaml:"metrics"`
-	OutboundFooter   OutboundFooterConfig   `yaml:"outbound_footer"`
-	Notifications    NotificationsConfig    `yaml:"notifications"`
-	Env              string                 `yaml:"env"` // "development" or "production"
+	SMTP             SMTPConfig              `yaml:"smtp"`
+	HTTP             HTTPConfig              `yaml:"http"`
+	Database         DatabaseConfig          `yaml:"database"`
+	OAuth            OAuthConfig             `yaml:"oauth"`
+	OIDC             OIDCConfig              `yaml:"oidc"`
+	Delegated        DelegatedConfig         `yaml:"delegated"`
+	Provisioning     ProvisioningConfig      `yaml:"provisioning"`
+	Signing          SigningConfig           `yaml:"signing"`
+	OutboundSMTP     OutboundSMTPConfig      `yaml:"outbound_smtp"`
+	Inbound          InboundConfig           `yaml:"inbound"`
+	WebhookFanout    WebhookFanoutConfig     `yaml:"webhook_fanout"`
+	Webhook          WebhookConfig           `yaml:"webhook"`
+	SenderIdentity   SenderIdentityConfig    `yaml:"sender_identity"`
+	DeliveryFeedback DeliveryFeedbackConfig  `yaml:"delivery_feedback"`
+	SendingRamp      SendingRampConfig       `yaml:"sending_ramp"`
+	SendingProtect   SendingProtectionConfig `yaml:"sending_protection"`
+	Limits           LimitsConfig            `yaml:"limits"`
+	RateLimits       RateLimitsConfig        `yaml:"rate_limits"`
+	Trash            TrashConfig             `yaml:"trash"`
+	Metrics          MetricsConfig           `yaml:"metrics"`
+	OutboundFooter   OutboundFooterConfig    `yaml:"outbound_footer"`
+	Notifications    NotificationsConfig     `yaml:"notifications"`
+	Env              string                  `yaml:"env"` // "development" or "production"
+	// DeploymentName names WHICH deployment of e2a this process is, for
+	// classification metadata e2a attaches to the resources it creates in
+	// external systems (today: the e2a-env tag on provisioned SES sender
+	// identities — internal/senderidentity/tags.go). It is deliberately NOT
+	// Env: Env is a development/production MODE switch that gates security
+	// behavior, and both the hosted prod and hosted staging deployments run
+	// env: "production", so Env provably cannot tell them apart.
+	//
+	// Recognized values are "prod" and "staging" — the closed vocabulary
+	// internal/senderidentity stamps, mirrored here only to normalize the
+	// operator's input (that package owns the tag values, and re-screens
+	// whatever it is given). Empty — the default, and what every self-host
+	// leaves it at — means unset: the metadata is simply omitted. An
+	// unrecognized value is logged once at load and treated as unset rather
+	// than rejected: nothing about serving mail depends on this, so a typo
+	// must never stop a server from booting.
+	// Override with E2A_DEPLOYMENT_NAME.
+	DeploymentName string `yaml:"deployment_name"`
 	// SharedDomain enables slug-based agent registration. When set
 	// (e.g. "agents.example.com"), users can register agents with just a
 	// slug and get `<slug>@<shared_domain>` provisioned without DNS
@@ -388,6 +426,59 @@ type SenderIdentityConfig struct {
 	// Default false — single-instance deployments have no blue/green overlap.
 	// Override via E2A_SENDER_IDENTITY_LEGACY_JOB_COMPAT.
 	LegacyJobCompat bool `yaml:"legacy_job_compat"`
+	// FixtureTTL is how long a FIXTURE sending identity — one provisioned for
+	// a non-customer account class (internal dogfooding, synthetic monitoring)
+	// — is expected to stay useful. It is stamped onto the identity as the
+	// e2a-expires tag so a later cleanup pass can tell an abandoned test
+	// fixture from a live customer domain without joining against this
+	// server's database. Customer identities never carry it.
+	//
+	// Written as a Go duration string ("24h", "90m"); yaml.v3 decodes a
+	// duration field from a string only, so a bare `0` is a type error —
+	// spell the disabled case "0s". Defaults to 24h (a conformance/prober
+	// fixture that outlives a day has been abandoned). Zero disables the tag
+	// without disabling the rest of the classification metadata. Override via
+	// E2A_SENDER_IDENTITY_FIXTURE_TTL; a malformed value there is logged and
+	// ignored rather than fatal, for the same reason as DeploymentName.
+	FixtureTTL time.Duration `yaml:"fixture_ttl"`
+
+	// ReapOrphans ARMS the reaper's orphan-identity reclaim. An orphan is a
+	// provider identity with no ledger row and no domain row; today the reaper
+	// only alerts on them, and crashed test runs leak them until a human
+	// sweeps by hand. Default false: with the flag off the reaper runs the
+	// entire deletion decision and logs what it WOULD delete (or why it
+	// refused) without touching the provider — the observe-only mode an
+	// operator is expected to run for days before arming.
+	//
+	// Arming is NOT sufficient on its own: ReclaimZones must also be set, and
+	// every guard in senderidentity.orphanReclaimable must pass. Deletion goes
+	// through the same ownership-verifying Deprovision path the managed-ledger
+	// phase uses.
+	ReapOrphans bool `yaml:"reap_orphans"`
+	// ReclaimZones bounds reclaim to identity names at or under a DNS zone
+	// that holds only e2a's OWN test fixtures (e.g. the conformance/prober
+	// zone). This is the strongest of the reclaim guards — a customer domain
+	// is never under the test zone — and matching is on a label boundary, so
+	// zone "example.test" covers "a.example.test" and "example.test" itself
+	// but never "evilexample.test".
+	//
+	// EMPTY (the default) means reclaim NOTHING. An empty list is never read
+	// as "any zone".
+	ReclaimZones []string `yaml:"reclaim_zones"`
+	// ReclaimMinAge is the absolute age floor an identity must clear (by its
+	// e2a-created tag) before it can be reclaimed, checked INDEPENDENTLY of
+	// its expiry tag so that clock skew or a mis-set FixtureTTL cannot make a
+	// brand-new identity instantly reclaimable. Written as a Go duration
+	// string; yaml.v3 decodes a duration only from a string, so spell zero
+	// "0s". Defaults to 168h (7 days). Zero or negative reclaims nothing — an
+	// unset floor is treated as an unconfigured policy, not as a waiver.
+	ReclaimMinAge time.Duration `yaml:"reclaim_min_age"`
+	// ReclaimMaxPerSweep caps how many identities one reaper JOB may delete.
+	// The orphan phase is paginated across River jobs, so this is a per-page
+	// budget rather than a global one (see reapProviderOrphanPage): it exists
+	// so a systematic mistake costs a handful of identities and a loud log
+	// rather than the account. Defaults to 5; 0 reclaims nothing.
+	ReclaimMaxPerSweep int `yaml:"reclaim_max_per_sweep"`
 }
 
 // SendingRampConfig is an operator-owned safety policy for newly verified
@@ -399,6 +490,47 @@ type SendingRampConfig struct {
 	StartDaily  int  `yaml:"start_daily"`
 	TargetDaily int  `yaml:"target_daily"`
 	RampDays    int  `yaml:"ramp_days"`
+}
+
+// SendingProtectionConfig carries the non-schedule half of the sending
+// protection runtime policy. The schedule fields deliberately live in
+// SendingRampConfig and are not duplicated here: that block remains the
+// custom-domain ramp SSOT, and two sources for one number is how they drift.
+//
+// RuntimePolicySource selects where the server reads its policy. Every
+// deployment defaults to "config", including self-host; only the hosted service
+// switches to "database", where activation becomes an audited compare-and-swap
+// instead of a redeploy. This struct is plain data — the typed policy, its
+// closed enums, and its invariants are owned by internal/sendingpolicy.
+type SendingProtectionConfig struct {
+	RuntimePolicySource string `yaml:"runtime_policy_source"`
+
+	BudgetMode                string   `yaml:"budget_mode"`
+	DetectorMode              string   `yaml:"detector_mode"`
+	TenantHeaderMode          string   `yaml:"tenant_header_mode"`
+	TenantProvisioningMode    string   `yaml:"tenant_provisioning_mode"`
+	TenantSuppressionSyncMode string   `yaml:"tenant_suppression_sync_mode"`
+	TenantHeaderCanaryIDs     []string `yaml:"tenant_header_canary_account_ids"`
+
+	DefaultAccountDailyRecipients    int      `yaml:"default_account_daily_recipients"`
+	SharedDomainAccountDaily         int      `yaml:"shared_domain_account_daily_recipients"`
+	ProbationGlobalDailyRecipients   int      `yaml:"probation_global_daily_recipients"`
+	AllCustomerGlobalDailyRecipients int      `yaml:"all_customer_global_daily_recipients"`
+	CriticalOperationalDaily         int      `yaml:"critical_operational_daily_recipients"`
+	ViolationOperationalDaily        int      `yaml:"violation_operational_daily_recipients"`
+	DailyUnlimitedPlanCodes          []string `yaml:"daily_unlimited_plan_codes"`
+	BudgetHoldMaxDays                int      `yaml:"budget_hold_max_days"`
+
+	BouncePauseBasisPoints       int `yaml:"bounce_pause_basis_points"`
+	ComplaintPauseBasisPoints    int `yaml:"complaint_pause_basis_points"`
+	BounceMinOutcomes            int `yaml:"bounce_min_outcomes"`
+	SharedReputationBounceMin    int `yaml:"shared_reputation_bounce_min_outcomes"`
+	DetectorIntervalSeconds      int `yaml:"detector_interval_seconds"`
+	DetectorWindowDays           int `yaml:"detector_window_days"`
+	AuditRetentionDays           int `yaml:"sending_control_audit_retention_days"`
+	FeedbackPostAccountRetention int `yaml:"sending_feedback_post_account_retention_days"`
+
+	OperatorNoticeRecipientVersion int `yaml:"operator_notice_recipient_version"`
 }
 
 // LimitsConfig is the operator-configured fallback applied to any user
@@ -416,7 +548,14 @@ type LimitsConfig struct {
 	MaxAgents        int    `yaml:"max_agents"`
 	MaxDomains       int    `yaml:"max_domains"`
 	MaxMessagesMonth int    `yaml:"max_messages_month"`
-	MaxStorageBytes  int64  `yaml:"max_storage_bytes"`
+	// MaxMessagesDay is the optional per-UTC-day outbound send cap applied
+	// to users without an account_limits row. Unset/absent (the default)
+	// means no daily policy — self-host behavior is untouched. 0 hard-blocks
+	// all sends, consistent with the other caps. Hosted deployments set it
+	// to the Free tier's daily allowance; the billing sidecar overrides it
+	// per account via the max_messages_day column.
+	MaxMessagesDay  *int  `yaml:"max_messages_day"`
+	MaxStorageBytes int64 `yaml:"max_storage_bytes"`
 	// CacheTTLSeconds controls how long resolved Limits are cached
 	// in-process. The cache covers the account_limits read only; current
 	// usage counts are always live. Set to 0 to disable caching
@@ -495,9 +634,51 @@ func Load(path string) (*Config, error) {
 			TargetDaily: 2000,
 			RampDays:    30,
 		},
+		// These control defaults mirror generation zero, but the ramp schedule
+		// deliberately does not: the OSS/self-host SendingRamp default remains
+		// 50 while hosted generation zero explicitly seeds 150 (see the design's
+		// self-host compatibility rule). Every mode is off, so either disabled
+		// payload is inert until an operator reviews and activates its exact hash.
+		SendingProtect: SendingProtectionConfig{
+			RuntimePolicySource:       "config",
+			BudgetMode:                "disabled",
+			DetectorMode:              "disabled",
+			TenantHeaderMode:          "disabled",
+			TenantProvisioningMode:    "disabled",
+			TenantSuppressionSyncMode: "disabled",
+
+			DefaultAccountDailyRecipients:    100,
+			SharedDomainAccountDaily:         50,
+			ProbationGlobalDailyRecipients:   150,
+			AllCustomerGlobalDailyRecipients: 5000,
+			CriticalOperationalDaily:         100,
+			ViolationOperationalDaily:        100,
+			DailyUnlimitedPlanCodes:          []string{"starter", "pro", "scale"},
+			BudgetHoldMaxDays:                7,
+
+			BouncePauseBasisPoints:       400,
+			ComplaintPauseBasisPoints:    8,
+			BounceMinOutcomes:            50,
+			SharedReputationBounceMin:    1,
+			DetectorIntervalSeconds:      300,
+			DetectorWindowDays:           7,
+			AuditRetentionDays:           90,
+			FeedbackPostAccountRetention: 30,
+
+			OperatorNoticeRecipientVersion: 1,
+		},
 		RateLimits: RateLimitsConfig{PollPerMinute: 240},
 		Metrics:    MetricsConfig{ListenAddr: "127.0.0.1:9091"},
 		Trash:      TrashConfig{RetentionDays: 30},
+		// An absent sender_identity block keeps the fixture expiry default;
+		// an explicit `fixture_ttl: 0` survives unmarshal and disables it.
+		// The reclaim defaults are the SAFE ones: disarmed, no zones (which
+		// alone reclaims nothing), a 7-day age floor, and a 5-per-job cap.
+		SenderIdentity: SenderIdentityConfig{
+			FixtureTTL:         defaultSenderIdentityFixtureTTL,
+			ReclaimMinAge:      defaultSenderIdentityReclaimMinAge,
+			ReclaimMaxPerSweep: defaultSenderIdentityReclaimMaxPerSweep,
+		},
 		// Delegated verification is off by default. Only protocol-level
 		// values are defaulted (algorithm allowlist, lifetime, skew); the
 		// required/forbidden CLAIM lists are deployment identity policy
@@ -671,6 +852,26 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.SenderIdentity.LegacyJobCompat = b
 	}
+	if v := os.Getenv("E2A_SENDER_IDENTITY_FIXTURE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.SenderIdentity.FixtureTTL = d
+		} else {
+			log.Printf("[config] E2A_SENDER_IDENTITY_FIXTURE_TTL=%q is not a Go duration — ignoring it and keeping %s", v, cfg.SenderIdentity.FixtureTTL)
+		}
+	}
+	if v := os.Getenv("E2A_DEPLOYMENT_NAME"); v != "" {
+		cfg.DeploymentName = v
+	}
+	// Normalize AFTER the env override so a typo in either source degrades the
+	// same way. See DeploymentName's doc for why this is not a hard error.
+	if name := strings.TrimSpace(cfg.DeploymentName); name != "prod" && name != "staging" {
+		if name != "" {
+			log.Printf("[config] deployment_name (or E2A_DEPLOYMENT_NAME) = %q is not %q or %q — treating this deployment as unnamed; resources e2a provisions will carry no environment tag", name, "prod", "staging")
+		}
+		cfg.DeploymentName = ""
+	} else {
+		cfg.DeploymentName = name
+	}
 	if v := os.Getenv("E2A_TRASH_RETENTION_DAYS"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil {
 			cfg.Trash.RetentionDays = d
@@ -715,6 +916,11 @@ func Load(path string) (*Config, error) {
 // running with any of these weakens approval tokens and derived encryption keys
 // and approve HITL messages.
 func (c *Config) Validate() error {
+	// A negative daily cap is always a mistake (it would silently 402 every
+	// send); 0 is a legal hard-block and absent/nil means no daily policy.
+	if c.Limits.MaxMessagesDay != nil && *c.Limits.MaxMessagesDay < 0 {
+		return fmt.Errorf("config: limits.max_messages_day is %d; must be >= 0 (omit the key for no daily cap)", *c.Limits.MaxMessagesDay)
+	}
 	if c.IsProduction() {
 		if c.Signing.HMACSecret == "" {
 			return errors.New("config: signing.hmac_secret (or E2A_HMAC_SECRET) must be set when env=production")
@@ -799,6 +1005,20 @@ func (c *Config) Validate() error {
 		if c.SendingRamp.RampDays < 1 {
 			return fmt.Errorf("config: sending_ramp.ramp_days must be at least 1")
 		}
+	}
+	// Only the source enum is checked here. The rest of the block is validated
+	// as one typed policy by internal/sendingpolicy, so there is a single
+	// definition of a legal policy rather than one here and one there.
+	//
+	// Empty means the documented default ("config"), not an error: a Config
+	// built in code rather than loaded from YAML has no defaults applied, and
+	// an absent sending_protection block must leave a deployment on the
+	// config source rather than refusing to start.
+	switch c.SendingProtect.RuntimePolicySource {
+	case "", "config", "database":
+	default:
+		return fmt.Errorf("config: sending_protection.runtime_policy_source must be config or database (got %q)",
+			c.SendingProtect.RuntimePolicySource)
 	}
 	if v := c.Notifications.FromAddress; v != "" {
 		addr, err := mail.ParseAddress(v)

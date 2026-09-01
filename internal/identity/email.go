@@ -20,6 +20,31 @@ func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
+// UniqueRecipientCount returns the number of distinct recipients across the
+// given address lists, normalized via NormalizeMailboxAddress (addr-spec
+// extraction + lower-case + trim) so "Bob <b@x.com>" in To and "b@x.com" in
+// CC count once, as do case variants. Empty entries are skipped. This is THE
+// canonical recipient-unit primitive: outbound metering (one
+// recipient-delivery per unit), the accept-time cap pre-check, the approve
+// probe, and the fire-time quota gate must all count with this one function —
+// counting raw request strings would over-charge display-name duplicates at
+// accept relative to the compose-normalized set the terminal meter and the
+// SMTP envelope actually see. For already-normalized bare addresses (the
+// terminal meter's stored to/cc/bcc, the claim's envelope recipients) this is
+// byte-identical to NormalizeEmail.
+func UniqueRecipientCount(lists ...[]string) int {
+	seen := make(map[string]struct{})
+	for _, list := range lists {
+		for _, recipient := range list {
+			recipient = NormalizeMailboxAddress(recipient)
+			if recipient != "" {
+				seen[recipient] = struct{}{}
+			}
+		}
+	}
+	return len(seen)
+}
+
 // NormalizeMailboxAddress returns the canonical addr-spec from an RFC 5322
 // mailbox value. Suppression checks receive both bare addresses and display-
 // name forms from outbound request shapes, but storage keys contain only the

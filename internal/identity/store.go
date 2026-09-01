@@ -2225,6 +2225,61 @@ func (s *Store) CreateAgentTx(ctx context.Context, tx pgx.Tx, agentEmail, domain
 	return createAgent(ctx, tx, agentEmail, domain, name, userID)
 }
 
+// AgentLimitExceededError is returned by CreateAgentWithLimit when userID is
+// already at maxAgents. Mirrors DomainLimitExceededError.
+type AgentLimitExceededError struct {
+	Limit, Current int
+}
+
+func (e *AgentLimitExceededError) Error() string {
+	return fmt.Sprintf("agent limit exceeded: %d/%d agents", e.Current, e.Limit)
+}
+
+// CreateAgentWithLimit is CreateAgent plus an atomic max_agents check
+// (keyspace-2 advisory lock) inside the INSERT's transaction, closing the
+// pre-insert-count race (#822's class). maxAgents <= 0 means unlimited.
+func (s *Store) CreateAgentWithLimit(ctx context.Context, agentEmail, domain, name, userID string, maxAgents int) (*AgentIdentity, error) {
+	if maxAgents <= 0 {
+		return createAgent(ctx, s.pool, agentEmail, domain, name, userID)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 2))`, userID); err != nil {
+		return nil, err
+	}
+
+	// Read under the per-user lock, so this reflects every insert already
+	// committed by a concurrent request, not a stale count. Mirrors
+	// usage.Store.CountAgentsByUser's predicate; keep the two in sync.
+	var count int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*)
+		   FROM agent_identities a
+		   JOIN domains d ON a.registered_domain = d.domain
+		  WHERE a.user_id = $1 AND a.deleted_at IS NULL`,
+		userID,
+	).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count >= maxAgents {
+		return nil, &AgentLimitExceededError{Limit: maxAgents, Current: count}
+	}
+
+	a, err := createAgent(ctx, tx, agentEmail, domain, name, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
 // agentExecutor is the subset of pgxpool.Pool + pgx.Tx that
 // createAgent needs. Lets the same body serve both stand-alone and
 // in-transaction callers without duplicating the SQL.
@@ -6118,6 +6173,8 @@ func (s *Store) GetDashboardStats(ctx context.Context, userID string, windowDays
 
 	// 1) Today's usage and yesterday's baseline. LEFT JOIN trick keeps
 	// the query a single row even when one or both buckets are absent.
+	// Unit note (usage-based pricing v1): outbound_count is in RECIPIENT-
+	// DELIVERIES (a message to N recipients contributes N), not messages.
 	var todayInbound, todayOutbound, yesterdayInbound, yesterdayOutbound int
 	err := s.pool.QueryRow(ctx,
 		`SELECT

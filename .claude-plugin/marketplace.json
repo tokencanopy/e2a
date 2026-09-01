@@ -2,12 +2,12 @@
   "name": "e2a",
   "owner": {
     "name": "TokenCanopy",
-    "email": "support@e2a.dev",
+    "email": "support@agents.e2a.dev",
     "url": "https://e2a.dev"
   },
   "metadata": {
     "description": "e2a plugins for Claude Code — open-source email API for applications and AI agents",
-    "version": "0.9.4"
+    "version": "0.9.5"
   },
   "plugins": [
     {

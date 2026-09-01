@@ -61,6 +61,15 @@ type SESProvider struct {
 	// opt-IN via NewSESProviderFromConfig's production parameter, not opt-out.
 	refuseAdoption bool
 
+	// Classification-tag configuration (see tags.go). All optional: each
+	// missing piece omits its one tag, so the zero value still produces a
+	// correctly OWNED identity — only a less self-describing one. now is the
+	// injectable clock behind the created/expires stamps.
+	deploymentName   string
+	provisionerBuild string
+	fixtureTTL       time.Duration
+	now              func() time.Time
+
 	// accountID/partition resolution feeds the identity ARN adoption's
 	// TagResource call needs (arn:<partition>:ses:<region>:<accountID>:
 	// identity/<domain>) — GetEmailIdentity/ListEmailIdentities never return
@@ -264,7 +273,7 @@ func (p *SESProvider) identityForAdoption(ctx context.Context) (accountID, parti
 	return accountID, partition, nil
 }
 
-func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte) (Result, error) {
+func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string, dkimPrivateKeyDER []byte, meta ProvisionMeta) (Result, error) {
 	privB64, err := pkcs8Base64(dkimPrivateKeyDER)
 	if err != nil {
 		// A malformed key is not retryable — fail closed with a reason.
@@ -278,10 +287,13 @@ func (p *SESProvider) Provision(ctx context.Context, domain, dkimSelector string
 	_, err = p.api.CreateEmailIdentity(ctx, &sesv2.CreateEmailIdentityInput{
 		EmailIdentity:         &domain,
 		DkimSigningAttributes: dkimAttributes,
-		Tags: []sestypes.Tag{{
-			Key:   awsString(managedIdentityTagKey),
-			Value: awsString(managedIdentityTagValue),
-		}},
+		// Ownership anchor + best-effort classification metadata (tags.go).
+		// Only reachable on CREATE: the AlreadyExists branch below cannot
+		// retag, and adoption deliberately writes the ownership tag alone —
+		// back-dating a creation stamp and an owner classification onto an
+		// identity e2a did not create would be inventing evidence the reaper
+		// is meant to trust.
+		Tags: p.identityTags(meta),
 	})
 	if err != nil {
 		// AlreadyExists means the domain may belong to an older registration.
@@ -387,6 +399,35 @@ func (p *SESProvider) Status(ctx context.Context, domain string, evidence Adopti
 		MailFromStatus: mailFromAxis,
 		DNSRecords:     mailFromRecords(domain, p.region),
 	}, nil
+}
+
+// InspectIdentity reads the classification tags and the verified-for-sending
+// bit off ONE GetEmailIdentity response (see Provider.InspectIdentity for why
+// they must share a call). It deliberately makes no judgement — not even
+// isManagedIdentity's — so that every reclaim decision lives in the pure,
+// exhaustively tested orphanReclaimable rather than being split across a
+// provider that is only exercised against live AWS.
+func (p *SESProvider) InspectIdentity(ctx context.Context, domain string) (IdentityAudit, error) {
+	out, err := p.api.GetEmailIdentity(ctx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+	if err != nil {
+		var notFound *sestypes.NotFoundException
+		if errors.As(err, &notFound) {
+			return IdentityAudit{}, ErrIdentityNotFound
+		}
+		return IdentityAudit{}, err
+	}
+	audit := IdentityAudit{
+		Domain:             domain,
+		Tags:               make(map[string]string, len(out.Tags)),
+		VerifiedForSending: out.VerifiedForSendingStatus,
+	}
+	for _, tag := range out.Tags {
+		if tag.Key == nil || tag.Value == nil {
+			continue
+		}
+		audit.Tags[*tag.Key] = *tag.Value
+	}
+	return audit, nil
 }
 
 func (p *SESProvider) Deprovision(ctx context.Context, domain string) error {

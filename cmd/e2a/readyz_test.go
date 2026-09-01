@@ -43,6 +43,49 @@ func TestLatestMigration(t *testing.T) {
 	}
 }
 
+func TestLatestMigrationAppliedRecognizesLegacyAlias(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedTestDB(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tracker fixture transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Migration 118 was renamed after it had already shipped under the 115
+	// prefix. Exercise that compatibility mapping directly: it must remain valid
+	// even after later migrations become the repository's latest migration.
+	renamedMigration := "118_sending_protection_validate_constraints.sql"
+	if _, err := tx.Exec(ctx,
+		"DELETE FROM schema_migrations WHERE filename = $1",
+		renamedMigration,
+	); err != nil {
+		t.Fatalf("remove current tracker marker: %v", err)
+	}
+
+	applied, err := latestMigrationApplied(ctx, tx, renamedMigration)
+	if err != nil {
+		t.Fatalf("check legacy-only latest migration: %v", err)
+	}
+	if !applied {
+		t.Fatal("legacy-only tracker row must satisfy readiness after a filename-compatible upgrade")
+	}
+
+	if _, err := tx.Exec(ctx,
+		"DELETE FROM schema_migrations WHERE filename = $1",
+		"115_sending_protection_validate_constraints.sql",
+	); err != nil {
+		t.Fatalf("remove legacy tracker marker: %v", err)
+	}
+	applied, err = latestMigrationApplied(ctx, tx, renamedMigration)
+	if err != nil {
+		t.Fatalf("check missing latest migration: %v", err)
+	}
+	if applied {
+		t.Fatal("readiness accepted latest migration with neither current nor legacy tracker row")
+	}
+}
+
 func TestReadyzHandler_Ready(t *testing.T) {
 	pool := migratedTestDB(t)
 	rec := httptest.NewRecorder()

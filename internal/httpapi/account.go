@@ -37,9 +37,13 @@ type AccountView struct {
 }
 
 type LimitsCapsView struct {
-	MaxAgents        int   `json:"max_agents"`
-	MaxDomains       int   `json:"max_domains"`
-	MaxMessagesMonth int   `json:"max_messages_month"`
+	MaxAgents  int `json:"max_agents"`
+	MaxDomains int `json:"max_domains"`
+	// Message-flow allowance semantics (usage-based pricing v1): the unit is
+	// one OUTBOUND recipient-delivery — a message sent to N distinct
+	// recipients consumes N units, and inbound (received) mail is free and
+	// unmetered. The field name is unchanged for wire compatibility.
+	MaxMessagesMonth int   `json:"max_messages_month" doc:"Monthly send allowance in outbound recipient-deliveries: a message to N distinct recipients consumes N units. Received mail is free and does not count. Resets at the start of each calendar month (UTC). Checked against usage.messages_month."`
 	MaxStorageBytes  int64 `json:"max_storage_bytes" doc:"Storage-quota cap in bytes, checked against usage.storage_bytes (see its doc for what is counted)."`
 }
 
@@ -54,7 +58,7 @@ type LimitsCapsView struct {
 type LimitsUsageView struct {
 	Agents        int   `json:"agents"`
 	Domains       int   `json:"domains"`
-	MessagesMonth int   `json:"messages_month"`
+	MessagesMonth int   `json:"messages_month" doc:"Outbound recipient-deliveries consumed this UTC calendar month: each distinct recipient of each sent message counts one. Received mail is free and never appears here."`
 	StorageBytes  int64 `json:"storage_bytes" doc:"Bytes of retained message content counted against the storage quota: per message, RAW MIME plus any retained outbound body and attachment columns, including content retained after terminal transitions."`
 }
 

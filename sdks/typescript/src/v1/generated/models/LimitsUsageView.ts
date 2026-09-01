@@ -15,6 +15,9 @@ import { HttpFile } from '../http/http.js';
 export class LimitsUsageView {
     'agents': number;
     'domains': number;
+    /**
+    * Outbound recipient-deliveries consumed this UTC calendar month: each distinct recipient of each sent message counts one. Received mail is free and never appears here.
+    */
     'messagesMonth': number;
     /**
     * Bytes of retained message content counted against the storage quota: per message, RAW MIME plus any retained outbound body and attachment columns, including content retained after terminal transitions.

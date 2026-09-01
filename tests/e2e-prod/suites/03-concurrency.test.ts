@@ -177,7 +177,7 @@ test("concurrency: parallel DELETE of the same agent is idempotent under content
   assert.equal(c.status, 201);
 
   const results = await Promise.all(
-    Array.from({ length: 4 }, () => burst.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`)),
+    Array.from({ length: 4 }, () => burst.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`)),
   );
   const ok = results.filter((r) => r.status === 200 || r.status === 204);
   const fivexx = results.filter((r) => r.status >= 500);

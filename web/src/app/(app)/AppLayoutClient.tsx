@@ -5,9 +5,8 @@ import Link from "next/link";
 import { useAuth } from "../components/AuthProvider";
 import { SWRProvider } from "../components/swr/SWRProvider";
 import { PendingPollingOwner } from "../components/swr/PendingPollingOwner";
-import { SignInLink } from "../components/SignInLink";
+import { SignInLinks } from "../components/SignInLinks";
 import { Sidebar } from "../components/loft/Sidebar";
-import { SIGN_IN_LABEL } from "../../lib/site";
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -107,17 +106,19 @@ export default function AppLayout({
           <p className="mb-4 text-[14px]" style={{ color: "var(--fg-muted)" }}>
             Sign in to access this page.
           </p>
-          <SignInLink
-            preserveCurrentPaths={APP_LOGIN_RETURN_PATHS}
-            className="inline-block px-4 py-2 text-[13px] font-medium transition"
-            style={{
-              background: "var(--accent-fill)",
-              color: "var(--accent-fg)",
-              borderRadius: "var(--r-md)",
-            }}
-          >
-            {SIGN_IN_LABEL}
-          </SignInLink>
+          <div className="flex flex-col items-center gap-3">
+            <SignInLinks
+              preserveCurrentPaths={APP_LOGIN_RETURN_PATHS}
+              primaryClassName="inline-block px-4 py-2 text-[13px] font-medium transition"
+              primaryStyle={{
+                background: "var(--accent-fill)",
+                color: "var(--accent-fg)",
+                borderRadius: "var(--r-md)",
+              }}
+              secondaryClassName="text-[13px] underline underline-offset-2"
+              secondaryStyle={{ color: "var(--fg-muted)" }}
+            />
+          </div>
         </div>
       </div>
     );

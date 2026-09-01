@@ -510,7 +510,7 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 				{ID: "whd_1", EventType: "email.received", Status: "delivered", Attempts: 1, NextRetryAt: time.Unix(1700000000, 0).UTC(), CreatedAt: time.Unix(1700000000, 0).UTC()},
 			}, nil
 		},
-		EnforceMessageSend: func(ctx context.Context, userID string) error {
+		EnforceMessageSend: func(ctx context.Context, userID string, units int) error {
 			if userID == "u_overcap" {
 				return &limits.LimitExceededError{Resource: "messages_month", Limit: 1, Current: 1, Limits: limits.Limits{PlanCode: "free"}}
 			}
@@ -660,6 +660,17 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 				// typed isUniqueViolation check classifies it as a conflict —
 				// a plain errors.New("duplicate key value") no longer matches.
 				return nil, &pgconn.PgError{Code: "23505", Message: "duplicate key value"}
+			}
+			return &identity.AgentIdentity{ID: email, RegisteredDomain: domain, Email: email, Name: name, UserID: userID}, nil
+		},
+		// CreateAgentWithLimit is what handleCreateAgent actually calls; mirror
+		// ClaimDomain's u_overcap/maxAgents branch (#822's shape on agents).
+		CreateAgentWithLimit: func(ctx context.Context, email, domain, name, userID string, maxAgents int) (*identity.AgentIdentity, error) {
+			if email == "dupe@acme.com" {
+				return nil, &pgconn.PgError{Code: "23505", Message: "duplicate key value"}
+			}
+			if maxAgents > 0 && userID == "u_overcap" {
+				return nil, &identity.AgentLimitExceededError{Limit: maxAgents, Current: maxAgents}
 			}
 			return &identity.AgentIdentity{ID: email, RegisteredDomain: domain, Email: email, Name: name, UserID: userID}, nil
 		},

@@ -62,10 +62,12 @@ type fakeCounter struct {
 	agents          int
 	domains         int
 	messagesMonth   int
+	messagesToday   int
 	storageBytes    int64
 	countAgentsErr  error
 	countDomainsErr error
 	messagesErr     error
+	messagesDayErr  error
 	storageErr      error
 }
 
@@ -83,6 +85,11 @@ func (f *fakeCounter) MessagesThisMonth(ctx context.Context, userID string) (int
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.messagesMonth, f.messagesErr
+}
+func (f *fakeCounter) MessagesToday(ctx context.Context, userID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.messagesToday, f.messagesDayErr
 }
 func (f *fakeCounter) GetStorageBytes(ctx context.Context, userID string) (int64, error) {
 	f.mu.Lock()
@@ -462,7 +469,7 @@ func TestCheckMessageSend_BlocksOnMonthFlow(t *testing.T) {
 	counter := &fakeCounter{messagesMonth: 1000, storageBytes: 0}
 	e := newEnforcerWithReader(store, counter, defaultsForTest(), 0)
 
-	err := e.CheckMessageSend(context.Background(), "user1")
+	err := e.CheckMessageSend(context.Background(), "user1", 1)
 	le, ok := IsLimitExceeded(err)
 	if !ok {
 		t.Fatalf("CheckMessageSend at month cap = %v, want LimitExceededError", err)
@@ -477,7 +484,7 @@ func TestCheckMessageSend_BlocksOnStorage(t *testing.T) {
 	counter := &fakeCounter{messagesMonth: 10, storageBytes: 1024 * 1024}
 	e := newEnforcerWithReader(store, counter, defaultsForTest(), 0)
 
-	err := e.CheckMessageSend(context.Background(), "user1")
+	err := e.CheckMessageSend(context.Background(), "user1", 1)
 	le, ok := IsLimitExceeded(err)
 	if !ok {
 		t.Fatalf("CheckMessageSend at storage cap = %v, want LimitExceededError", err)
@@ -501,7 +508,7 @@ func TestCheckMessageSend_MonthCapTakesPrecedenceOverStorage(t *testing.T) {
 	counter := &fakeCounter{messagesMonth: 1000, storageBytes: 1024}
 	e := newEnforcerWithReader(store, counter, defaultsForTest(), 0)
 
-	err := e.CheckMessageSend(context.Background(), "user1")
+	err := e.CheckMessageSend(context.Background(), "user1", 1)
 	le, ok := IsLimitExceeded(err)
 	if !ok {
 		t.Fatalf("want LimitExceededError")

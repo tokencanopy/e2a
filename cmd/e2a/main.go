@@ -41,6 +41,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/relay"
 	"github.com/tokencanopy/e2a/internal/senderidentity"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 	"github.com/tokencanopy/e2a/internal/sendrate"
 	"github.com/tokencanopy/e2a/internal/telemetry"
@@ -104,11 +105,47 @@ func main() {
 
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	bootstrapEmail := flag.String("bootstrap-email", "", "create a user with this email and print a fresh API key, then exit (for self-host first-run)")
+
+	// Sending-protection local operator commands (Task 2). Each runs after
+	// migrations and exits without starting the server.
+	var spFlags sendingProtectionFlags
+	flag.BoolVar(&spFlags.inspect, "sending-protection-policy", false, "print the stored runtime policy state and the hash this config's policy would activate, then exit")
+	flag.BoolVar(&spFlags.activate, "activate-sending-protection-policy", false, "CAS-activate this config's sending-protection policy (requires -expected-generation, -expected-policy-sha256, -reason), then exit")
+	flag.Int64Var(&spFlags.expectedGeneration, "expected-generation", -1, "policy generation the operator reviewed (activation CAS)")
+	flag.StringVar(&spFlags.expectedPolicySHA, "expected-policy-sha256", "", "reviewed canonical policy hash (activation CAS)")
+	flag.BoolVar(&spFlags.grandfather, "grandfather-current-sending-domains", false, "one-shot: exempt currently sending-verified domains in the same transaction as the activation")
+	flag.BoolVar(&spFlags.register, "register-sending-protection-operator-recipients", false, "append-only-register the local operator recipient map's commitments (requires -reason), then exit")
+	flag.BoolVar(&spFlags.attest, "attest-sending-protection-runtime", false, "CAS-write the billing runtime attestation (requires the expected revision/hash, digests, contracts, -reason), then exit")
+	flag.Int64Var(&spFlags.expectedAttestationRevision, "expected-attestation-revision", -1, "attestation revision the operator reviewed (attestation CAS)")
+	flag.StringVar(&spFlags.expectedAttestationSHA, "expected-attestation-sha256", "", "reviewed canonical four-field attestation hash (attestation CAS)")
+	flag.StringVar(&spFlags.activeBillingDigest, "active-billing-digest", "", "verified active billing image digest")
+	flag.IntVar(&spFlags.activeBillingContract, "active-billing-contract", -1, "verified active billing contract level")
+	flag.StringVar(&spFlags.rollbackBillingDigest, "rollback-billing-digest", "", "verified rollback billing image digest")
+	flag.IntVar(&spFlags.rollbackBillingContract, "rollback-billing-contract", -1, "verified rollback billing contract level")
+	flag.BoolVar(&spFlags.capabilities, "print-capabilities", false, "print the machine-readable capability marker (contract level, policy source, operator commitments), then exit")
+	flag.StringVar(&spFlags.reason, "reason", "", "nonblank reason recorded in the audit row of a sending-protection mutation")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Sending-protection trust roots, validated before anything else runs.
+	// The typed policy owns the invariants; the secret loaders reject a
+	// malformed value without printing it. Fail closed at boot: a deployment
+	// that cannot express its own policy must not serve mail.
+	spPolicy, err := sendingpolicy.FromConfig(cfg)
+	if err != nil {
+		log.Fatalf("Sending protection config invalid: %v", err)
+	}
+	spSource, err := sendingpolicy.SourceFromConfig(cfg)
+	if err != nil {
+		log.Fatalf("Sending protection config invalid: %v", err)
+	}
+	spSecrets, err := sendingpolicy.LoadSecretsFromEnv(spSource, spPolicy)
+	if err != nil {
+		log.Fatalf("Sending protection startup validation failed: %v", err)
 	}
 
 	// Trash retention (trash.retention_days / E2A_TRASH_RETENTION_DAYS,
@@ -148,6 +185,15 @@ func main() {
 	// that registers on the shared client.
 	if err := jobs.Migrate(ctx, pool); err != nil {
 		log.Fatalf("River schema migration failed: %v", err)
+	}
+
+	// Sending-protection operator command mode: run the selected command and
+	// exit. Placed after migrations so the singleton rows exist.
+	if spFlags.commandRequested() {
+		if err := runSendingProtectionCommand(ctx, cfg, pool, spSecrets, &spFlags, os.Stdout); err != nil {
+			log.Fatalf("Sending protection command failed: %v", err)
+		}
+		return
 	}
 
 	// Bootstrap mode: create a user + API key and exit. Used by self-host
@@ -277,6 +323,12 @@ func main() {
 	var jobsClient *jobs.Client
 	var registrars []jobs.Registrar
 
+	// Read-side usage store. Built up here rather than beside the limits
+	// enforcer that also consumes it, because the sender-identity registrar
+	// below reads account classes through it to classify (tag) the SES
+	// identities it provisions.
+	usageStore := usage.NewStore(pool)
+
 	// Usage tracking is hosted-deployment infrastructure (counts every
 	// inbound/outbound message into usage_events + usage_summaries for downstream
 	// billing reconciliation). Self-hosters get the no-op tracker by default — the
@@ -367,11 +419,30 @@ func main() {
 		if perr != nil {
 			log.Fatalf("sender identity: build SES provider: %v", perr)
 		}
+		// Classification tags on every identity e2a provisions, so a cleanup
+		// pass can judge one from AWS alone. Reuses the metrics build label as
+		// the provisioner stamp — it is already the deployed release string.
+		provider = provider.WithIdentityTags(cfg.DeploymentName, cfg.Metrics.Build, cfg.SenderIdentity.FixtureTTL)
 		senderMgr = senderidentity.NewManager(
-			senderidentity.NewStoreAdapter(store),
+			senderidentity.NewStoreAdapter(store, func(ctx context.Context, userID string) (string, error) {
+				class, err := usageStore.GetAccountClass(ctx, userID)
+				return string(class), err
+			}),
 			provider,
 			senderIdentityEventFirer(outboxPublisher),
-			senderidentity.Config{LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat},
+			senderidentity.Config{
+				LegacyJobCompat: cfg.SenderIdentity.LegacyJobCompat,
+				// Orphan reclaim reads the SAME deployment name the tags were
+				// written with, so an identity can only ever be reclaimed by
+				// the deployment that created it.
+				Reclaim: senderidentity.ReclaimConfig{
+					Enabled:     cfg.SenderIdentity.ReapOrphans,
+					Deployment:  cfg.DeploymentName,
+					Zones:       cfg.SenderIdentity.ReclaimZones,
+					MinAge:      cfg.SenderIdentity.ReclaimMinAge,
+					MaxPerSweep: cfg.SenderIdentity.ReclaimMaxPerSweep,
+				},
+			},
 		)
 		registrars = append(registrars, senderMgr)
 	}
@@ -566,7 +637,8 @@ func main() {
 	// today NewOIDCAuth only fails to construct if E2A is misconfigured in a
 	// way config.Validate() would already have caught.
 	oidcCtx, oidcCancel := context.WithCancel(ctx)
-	oidcAuth, err := auth.NewOIDCAuth(oidcCtx, cfg.OIDC, store, cfg.IsProduction(), cfg.HTTP.PublicURL)
+	oidcAuth, err := auth.NewOIDCAuth(oidcCtx, cfg.OIDC, store, cfg.IsProduction(), cfg.HTTP.PublicURL,
+		auth.WithOIDCMetrics(metrics))
 	if err != nil {
 		log.Fatalf("Failed to initialize OIDC login: %v", err)
 	}
@@ -689,7 +761,6 @@ func main() {
 	// run a provisioner get the generous config defaults applied to
 	// every user — effectively unlimited unless they tighten the
 	// `limits:` config block.
-	usageStore := usage.NewStore(pool)
 	enforcer := limits.NewEnforcer(
 		limits.NewStore(pool),
 		usageStore,
@@ -698,6 +769,7 @@ func main() {
 			MaxAgents:        cfg.Limits.MaxAgents,
 			MaxDomains:       cfg.Limits.MaxDomains,
 			MaxMessagesMonth: cfg.Limits.MaxMessagesMonth,
+			MaxMessagesDay:   cfg.Limits.MaxMessagesDay,
 			MaxStorageBytes:  cfg.Limits.MaxStorageBytes,
 			// Row-less fallback for the outbound-footer entitlement — the
 			// `outbound_footer:` block's default_enabled, not `limits:`.
@@ -714,12 +786,19 @@ func main() {
 	// otherwise an expires-to-approve hold ships unfootered while the identical
 	// human-approved hold does not.
 	hitlWorker.SetOutboundFooterResolver(api.OutboundFooterForAccount)
-	// Fire-time monthly-cap gate for scheduled sends: enforce the cap in the
-	// month a scheduled send actually fires (accept-time enforcement can't know a
-	// future fire month). Over-cap → refuse terminally; a transient lookup error
-	// fails open so a glitch never drops a legitimate send.
-	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string) (bool, error) {
-		return scheduledSendMonthlyQuotaResult(enforcer.CheckMessageSend(ctx, userID))
+	// TTL auto-approve releases held drafts that were never metered at accept;
+	// give the sweep the same flow-cap re-check the human approve funnel runs.
+	hitlWorker.SetQuotaCheck(func(ctx context.Context, userID string, units int) error {
+		return enforcer.CheckMessageSend(ctx, userID, units)
+	})
+	// Fire-time flow-cap gate for deferred-settlement sends (scheduled +
+	// review-released): enforce the caps in the window the send actually
+	// fires, with the claim's real recipient-unit count. Monthly over-cap →
+	// terminal refusal; daily over-cap → deferral to next UTC midnight; a
+	// transient lookup error fails open so a glitch never drops a legitimate
+	// send.
+	outboundSendStore.SetScheduledSendQuota(func(ctx context.Context, userID string, units int) (string, bool, error) {
+		return scheduledSendQuotaResult(enforcer.CheckMessageSend(ctx, userID, units))
 	})
 	api.SetUsageStore(usageStore)
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
@@ -1064,18 +1143,23 @@ func main() {
 	<-riverDone
 }
 
-// scheduledSendMonthlyQuotaResult narrows the general send-limit check to the
-// fire-time concern for scheduled messages. The message is already persisted,
-// so a later storage-cap breach must not cancel it; only the monthly message
-// cap for the month in which it fires is terminal.
-func scheduledSendMonthlyQuotaResult(err error) (bool, error) {
+// scheduledSendQuotaResult narrows the general send-limit check to the
+// fire-time concern for deferred-settlement messages (scheduled and
+// review-released). The message is already persisted, so a later storage-cap
+// breach must not cancel it; only the FLOW caps matter at fire time, and the
+// exceeded resource stem is returned so the caller can distinguish terminal
+// monthly exhaustion from a recoverable daily deferral.
+func scheduledSendQuotaResult(err error) (resource string, over bool, retErr error) {
 	if err == nil {
-		return false, nil
+		return "", false, nil
 	}
 	if limitErr, ok := limits.IsLimitExceeded(err); ok {
-		return limitErr.Resource == "messages_month", nil
+		if limitErr.Resource == "messages_month" || limitErr.Resource == "messages_day" {
+			return limitErr.Resource, true, nil
+		}
+		return "", false, nil
 	}
-	return false, err
+	return "", false, err
 }
 
 // isTerminal reports whether f is an interactive terminal rather than a pipe or

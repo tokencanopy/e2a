@@ -21,7 +21,11 @@ type fakeStore struct {
 	// status holds the current sending status per domain. Absence ⇒ row gone.
 	status map[string]Status
 	// owners maps domain → owning user_id ("" or absent ⇒ no owner).
-	owners       map[string]string
+	owners map[string]string
+	// accountClass maps user_id → usage account class (absent ⇒ unknown).
+	accountClass    map[string]string
+	accountClassErr error
+
 	incarnations map[string]string
 	verified     map[string]bool
 	managed      map[string]string
@@ -77,6 +81,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		status:               map[string]Status{},
 		owners:               map[string]string{},
+		accountClass:         map[string]string{},
 		incarnations:         map[string]string{},
 		verified:             map[string]bool{},
 		managed:              map[string]string{},
@@ -380,6 +385,17 @@ func (s *fakeStore) DomainExists(ctx context.Context, domain string) (bool, erro
 	}
 	_, ok := s.status[domain]
 	return ok, nil
+}
+
+// AccountClassForUser mirrors the real adapter: an unseeded user reads as ""
+// ("class unknown"), which is a valid answer rather than an error.
+func (s *fakeStore) AccountClassForUser(ctx context.Context, userID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.accountClassErr != nil {
+		return "", s.accountClassErr
+	}
+	return s.accountClass[userID], nil
 }
 
 func (s *fakeStore) ListManagedSendingIdentityDomains(ctx context.Context) ([]string, map[string]bool, error) {

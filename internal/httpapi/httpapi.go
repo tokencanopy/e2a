@@ -78,6 +78,10 @@ type ConversationGetter func(ctx context.Context, agentID, conversationID string
 // legacy columns were dropped (migration 029). Handlers pass "".
 type AgentCreator func(ctx context.Context, email, domain, name, webhookURL, agentMode, userID string) (*identity.AgentIdentity, error)
 
+// AgentCreatorWithLimit mirrors store.CreateAgentWithLimit, the race-proof
+// source of truth for max_agents. maxAgents <= 0 means unlimited.
+type AgentCreatorWithLimit func(ctx context.Context, email, domain, name, userID string, maxAgents int) (*identity.AgentIdentity, error)
+
 // DomainDeleteIdemCompleter commits the keyed operation record in the same
 // transaction as the domain deletion and its incarnation-bound teardown
 // receipt. A post-commit process crash therefore cannot leave the key stale
@@ -166,7 +170,10 @@ type Deps struct {
 	ListConversations ConversationLister
 	GetConversation   ConversationGetter
 
-	CreateAgent          AgentCreator
+	CreateAgent AgentCreator
+	// CreateAgentWithLimit is the create path handleCreateAgent actually
+	// uses; CreateAgent stays for the other callers of store.CreateAgent.
+	CreateAgentWithLimit AgentCreatorWithLimit
 	LookupDomain         DomainLookup
 	LookupCoveringDomain CoveringDomainLookup
 	// ResolveMX backs the required create-time subdomain MX gate.
@@ -253,9 +260,11 @@ type Deps struct {
 	// Optional — nil disables the wait valve (accepted is returned immediately).
 	PollSendOutcome func(ctx context.Context, messageID string) (identity.SendOutcome, error)
 	// HITL approve/reject (the held-draft decision)
-	ApprovePending     func(ctx context.Context, userID, messageID, expectedAgentEmail string, ovr agent.ApproveOverrides, idemCompleteTx agent.ApproveIdemCompleter) (*identity.Message, *agent.OutboundError)
-	RejectPending      func(ctx context.Context, userID, messageID, expectedAgentEmail, reason string) (*identity.Message, *agent.OutboundError)
-	EnforceMessageSend func(ctx context.Context, userID string) error
+	ApprovePending func(ctx context.Context, userID, messageID, expectedAgentEmail string, ovr agent.ApproveOverrides, idemCompleteTx agent.ApproveIdemCompleter) (*identity.Message, *agent.OutboundError)
+	RejectPending  func(ctx context.Context, userID, messageID, expectedAgentEmail, reason string) (*identity.Message, *agent.OutboundError)
+	// EnforceMessageSend pre-checks the outbound flow + storage caps for a
+	// send of `units` recipient-deliveries (deduplicated to ∪ cc ∪ bcc).
+	EnforceMessageSend func(ctx context.Context, userID string, units int) error
 	// Inbound review release — the held-screening decision (design 2026-06-22 §5).
 	// GetReviewMessage resolves a held message's direction so /approve+/reject can
 	// branch (it intentionally sees held inbound statuses, scoped to the resolved

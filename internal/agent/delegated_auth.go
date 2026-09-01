@@ -16,11 +16,24 @@ type DelegatedVerifier interface {
 	Verify(ctx context.Context, bearer string) (*delegated.Claims, error)
 }
 
+// DelegatedIdentityLookup is the narrow store seam used after a delegated
+// token has been cryptographically verified. identity.Store satisfies it.
+type DelegatedIdentityLookup interface {
+	GetUserByExternalPrincipal(ctx context.Context, issuer, subject string) (*identity.User, error)
+}
+
 // SetDelegatedVerifier wires the delegated-token verifier (config
 // delegated.enabled). Nil (the default) keeps delegated-owned tokens
 // failing authentication — ownership itself is decided by Classify and
 // never depends on this being set.
 func (a *API) SetDelegatedVerifier(v DelegatedVerifier) { a.delegated = v }
+
+// SetDelegatedIdentityLookup replaces the external-principal lookup seam.
+// Production uses the identity.Store installed by NewAPI; tests use this to
+// distinguish a genuine store failure from request cancellation.
+func (a *API) SetDelegatedIdentityLookup(lookup DelegatedIdentityLookup) {
+	a.delegatedLookup = lookup
+}
 
 // errDelegatedInvalid classifies every delegated 401: the bare Bearer
 // challenge with no check-specific detail (which check failed — type,
@@ -50,8 +63,14 @@ func (a *API) principalFromDelegatedToken(r *http.Request, bearer string) (*iden
 		a.emit().DelegatedAuthFailure("invalid_token")
 		return nil, errDelegatedInvalid
 	}
-	user, err := a.store.GetUserByExternalPrincipal(r.Context(), claims.Issuer, claims.Subject)
+	user, err := a.delegatedLookup.GetUserByExternalPrincipal(r.Context(), claims.Issuer, claims.Subject)
 	if err != nil {
+		if isDelegatedRequestCancellation(r.Context(), err) {
+			// The caller went away while the lookup was in flight. Preserve the
+			// fail-closed 503 class for any observer still waiting, but do not
+			// turn caller-controlled disconnects into an availability metric.
+			return nil, fmt.Errorf("%w: delegated request canceled", identity.ErrAuthUnavailable)
+		}
 		// The token may well be valid — the mapping store couldn't say.
 		// 503, not 401, so a database blip doesn't read as revocation.
 		a.emit().DelegatedAuthFailure("identity_store_failure")
@@ -64,4 +83,8 @@ func (a *API) principalFromDelegatedToken(r *http.Request, bearer string) (*iden
 		return nil, errDelegatedInvalid
 	}
 	return &identity.Principal{User: user, Scope: identity.ScopeAccount}, nil
+}
+
+func isDelegatedRequestCancellation(ctx context.Context, err error) bool {
+	return errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled)
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/limits"
 )
 
 // coveringParentDep wires the covering-parent lookup used by the subdomain
@@ -459,6 +460,53 @@ func TestCreateAgentLimitExceeded(t *testing.T) {
 		if d, _ := e["details"].(map[string]any); d == nil || d["resource"] != "agents" {
 			t.Fatalf("missing limit details: %v", body)
 		}
+	}
+}
+
+// CreateAgentWithLimit must still 402 an over-cap caller when
+// EnforceAgentCreate is unwired (nil), riding the bare AgentLimitExceededError
+// rather than EnforceAgentCreate's richer envelope.
+func TestCreateAgentLimitExceededWithoutEnforcer(t *testing.T) {
+	srv := testServer(t, func(d *Deps) { d.EnforceAgentCreate = nil })
+	code, body := postJSON(t, srv.URL+"/v1/agents", "overcap", map[string]any{
+		"email": "bot@acme.com",
+	})
+	if code != 402 || errCode(body) != "limit_exceeded" {
+		t.Fatalf("want 402 limit_exceeded, got %d %v", code, body)
+	}
+	e, _ := body["error"].(map[string]any)
+	if e == nil {
+		t.Fatalf("missing error envelope: %v", body)
+	}
+	d, _ := e["details"].(map[string]any)
+	if d == nil || d["resource"] != "agents" {
+		t.Fatalf("missing limit details: %v", body)
+	}
+	// 10 is testServer's default GetLimits MaxAgents.
+	if d["limit"] != float64(10) || d["current"] != float64(10) {
+		t.Fatalf("want limit=current=10 from AgentLimitExceededError, got %v", d)
+	}
+}
+
+// A GetLimits failure must not fall through with maxAgents left at its zero
+// value, which CreateAgentWithLimit reads as unlimited.
+func TestCreateAgentEnforcesWhenGetLimitsErrors(t *testing.T) {
+	calledWith := -1
+	srv := testServer(t, func(d *Deps) {
+		d.GetLimits = func(ctx context.Context, userID string) (limits.Limits, error) {
+			return limits.Limits{}, errors.New("connection refused")
+		}
+		d.CreateAgentWithLimit = func(ctx context.Context, email, domain, name, userID string, maxAgents int) (*identity.AgentIdentity, error) {
+			calledWith = maxAgents
+			return &identity.AgentIdentity{ID: email, RegisteredDomain: domain, Email: email, Name: name, UserID: userID}, nil
+		}
+	})
+	code, body := postJSON(t, srv.URL+"/v1/agents", "good", map[string]any{"email": "new-agent@acme.com"})
+	if code != 500 || errCode(body) != "internal_error" {
+		t.Fatalf("want 500 internal_error when GetLimits fails, got %d %v", code, body)
+	}
+	if calledWith != -1 {
+		t.Fatalf("CreateAgentWithLimit must not be called after GetLimits fails, but it was called with maxAgents=%d", calledWith)
 	}
 }
 

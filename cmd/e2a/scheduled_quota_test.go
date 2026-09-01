@@ -7,19 +7,27 @@ import (
 	"github.com/tokencanopy/e2a/internal/limits"
 )
 
-func TestScheduledSendMonthlyQuotaResult(t *testing.T) {
+func TestScheduledSendQuotaResult(t *testing.T) {
 	transient := errors.New("limits unavailable")
 	tests := []struct {
-		name     string
-		err      error
-		wantOver bool
-		wantErr  error
+		name         string
+		err          error
+		wantResource string
+		wantOver     bool
+		wantErr      error
 	}{
 		{name: "under cap", err: nil},
 		{
-			name:     "monthly message cap",
-			err:      &limits.LimitExceededError{Resource: "messages_month", Limit: 100, Current: 100},
-			wantOver: true,
+			name:         "monthly send cap",
+			err:          &limits.LimitExceededError{Resource: "messages_month", Limit: 100, Current: 100},
+			wantResource: "messages_month",
+			wantOver:     true,
+		},
+		{
+			name:         "daily send cap",
+			err:          &limits.LimitExceededError{Resource: "messages_day", Limit: 100, Current: 100},
+			wantResource: "messages_day",
+			wantOver:     true,
 		},
 		{
 			name: "storage cap does not cancel an accepted send",
@@ -30,9 +38,12 @@ func TestScheduledSendMonthlyQuotaResult(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			over, err := scheduledSendMonthlyQuotaResult(tt.err)
+			resource, over, err := scheduledSendQuotaResult(tt.err)
 			if over != tt.wantOver {
 				t.Fatalf("over = %v, want %v", over, tt.wantOver)
+			}
+			if resource != tt.wantResource {
+				t.Fatalf("resource = %q, want %q", resource, tt.wantResource)
 			}
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tt.wantErr)

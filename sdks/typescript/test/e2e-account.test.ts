@@ -43,6 +43,13 @@ describe.skipIf(!env)("ts sdk live e2e: account", () => {
     recordCovered("account.get");
   });
 
+  // Explicit timeout: the export walks every section of the account's data,
+  // so its cost scales with account population and with whatever load the
+  // environment is under — in the release pipeline this suite runs right
+  // after the conformance battery, against a still-draining staging DB, and
+  // vitest's 5s default proved marginal there (2026-08-28: two pipeline
+  // failures at exactly the default). Same rule as the grouped-metrics test
+  // below: do not "tidy" this back to the default.
   it("export() returns a UserExport with the required sections", async () => {
     const exported = await client.account.export();
     expect(exported.generatedAt).toBeTruthy();
@@ -52,7 +59,7 @@ describe.skipIf(!env)("ts sdk live e2e: account", () => {
     expect(Array.isArray(exported.agents)).toBe(true);
     expect(Array.isArray(exported.apiKeys)).toBe(true);
     recordCovered("account.export");
-  });
+  }, 30_000);
 
   it("suppressions.list returns the envelope shape (possibly empty)", async () => {
     const list = await client.account.suppressions.list().toArray({ limit: 100 });

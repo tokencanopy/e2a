@@ -40,7 +40,7 @@ interface Page {
 }
 
 async function del(email: string): Promise<void> {
-  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+  await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
 }
 
 // createHeldReview: throwaway agent -> hold-all-outbound -> send. Returns the

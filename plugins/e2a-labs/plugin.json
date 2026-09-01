@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "e2a-labs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Experimental autonomous workflows for the e2a agent email gateway. Requires the core e2a plugin for MCP tools and authentication.",
   "author": {
     "name": "TokenCanopy",

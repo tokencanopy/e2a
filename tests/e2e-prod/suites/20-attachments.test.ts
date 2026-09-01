@@ -331,7 +331,7 @@ function pathAndQuery(absoluteUrl: string): string {
 
 after(async () => {
   for (const email of createdAgents) {
-    const del = await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE`);
+    const del = await client.delete(`/v1/agents/${encodeURIComponent(email)}?confirm=DELETE&permanent=true`);
     if (!(del.status === 204 || del.status === 200)) {
       fail(SUITE, "cleanup", `failed to delete throwaway agent ${email} (got ${del.status})`, del.raw.slice(0, 200));
     }

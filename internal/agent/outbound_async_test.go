@@ -145,7 +145,7 @@ func (d *timedAsyncDeliverer) Deliver(context.Context, *outboundsend.SendJob) ou
 
 type legacyOnlyUsageTracker struct{}
 
-func (legacyOnlyUsageTracker) RecordAndCheck(context.Context, string, string, string, string) (bool, error) {
+func (legacyOnlyUsageTracker) RecordAndCheck(context.Context, string, string, string, string, int) (bool, error) {
 	return true, nil
 }
 
@@ -416,7 +416,9 @@ func TestSendWorker_ScheduledSendOverMonthlyQuotaRefusedAtFire(t *testing.T) {
 	}
 
 	adapter := agent.NewOutboundSendStore(store, outbox, usage.NewNoopUsageTracker())
-	adapter.SetScheduledSendQuota(func(context.Context, string) (bool, error) { return true, nil }) // over cap at fire
+	adapter.SetScheduledSendQuota(func(context.Context, string, int) (string, bool, error) {
+		return "messages_month", true, nil // over the monthly cap at fire → terminal refusal
+	})
 	deliverer := &countingAsyncDeliverer{}
 	if err := outboundsend.NewSendWorker(adapter, deliverer).Work(ctx, workerJobWithID(res.MessageID, *sendJobID, 1)); err != nil {
 		t.Fatalf("worker.Work: %v", err)

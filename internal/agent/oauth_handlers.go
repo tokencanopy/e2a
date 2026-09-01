@@ -864,12 +864,11 @@ func logTokenError(req fosite.AccessRequester, stage, reqID string, err error) {
 //     appropriate RFC 6749 §4.1.2.1 error response itself on failure
 //     — either a redirect to redirect_uri?error=… (when the URI was
 //     verified-safe) or a direct 400 (when it wasn't).
-//  2. Check the user's session cookie. No session → 302 to
-//     /api/auth/login. Today we don't carry a return_to (port lands
-//     in a later slice); operators see a log line on every such
-//     redirect so the missing piece is visible.
-//  3. With a session, 302 to {publicURL}/oauth/consent?<params>. The
-//     consent UI in web/ POSTs back to /oauth2/consent.
+//  2. Check that user auth is configured. Signed-in and signed-out users both
+//     continue to {publicURL}/oauth/consent?<params>; the signed-out UI is the
+//     configured provider chooser. Its return_to carries this exact validated
+//     authorize request so either login door resumes the same OAuth flow.
+//  3. The signed-in consent UI POSTs back to /oauth2/consent.
 func (a *API) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	if a.oauthProvider == nil {
 		http.NotFound(w, r)
@@ -895,20 +894,6 @@ func (a *API) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user auth not configured on this deployment", http.StatusServiceUnavailable)
 		return
 	}
-	if user := a.userAuth.AuthenticateRequest(r); user == nil {
-		// Bounce through Google login, then resume back here. We only
-		// pass the path portion (not host/scheme) so the same-origin
-		// invariant of validateReturnToPath holds. After callback the
-		// user lands back on /oauth2/authorize with the same params
-		// and the now-valid session cookie.
-		loginURL, _ := url.Parse(strings.TrimRight(a.publicURL, "/") + "/api/auth/login")
-		q := loginURL.Query()
-		q.Set("return_to", r.URL.RequestURI())
-		loginURL.RawQuery = q.Encode()
-		http.Redirect(w, r, loginURL.String(), http.StatusFound)
-		return
-	}
-
 	// 302 to consent UI with all authorize params re-passed. The
 	// consent page hidden-fields these back into its POST so we can
 	// re-parse the request via fosite without trusting a server-side
@@ -916,6 +901,14 @@ func (a *API) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	// adds operational complexity for little gain).
 	consentURL, _ := url.Parse(strings.TrimRight(a.publicURL, "/") + "/oauth/consent")
 	consentURL.RawQuery = r.URL.RawQuery
+	if user := a.userAuth.AuthenticateRequest(r); user == nil {
+		// The chooser is the only new hop. Preserve the exact same-origin
+		// request URI independently of the re-passed form parameters so both
+		// TokenCanopy and Google resume byte-for-byte equivalent OAuth input.
+		q := consentURL.Query()
+		q.Set("return_to", r.URL.RequestURI())
+		consentURL.RawQuery = q.Encode()
+	}
 	http.Redirect(w, r, consentURL.String(), http.StatusFound)
 }
 
