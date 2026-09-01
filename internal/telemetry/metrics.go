@@ -228,7 +228,8 @@ type Metrics interface {
 	// OIDCCallback counts browser-login callback outcomes. outcome ∈
 	// {success, discovery_unavailable, state_invalid, provider_rejected,
 	// provider_failed, response_invalid, token_exchange_failed, id_token_invalid,
-	// claim_invalid, unknown_user, session_failed, post_login_failed}; trust ∈
+	// claim_invalid, unknown_user, user_lookup_failed, request_canceled,
+	// session_failed, post_login_failed}; trust ∈
 	// {public, trusted}. "trusted" means the server-authenticated browser
 	// transaction state and cookies were validated before the outcome.
 	// statusClass is the e2a response class. Labels are bounded enums and

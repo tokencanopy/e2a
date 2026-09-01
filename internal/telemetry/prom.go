@@ -115,7 +115,8 @@ var (
 	oidcCallbackSet     = set(
 		"success", "discovery_unavailable", "state_invalid", "provider_rejected", "provider_failed",
 		"response_invalid", "token_exchange_failed", "id_token_invalid",
-		"claim_invalid", "unknown_user", "session_failed", "post_login_failed",
+		"claim_invalid", "unknown_user", "user_lookup_failed", "request_canceled",
+		"session_failed", "post_login_failed",
 	)
 	oidcCallbackTrustSet = set("public", "trusted")
 	provisioningSet      = set(

@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -137,6 +139,16 @@ func setupOIDC(t *testing.T) *oidcFixture {
 
 func setupOIDCForApp(t *testing.T, redirectURL, baseURL string) *oidcFixture {
 	t.Helper()
+	return setupOIDCForAppWithOptions(t, redirectURL, baseURL)
+}
+
+func setupOIDCWithOptions(t *testing.T, opts ...auth.OIDCOption) *oidcFixture {
+	t.Helper()
+	return setupOIDCForAppWithOptions(t, testOIDCRedirectURL, "http://app.example.com", opts...)
+}
+
+func setupOIDCForAppWithOptions(t *testing.T, redirectURL, baseURL string, opts ...auth.OIDCOption) *oidcFixture {
+	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
@@ -173,9 +185,12 @@ func setupOIDCForApp(t *testing.T, redirectURL, baseURL string) *oidcFixture {
 		RedirectURL:  redirectURL,
 		UserIDClaim:  testOIDCUserIDClaim,
 	}
-	fx.oidc, err = auth.NewOIDCAuth(context.Background(), cfg, fx.store, false, baseURL,
+	oidcOpts := []auth.OIDCOption{
 		auth.WithOIDCDiscoveryBackoff(testOIDCDiscoveryInitialBackoff, testOIDCDiscoveryMaxBackoff),
-		auth.WithOIDCMetrics(fx.metrics))
+		auth.WithOIDCMetrics(fx.metrics),
+	}
+	oidcOpts = append(oidcOpts, opts...)
+	fx.oidc, err = auth.NewOIDCAuth(context.Background(), cfg, fx.store, false, baseURL, oidcOpts...)
 	if err != nil {
 		t.Fatalf("NewOIDCAuth: %v", err)
 	}
@@ -1046,6 +1061,12 @@ func TestOIDCCallbackRejectsUnknownUserWithoutProvisioning(t *testing.T) {
 	fx := setupOIDC(t)
 	fx.userID = "usr_does_not_exist"
 	tx := beginOIDCLogin(t, fx)
+
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
 	w := httptest.NewRecorder()
 	fx.oidc.HandleCallback(w, callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)))
 	if w.Code != http.StatusForbidden {
@@ -1055,6 +1076,88 @@ func TestOIDCCallbackRejectsUnknownUserWithoutProvisioning(t *testing.T) {
 		t.Fatal("OIDC callback must never provision an unknown user")
 	}
 	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "unknown_user", trust: "trusted", statusClass: "4xx"})
+	if strings.Contains(logs.String(), fx.userID) {
+		t.Fatalf("unknown user ID leaked into callback log: %q", logs.String())
+	}
+}
+
+func TestOIDCCallbackReturnsTemporaryFailureForUserLookupError(t *testing.T) {
+	const (
+		userID        = "usr_lookup_failure"
+		failureMarker = "synthetic-db-detail provider=example.test"
+	)
+	fx := setupOIDCWithOptions(t, auth.WithOIDCUserLookup(func(context.Context, string) (*identity.User, error) {
+		return nil, errors.New(failureMarker)
+	}))
+	fx.userID = userID
+	tx := beginOIDCLogin(t, fx)
+
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Body.String(); got != "login temporarily unavailable\n" {
+		t.Fatalf("body = %q, want generic temporary failure", got)
+	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "user_lookup_failed", trust: "trusted", statusClass: "5xx"})
+
+	line := logs.String()
+	for _, forbidden := range []string{failureMarker, "synthetic-db-detail", "example.test", userID} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("lookup detail %q leaked into callback log: %q", forbidden, line)
+		}
+	}
+	for _, want := range []string{"category=user_lookup_failed", "trust=trusted", "status_class=5xx"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("bounded callback log missing %q: %q", want, line)
+		}
+	}
+}
+
+func TestOIDCCallbackReturnsTemporaryFailureForRequestCancellationWithoutOutageLog(t *testing.T) {
+	const (
+		userID       = "usr_canceled_lookup"
+		cancelMarker = "synthetic-cancel-detail provider=example.test"
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	fx := setupOIDCWithOptions(t, auth.WithOIDCUserLookup(func(context.Context, string) (*identity.User, error) {
+		cancel()
+		return nil, fmt.Errorf("%s: %w", cancelMarker, context.Canceled)
+	}))
+	fx.userID = userID
+	tx := beginOIDCLogin(t, fx)
+
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+	w := httptest.NewRecorder()
+	req := callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)).WithContext(ctx)
+	fx.oidc.HandleCallback(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Body.String(); got != "login temporarily unavailable\n" {
+		t.Fatalf("body = %q, want generic temporary failure", got)
+	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "request_canceled", trust: "trusted", statusClass: "5xx"})
+
+	line := logs.String()
+	for _, forbidden := range []string{cancelMarker, "synthetic-cancel-detail", "example.test", userID} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("cancellation detail %q leaked into callback log: %q", forbidden, line)
+		}
+	}
+	if strings.Contains(line, "OIDC callback outcome") {
+		t.Fatalf("caller cancellation emitted an outage-shaped callback log: %q", line)
+	}
 }
 
 func TestOIDCLoginUsesSecureCookiesInProduction(t *testing.T) {

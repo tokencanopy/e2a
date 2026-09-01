@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/oauth2"
 
 	"github.com/tokencanopy/e2a/internal/config"
@@ -87,6 +88,7 @@ type OIDCAuth struct {
 	discoveryTimeout    time.Duration
 	discoveryDone       chan<- struct{}
 	metrics             telemetry.Metrics
+	userLookup          func(context.Context, string) (*identity.User, error)
 }
 
 // OIDCOption configures optional, non-default behavior of NewOIDCAuth.
@@ -136,6 +138,18 @@ func WithOIDCMetrics(metrics telemetry.Metrics) OIDCOption {
 	}
 }
 
+// WithOIDCUserLookup replaces the existing-user lookup used after the ID
+// token and configured user-id claim have been verified. Production callers
+// use identity.Store.GetUserByID; this narrow option lets tests inject lookup
+// failures and cancellation without destabilizing a real database.
+func WithOIDCUserLookup(lookup func(context.Context, string) (*identity.User, error)) OIDCOption {
+	return func(oa *OIDCAuth) {
+		if lookup != nil {
+			oa.userLookup = lookup
+		}
+	}
+}
+
 // NewOIDCAuth returns nil without performing discovery when OIDC is disabled.
 // Enabled configurations construct the handler synchronously -- this call
 // never touches the network -- and start one background goroutine that
@@ -164,6 +178,9 @@ func NewOIDCAuth(ctx context.Context, cfg config.OIDCConfig, store *identity.Sto
 		discoveryMaxBackoff: oidcDiscoveryMaxBackoff,
 		discoveryTimeout:    oidcDiscoveryAttemptTimeout,
 		metrics:             telemetry.NoOp{},
+	}
+	if store != nil {
+		oa.userLookup = store.GetUserByID
 	}
 	for _, opt := range opts {
 		opt(oa)
@@ -548,10 +565,31 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := oa.store.GetUserByID(r.Context(), userID)
-	if err != nil || user == nil {
+	var user *identity.User
+	var lookupErr error
+	if oa.userLookup == nil {
+		lookupErr = errors.New("OIDC user lookup is not configured")
+	} else {
+		user, lookupErr = oa.userLookup(r.Context(), userID)
+	}
+	if errors.Is(lookupErr, pgx.ErrNoRows) {
 		oa.recordCallback("unknown_user", "trusted", http.StatusForbidden, true)
 		http.Error(w, "user not found", http.StatusForbidden)
+		return
+	}
+	if lookupErr != nil && isOIDCRequestCancellation(r.Context(), lookupErr) {
+		// The browser went away while the lookup was in flight. Preserve the
+		// temporary wire class for any observer still waiting, but keep this
+		// caller-controlled path out of outage-shaped failure logs and alerts.
+		oa.recordCallback("request_canceled", "trusted", http.StatusServiceUnavailable, false)
+		http.Error(w, "login temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if lookupErr != nil || user == nil {
+		// The verified identity may be valid, but the store could not answer.
+		// Never expose or log the raw database error or provider-derived user ID.
+		oa.recordCallback("user_lookup_failed", "trusted", http.StatusServiceUnavailable, true)
+		http.Error(w, "login temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	sessionToken, err := oa.store.CreateUserSession(r.Context(), user.ID)
@@ -608,6 +646,10 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	oa.recordCallback("success", "trusted", http.StatusFound, false)
 	http.Redirect(w, r, oa.baseURL+"/dashboard", http.StatusFound)
+}
+
+func isOIDCRequestCancellation(ctx context.Context, err error) bool {
+	return errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled)
 }
 
 // bindOIDCState authenticates the otherwise-opaque state value with the OIDC

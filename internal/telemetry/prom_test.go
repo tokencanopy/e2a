@@ -356,6 +356,25 @@ func TestPromNormalizesUnknownLabelValues(t *testing.T) {
 	}
 }
 
+func TestPromOIDCCallbackLookupOutcomesAreBounded(t *testing.T) {
+	p := NewProm("")
+	p.OIDCCallback("user_lookup_failed", "trusted", "5xx")
+	p.OIDCCallback("request_canceled", "trusted", "5xx")
+
+	out := scrape(t, p)
+	for _, want := range []string{
+		`e2a_oidc_callback_total{outcome="user_lookup_failed",status_class="5xx",trust="trusted"} 1`,
+		`e2a_oidc_callback_total{outcome="request_canceled",status_class="5xx",trust="trusted"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing bounded OIDC lookup series %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("exposition:\n%s", out)
+	}
+}
+
 func TestPromEmitsThreadIdentitySeries(t *testing.T) {
 	p := NewProm("")
 	p.ThreadResolution("rfc_in_reply_to", 2)

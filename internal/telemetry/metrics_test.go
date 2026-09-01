@@ -93,6 +93,8 @@ func TestLogOIDCAndProvisioningLabelsAreAllowlisted(t *testing.T) {
 	l := NewLog()
 	l.OIDCDiscovery(sensitive, sensitive)
 	l.OIDCCallback(sensitive, sensitive, sensitive)
+	l.OIDCCallback("user_lookup_failed", "trusted", "5xx")
+	l.OIDCCallback("request_canceled", "trusted", "5xx")
 	l.Provisioning(sensitive, sensitive, sensitive)
 
 	got := logs.String()
@@ -102,6 +104,8 @@ func TestLogOIDCAndProvisioningLabelsAreAllowlisted(t *testing.T) {
 	for _, want := range []string{
 		"event=oidc.discovery outcome=other status_class=other",
 		"event=oidc.callback outcome=other trust=other status_class=other",
+		"event=oidc.callback outcome=user_lookup_failed trust=trusted status_class=5xx",
+		"event=oidc.callback outcome=request_canceled trust=trusted status_class=5xx",
 		"event=provisioning outcome=other trust=other status_class=other",
 	} {
 		if !strings.Contains(got, want) {
