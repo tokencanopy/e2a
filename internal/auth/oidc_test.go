@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
@@ -60,9 +62,72 @@ type oidcFixture struct {
 	includeUserID     bool
 	userIDClaimValue  any
 	tokenStatus       int
+	tokenFailureBody  string
+	tokenFailureType  string
 	tokenCalls        int
 	expectedChallenge string
 	redirectURL       string
+	metrics           *oidcMetricsRecorder
+}
+
+type oidcMetricEvent struct {
+	outcome     string
+	trust       string
+	statusClass string
+}
+
+type oidcMetricsRecorder struct {
+	telemetry.NoOp
+	mu        sync.Mutex
+	discovery []oidcMetricEvent
+	callback  []oidcMetricEvent
+}
+
+func (m *oidcMetricsRecorder) OIDCDiscovery(outcome, statusClass string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.discovery = append(m.discovery, oidcMetricEvent{outcome: outcome, statusClass: statusClass})
+}
+
+func (m *oidcMetricsRecorder) OIDCCallback(outcome, trust, statusClass string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callback = append(m.callback, oidcMetricEvent{outcome: outcome, trust: trust, statusClass: statusClass})
+}
+
+func (m *oidcMetricsRecorder) lastCallback(t *testing.T) oidcMetricEvent {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.callback) == 0 {
+		t.Fatal("no OIDC callback metric recorded")
+	}
+	return m.callback[len(m.callback)-1]
+}
+
+func (m *oidcMetricsRecorder) waitDiscovery(t *testing.T) oidcMetricEvent {
+	t.Helper()
+	deadline := time.Now().Add(testOIDCReadyPollTimeout)
+	for {
+		m.mu.Lock()
+		if len(m.discovery) > 0 {
+			event := m.discovery[0]
+			m.mu.Unlock()
+			return event
+		}
+		m.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("no OIDC discovery metric recorded")
+		}
+		time.Sleep(testOIDCReadyPollInterval)
+	}
+}
+
+func assertCallbackMetric(t *testing.T, fx *oidcFixture, want oidcMetricEvent) {
+	t.Helper()
+	if got := fx.metrics.lastCallback(t); got != want {
+		t.Fatalf("callback metric = %+v, want %+v", got, want)
+	}
 }
 
 func setupOIDC(t *testing.T) *oidcFixture {
@@ -88,6 +153,7 @@ func setupOIDCForApp(t *testing.T, redirectURL, baseURL string) *oidcFixture {
 		includeUserID:    true,
 		userIDClaimValue: "",
 		redirectURL:      redirectURL,
+		metrics:          &oidcMetricsRecorder{},
 	}
 
 	mux := http.NewServeMux()
@@ -108,7 +174,8 @@ func setupOIDCForApp(t *testing.T, redirectURL, baseURL string) *oidcFixture {
 		UserIDClaim:  testOIDCUserIDClaim,
 	}
 	fx.oidc, err = auth.NewOIDCAuth(context.Background(), cfg, fx.store, false, baseURL,
-		auth.WithOIDCDiscoveryBackoff(testOIDCDiscoveryInitialBackoff, testOIDCDiscoveryMaxBackoff))
+		auth.WithOIDCDiscoveryBackoff(testOIDCDiscoveryInitialBackoff, testOIDCDiscoveryMaxBackoff),
+		auth.WithOIDCMetrics(fx.metrics))
 	if err != nil {
 		t.Fatalf("NewOIDCAuth: %v", err)
 	}
@@ -193,7 +260,17 @@ func (fx *oidcFixture) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 func (fx *oidcFixture) handleToken(w http.ResponseWriter, r *http.Request) {
 	fx.tokenCalls++
 	if fx.tokenStatus != 0 {
-		http.Error(w, "token exchange rejected", fx.tokenStatus)
+		body := fx.tokenFailureBody
+		if body == "" {
+			body = "token exchange rejected"
+		}
+		if fx.tokenFailureType != "" {
+			w.Header().Set("Content-Type", fx.tokenFailureType)
+			w.WriteHeader(fx.tokenStatus)
+			_, _ = w.Write([]byte(body))
+		} else {
+			http.Error(w, body, fx.tokenStatus)
+		}
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -427,6 +504,118 @@ func TestOIDCUnavailableHandlersDoNotLogPerRequest(t *testing.T) {
 	}
 }
 
+func TestOIDCDiscoveryFailuresNeverLogProviderControlledData(t *testing.T) {
+	tests := []struct {
+		name        string
+		handler     func(*httptest.Server) http.Handler
+		wantOutcome string
+		wantStatus  string
+		forbidden   []string
+	}{
+		{
+			name: "provider 503 body",
+			handler: func(_ *httptest.Server) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "provider-body-marker token=opaque-secret code=secret-code email=person@example.test", http.StatusServiceUnavailable)
+				})
+			},
+			wantOutcome: "issuer_unavailable",
+			wantStatus:  "5xx",
+			forbidden:   []string{"provider-body-marker", "opaque-secret", "secret-code", "person@example.test"},
+		},
+		{
+			name: "malformed discovery",
+			handler: func(_ *httptest.Server) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"issuer":"malformed-marker@example.test","token":"provider-token"`))
+				})
+			},
+			wantOutcome: "discovery_invalid",
+			wantStatus:  "2xx",
+			forbidden:   []string{"malformed-marker@example.test", "provider-token"},
+		},
+		{
+			name: "issuer mismatch",
+			handler: func(server *httptest.Server) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"issuer":                 "https://provider-controlled.invalid/issuer",
+						"authorization_endpoint": server.URL + "/authorize",
+						"token_endpoint":         server.URL + "/token",
+						"jwks_uri":               server.URL + "/jwks",
+					})
+				})
+			},
+			wantOutcome: "discovery_invalid",
+			wantStatus:  "2xx",
+			forbidden:   []string{"provider-controlled.invalid"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				test.handler(server).ServeHTTP(w, r)
+			}))
+			t.Cleanup(server.Close)
+
+			var logs bytes.Buffer
+			previousOutput := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+			metrics := &oidcMetricsRecorder{}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			_, err := auth.NewOIDCAuth(ctx, config.OIDCConfig{
+				Enabled: true, IssuerURL: server.URL, ClientID: "client", ClientSecret: "secret",
+				RedirectURL: testOIDCRedirectURL, UserIDClaim: testOIDCUserIDClaim,
+			}, nil, false, "",
+				auth.WithOIDCDiscoveryBackoff(testOIDCDiscoveryInitialBackoff, testOIDCDiscoveryMaxBackoff),
+				auth.WithOIDCDiscoveryDone(done),
+				auth.WithOIDCMetrics(metrics),
+			)
+			if err != nil {
+				t.Fatalf("NewOIDCAuth: %v", err)
+			}
+
+			got := metrics.waitDiscovery(t)
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("discovery goroutine did not exit after cancellation")
+			}
+			want := oidcMetricEvent{outcome: test.wantOutcome, statusClass: test.wantStatus}
+			if got != want {
+				t.Fatalf("discovery metric = %+v, want %+v", got, want)
+			}
+
+			line := logs.String()
+			for _, forbidden := range test.forbidden {
+				if strings.Contains(line, forbidden) {
+					t.Fatalf("provider-controlled value %q leaked into logs: %q", forbidden, line)
+				}
+			}
+			for _, wantField := range []string{"category=" + test.wantOutcome, "status_class=" + test.wantStatus} {
+				if !strings.Contains(line, wantField) {
+					t.Errorf("bounded discovery log missing %q: %q", wantField, line)
+				}
+			}
+		})
+	}
+}
+
+func TestOIDCDiscoverySuccessMetricIsBounded(t *testing.T) {
+	fx := setupOIDC(t)
+	if got, want := fx.metrics.waitDiscovery(t), (oidcMetricEvent{outcome: "success", statusClass: "2xx"}); got != want {
+		t.Fatalf("discovery metric = %+v, want %+v", got, want)
+	}
+}
+
 // TestOIDCBecomesReadyAfterDiscoverySucceeds covers target behavior 3: once
 // the issuer becomes reachable, the background retry loop discovers it and
 // the handler transitions from failing closed to serving the normal flow,
@@ -619,6 +808,7 @@ func TestOIDCCallbackEstablishesSessionForExistingUser(t *testing.T) {
 	if sessionUser.ID != user.ID {
 		t.Errorf("session user = %s, want %s", sessionUser.ID, user.ID)
 	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "success", trust: "trusted", statusClass: "3xx"})
 	for _, name := range []string{"e2a_oidc_state", "e2a_oidc_nonce", "e2a_oidc_verifier"} {
 		cookie := findCookie(w.Result().Cookies(), name)
 		if cookie == nil || cookie.MaxAge >= 0 {
@@ -638,6 +828,27 @@ func TestOIDCCallbackRejectsStateMismatchBeforeExchange(t *testing.T) {
 	if fx.tokenCalls != 0 {
 		t.Fatalf("token endpoint called %d times before state validation", fx.tokenCalls)
 	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "state_invalid", trust: "public", statusClass: "4xx"})
+}
+
+func TestOIDCCallbackForgedMatchingStateRemainsPublic(t *testing.T) {
+	fx := setupOIDC(t)
+	tx := beginOIDCLogin(t, fx)
+	for _, cookie := range tx.cookies {
+		if cookie.Name == "e2a_oidc_state" {
+			cookie.Value = "attacker-chosen-state"
+		}
+	}
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, callbackRequest(tx, "state=attacker-chosen-state"))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if fx.tokenCalls != 0 {
+		t.Fatalf("token endpoint called %d times for forged state", fx.tokenCalls)
+	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "state_invalid", trust: "public", statusClass: "4xx"})
 }
 
 func TestOIDCCallbackRejectsMissingTransactionCookie(t *testing.T) {
@@ -648,6 +859,7 @@ func TestOIDCCallbackRejectsMissingTransactionCookie(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "state_invalid", trust: "public", statusClass: "4xx"})
 }
 
 func TestOIDCCallbackRejectsProviderErrorAndDeletesCookies(t *testing.T) {
@@ -661,6 +873,7 @@ func TestOIDCCallbackRejectsProviderErrorAndDeletesCookies(t *testing.T) {
 	if findCookie(w.Result().Cookies(), "e2a_oidc_state") == nil {
 		t.Fatal("provider error must clear transaction cookies")
 	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "provider_rejected", trust: "trusted", statusClass: "4xx"})
 }
 
 func TestOIDCCallbackRejectsMissingCode(t *testing.T) {
@@ -671,6 +884,7 @@ func TestOIDCCallbackRejectsMissingCode(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "response_invalid", trust: "trusted", statusClass: "4xx"})
 }
 
 func TestOIDCCallbackRejectsTokenExchangeFailure(t *testing.T) {
@@ -681,6 +895,39 @@ func TestOIDCCallbackRejectsTokenExchangeFailure(t *testing.T) {
 	fx.oidc.HandleCallback(w, callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "token_exchange_failed", trust: "trusted", statusClass: "4xx"})
+}
+
+func TestOIDCCallbackProviderFailureLogsOnlyBoundedFields(t *testing.T) {
+	fx := setupOIDC(t)
+	fx.tokenStatus = http.StatusBadRequest
+	fx.tokenFailureType = "application/json"
+	fx.tokenFailureBody = `{"error":"provider-code-marker","error_description":"provider-body-marker token=opaque-secret email=person@example.test"}`
+	tx := beginOIDCLogin(t, fx)
+
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+	w := httptest.NewRecorder()
+	fx.oidc.HandleCallback(w, callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "token_exchange_failed", trust: "trusted", statusClass: "4xx"})
+
+	line := logs.String()
+	for _, forbidden := range []string{"provider-code-marker", "provider-body-marker", "opaque-secret", "person@example.test", "valid-code"} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("provider-controlled value %q leaked into callback log: %q", forbidden, line)
+		}
+	}
+	for _, want := range []string{"category=token_exchange_failed", "trust=trusted", "status_class=4xx"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("bounded callback log missing %q: %q", want, line)
+		}
 	}
 }
 
@@ -693,6 +940,7 @@ func TestOIDCCallbackRejectsMissingIDToken(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "id_token_invalid", trust: "trusted", statusClass: "4xx"})
 }
 
 func TestOIDCCallbackRejectsInvalidIDTokens(t *testing.T) {
@@ -727,6 +975,7 @@ func TestOIDCCallbackRejectsInvalidIDTokens(t *testing.T) {
 			if findCookie(w.Result().Cookies(), auth.SessionCookieName) != nil {
 				t.Fatal("invalid ID token established a session")
 			}
+			assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "id_token_invalid", trust: "trusted", statusClass: "4xx"})
 		})
 	}
 }
@@ -750,6 +999,7 @@ func TestOIDCCallbackRejectsInvalidUserClaims(t *testing.T) {
 			if w.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401", w.Code)
 			}
+			assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "claim_invalid", trust: "trusted", statusClass: "4xx"})
 		})
 	}
 }
@@ -766,6 +1016,7 @@ func TestOIDCCallbackRejectsUnknownUserWithoutProvisioning(t *testing.T) {
 	if _, err := fx.store.GetUserByID(context.Background(), fx.userID); err == nil {
 		t.Fatal("OIDC callback must never provision an unknown user")
 	}
+	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "unknown_user", trust: "trusted", statusClass: "4xx"})
 }
 
 func TestOIDCLoginUsesSecureCookiesInProduction(t *testing.T) {

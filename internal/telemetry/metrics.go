@@ -218,6 +218,31 @@ type Metrics interface {
 	// rate_limited}.
 	DelegatedJWKSRefresh(outcome string)
 
+	// OIDCDiscovery counts generic browser-login provider discovery outcomes.
+	// outcome ∈ {success, issuer_unavailable, discovery_invalid}; statusClass
+	// is the provider response class or "none" when no response was received.
+	// Both labels are bounded enums: never pass issuer text, response bodies,
+	// tokens, authorization codes, claims, or email addresses.
+	OIDCDiscovery(outcome, statusClass string)
+
+	// OIDCCallback counts browser-login callback outcomes. outcome ∈
+	// {success, discovery_unavailable, state_invalid, provider_rejected,
+	// response_invalid, token_exchange_failed, id_token_invalid,
+	// claim_invalid, unknown_user, session_failed, post_login_failed}; trust ∈
+	// {public, trusted}. "trusted" means the server-authenticated browser
+	// transaction state and cookies were validated before the outcome.
+	// statusClass is the e2a response class. Labels are bounded enums and
+	// contain no OAuth data.
+	OIDCCallback(outcome, trust, statusClass string)
+
+	// Provisioning counts POST /api/internal/users/provision outcomes. outcome
+	// ∈ {created, existing, rejected, internal_error, not_configured,
+	// malformed_request, unauthorized}; trust ∈ {public, authenticated}.
+	// "authenticated" means the request HMAC was verified before the outcome.
+	// statusClass is the e2a response class. Labels are bounded enums and
+	// contain no request fields or identities.
+	Provisioning(outcome, trust, statusClass string)
+
 	// WSDrained counts unread messages pushed during connect-drain.
 	WSDrained(count int)
 
@@ -294,6 +319,9 @@ func (NoOp) WSDisconnected(string)                        {}
 func (NoOp) WSHandshakeRejected(string)                   {}
 func (NoOp) DelegatedAuthFailure(string)                  {}
 func (NoOp) DelegatedJWKSRefresh(string)                  {}
+func (NoOp) OIDCDiscovery(string, string)                 {}
+func (NoOp) OIDCCallback(string, string, string)          {}
+func (NoOp) Provisioning(string, string, string)          {}
 func (NoOp) WSDrained(int)                                {}
 func (NoOp) WSSendFailure()                               {}
 func (NoOp) SetWSActive(int)                              {}
@@ -477,6 +505,21 @@ func (l *Log) DelegatedAuthFailure(category string) {
 
 func (l *Log) DelegatedJWKSRefresh(outcome string) {
 	log.Printf("[metrics] event=delegated.jwks_refresh outcome=%s", enum(delegatedRefreshSet, outcome))
+}
+
+func (l *Log) OIDCDiscovery(outcome, statusClass string) {
+	log.Printf("[metrics] event=oidc.discovery outcome=%s status_class=%s",
+		enum(oidcDiscoverySet, outcome), enum(classSet, statusClass))
+}
+
+func (l *Log) OIDCCallback(outcome, trust, statusClass string) {
+	log.Printf("[metrics] event=oidc.callback outcome=%s trust=%s status_class=%s",
+		enum(oidcCallbackSet, outcome), enum(oidcCallbackTrustSet, trust), enum(classSet, statusClass))
+}
+
+func (l *Log) Provisioning(outcome, trust, statusClass string) {
+	log.Printf("[metrics] event=provisioning outcome=%s trust=%s status_class=%s",
+		enum(provisioningSet, outcome), enum(provisioningTrustSet, trust), enum(classSet, statusClass))
 }
 
 func (l *Log) SetWSActive(int) {} // gauge churns on every connect/disconnect; Prom only

@@ -1,6 +1,11 @@
 package telemetry
 
-import "testing"
+import (
+	"bytes"
+	"log"
+	"strings"
+	"testing"
+)
 
 // Compile-time interface satisfaction is the load-bearing property
 // here — once a backend implements every method, the call sites
@@ -76,4 +81,31 @@ func TestLogPublisherLagRateLimit(t *testing.T) {
 		l.SetPublisherLag(2.0) // healthy lag, should rate-limit
 	}
 	l.SetPublisherLag(45.0) // elevated, should emit immediately
+}
+
+func TestLogOIDCAndProvisioningLabelsAreAllowlisted(t *testing.T) {
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+	sensitive := "provider-body token=opaque code=secret email=person@example.test"
+	l := NewLog()
+	l.OIDCDiscovery(sensitive, sensitive)
+	l.OIDCCallback(sensitive, sensitive, sensitive)
+	l.Provisioning(sensitive, sensitive, sensitive)
+
+	got := logs.String()
+	if strings.Contains(got, sensitive) || strings.Contains(got, "person@example.test") {
+		t.Fatalf("sensitive label input leaked into log metrics: %q", got)
+	}
+	for _, want := range []string{
+		"event=oidc.discovery outcome=other status_class=other",
+		"event=oidc.callback outcome=other trust=other status_class=other",
+		"event=provisioning outcome=other trust=other status_class=other",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bounded log metric missing %q: %q", want, got)
+		}
+	}
 }

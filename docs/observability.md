@@ -70,6 +70,24 @@ SES outage must not knock every instance out of rotation).
 | `e2a_http_requests_total` | counter | `method`, `route`, `status_class` | Requests served. `route` is the chi pattern; requests that fall through to the legacy (non-`/v1`) mux appear as `route="/legacy"`; `status_class` ∈ `1xx..5xx` (WebSocket upgrades count as `1xx`). |
 | `e2a_http_request_duration_seconds` | histogram | `method`, `route` | Request latency, timed across auth, Huma, handler, and legacy fallthrough. Includes an exact `0.75` second SLO bucket. Hijacked (WebSocket) connections are **excluded** — their handler runtime is the connection lifetime, which would otherwise pin the p99. |
 
+### OIDC login and control-plane provisioning
+
+These counters are the independently matchable signals for the legacy-mux
+OIDC and provisioning routes. Do not infer either surface from
+`e2a_http_requests_total{route="/legacy"}`: that route label intentionally
+collapses every non-`/v1` handler.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `e2a_oidc_discovery_total` | counter | `outcome`, `status_class` | Generic browser-login provider discovery attempts. `outcome` is `success`, `issuer_unavailable` (no response, 429, or 5xx), or `discovery_invalid` (malformed/mismatched discovery or another non-retryable response). `status_class` is the provider response class, `none` when no response was received, or `other` if an unexpected value reaches the backend. |
+| `e2a_oidc_callback_total` | counter | `outcome`, `trust`, `status_class` | Browser callback outcomes. `outcome` is `success`, `discovery_unavailable`, `state_invalid`, `provider_rejected`, `response_invalid`, `token_exchange_failed`, `id_token_invalid`, `claim_invalid`, `unknown_user`, `session_failed`, or `post_login_failed`. `trust=public` covers requests rejected before browser transaction state is validated; `trust=trusted` means the server-authenticated state and transaction cookies matched first. `status_class` is e2a's response class. Alert on sustained actionable `trusted` failures (especially token exchange, invalid claim, unknown user, or session failure), not scanner-shaped `public` traffic or user-denied `provider_rejected` callbacks. |
+| `e2a_provisioning_total` | counter | `outcome`, `trust`, `status_class` | Internal `POST /api/internal/users/provision` outcomes. `outcome` is `created`, `existing`, `rejected`, `internal_error`, `not_configured`, `malformed_request`, or `unauthorized`. `trust=public` means the HMAC was absent/not yet verified; `trust=authenticated` means the request HMAC passed before the outcome. Alert on sustained `authenticated` `rejected`/`internal_error` outcomes; public malformed/auth failures are diagnostic and must not page. |
+
+All three label families are enum-allowlisted and collapse unknown values to
+`other`. Discovery and callback logs use only the same bounded category/trust/
+status fields. Provider response bodies, OAuth tokens or codes, claims,
+cookies, issuer-supplied text, and email addresses are never emitted.
+
 ### SMTP intake (relay edge)
 
 | Metric | Type | Labels | Meaning |

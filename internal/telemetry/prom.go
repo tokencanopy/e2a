@@ -43,6 +43,9 @@ type Prom struct {
 	wsRejected         *prometheus.CounterVec
 	delegatedFailures  *prometheus.CounterVec
 	delegatedRefresh   *prometheus.CounterVec
+	oidcDiscovery      *prometheus.CounterVec
+	oidcCallback       *prometheus.CounterVec
+	provisioning       *prometheus.CounterVec
 	wsDrained          prometheus.Counter
 	wsSendFailures     prometheus.Counter
 	wsActive           prometheus.Gauge
@@ -108,7 +111,19 @@ var (
 	// issuer response text, token data, or per-check detail.
 	delegatedFailSet    = set("invalid_token", "unknown_subject", "verifier_unavailable", "identity_store_failure")
 	delegatedRefreshSet = set("success", "key_absent", "transport_error", "parse_error", "rate_limited")
-	inboundSet          = set("processed", "noop", "failed_recipient_gone",
+	oidcDiscoverySet    = set("success", "issuer_unavailable", "discovery_invalid")
+	oidcCallbackSet     = set(
+		"success", "discovery_unavailable", "state_invalid", "provider_rejected",
+		"response_invalid", "token_exchange_failed", "id_token_invalid",
+		"claim_invalid", "unknown_user", "session_failed", "post_login_failed",
+	)
+	oidcCallbackTrustSet = set("public", "trusted")
+	provisioningSet      = set(
+		"created", "existing", "rejected", "internal_error", "not_configured",
+		"malformed_request", "unauthorized",
+	)
+	provisioningTrustSet = set("public", "authenticated")
+	inboundSet           = set("processed", "noop", "failed_recipient_gone",
 		"failed_exhausted", "retryable")
 	queueSet = set("outbound", "inbound", "webhook", "maintenance", "notify", "default")
 	stateSet = set("available", "running", "retryable", "scheduled")
@@ -385,6 +400,18 @@ func NewProm(build string) *Prom {
 			Name: "e2a_delegated_jwks_refresh_total",
 			Help: "Delegated-verifier JWKS refresh outcomes (success, key_absent, transport_error, parse_error, rate_limited).",
 		}, []string{"outcome"}),
+		oidcDiscovery: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_oidc_discovery_total",
+			Help: "Generic OIDC browser-login provider discovery outcomes, with bounded categories and provider response class.",
+		}, []string{"outcome", "status_class"}),
+		oidcCallback: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_oidc_callback_total",
+			Help: "Generic OIDC browser-login callback outcomes, split by validated-transaction trust and e2a response class.",
+		}, []string{"outcome", "trust", "status_class"}),
+		provisioning: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_provisioning_total",
+			Help: "Internal user-provisioning outcomes, split by HMAC-authentication trust and e2a response class.",
+		}, []string{"outcome", "trust", "status_class"}),
 		notifyMissed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_notify_missed_total",
 			Help: "Fallback-poll wakeups that LISTEN/NOTIFY missed.",
@@ -401,7 +428,7 @@ func NewProm(build string) *Prom {
 		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred,
 		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whNotify, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
-		p.delegatedFailures, p.delegatedRefresh,
+		p.delegatedFailures, p.delegatedRefresh, p.oidcDiscovery, p.oidcCallback, p.provisioning,
 		p.inboundProcess, p.inboundDuration,
 		p.queueDepth, p.queueOldestAge,
 		p.threadResolution, p.threadHeaderParse, p.threadNull, p.threadViolations, p.threadRelationship,
@@ -522,6 +549,29 @@ func (p *Prom) DelegatedAuthFailure(category string) {
 
 func (p *Prom) DelegatedJWKSRefresh(outcome string) {
 	p.delegatedRefresh.WithLabelValues(enum(delegatedRefreshSet, outcome)).Inc()
+}
+
+func (p *Prom) OIDCDiscovery(outcome, statusClass string) {
+	p.oidcDiscovery.WithLabelValues(
+		enum(oidcDiscoverySet, outcome),
+		enum(classSet, statusClass),
+	).Inc()
+}
+
+func (p *Prom) OIDCCallback(outcome, trust, statusClass string) {
+	p.oidcCallback.WithLabelValues(
+		enum(oidcCallbackSet, outcome),
+		enum(oidcCallbackTrustSet, trust),
+		enum(classSet, statusClass),
+	).Inc()
+}
+
+func (p *Prom) Provisioning(outcome, trust, statusClass string) {
+	p.provisioning.WithLabelValues(
+		enum(provisioningSet, outcome),
+		enum(provisioningTrustSet, trust),
+		enum(classSet, statusClass),
+	).Inc()
 }
 
 func (p *Prom) WebhookFirstAttemptLatency(seconds float64) { p.whFirstTryLat.Observe(seconds) }
