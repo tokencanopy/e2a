@@ -108,6 +108,40 @@ func TestHandleLogin_WebLoginOmitsCliParams(t *testing.T) {
 	}
 }
 
+func TestHandleLogin_RequestsGoogleAccountChooser(t *testing.T) {
+	ua, _, _ := setupUserAuth(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/login", nil)
+	w := httptest.NewRecorder()
+	ua.HandleLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusFound)
+	}
+
+	location := w.Result().Header.Get("Location")
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse redirect URL: %v", err)
+	}
+
+	query := u.Query()
+	for key, want := range map[string]string{
+		"prompt":        "select_account",
+		"client_id":     "test",
+		"redirect_uri":  "http://localhost/api/auth/callback",
+		"response_type": "code",
+		"scope":         "openid email profile",
+	} {
+		if got := query.Get(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if query.Get("state") == "" {
+		t.Error("state parameter missing from redirect URL")
+	}
+}
+
 // TestHandleLogin_EncodesReturnToInOAuthState: /api/auth/login?return_to=
 // /oauth2/authorize?... encodes that path into the Google OAuth state
 // so HandleCallback can bounce the user back into the MCP authorize flow.

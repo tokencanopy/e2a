@@ -345,7 +345,13 @@ func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	ua.setCookie(w, StateCookieName, nonce, 600)
 
-	http.Redirect(w, r, ua.oauthConfig.AuthCodeURL(EncodeOAuthState(state)), http.StatusFound)
+	// prompt=select_account forces Google to show the account chooser instead
+	// of silently re-authenticating a single signed-in account, ensuring users
+	// can switch accounts after signing out.
+	http.Redirect(w, r, ua.oauthConfig.AuthCodeURL(
+		EncodeOAuthState(state),
+		oauth2.SetAuthURLParam("prompt", "select_account"),
+	), http.StatusFound)
 }
 
 // validateReturnToPath enforces the same-origin / known-route allow-list
