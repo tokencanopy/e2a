@@ -736,7 +736,7 @@ export async function findPendingMessage(
 
 // ── Scheduled sends ─────────────────────────────────────
 
-// Wire shape of a row in the scheduled-send queue (GET /v1/scheduled →
+// Wire shape of a row in the scheduled-send queue (GET /v1/scheduled-messages →
 // { items }). Mirrors ScheduledMessageView in api/openapi.yaml. Account-scoped:
 // outbound messages accepted and awaiting a future send_at. Disjoint from the
 // review queue — a held draft is not yet accepted and appears in /v1/reviews.
@@ -774,7 +774,7 @@ function scheduledSummary(r: ScheduledWire): PendingMessageSummary {
   };
 }
 
-// The scheduled-send queue: one account-scoped call to GET /v1/scheduled
+// The scheduled-send queue: one account-scoped call to GET /v1/scheduled-messages
 // returns every accepted-and-waiting future send across the account's inboxes,
 // soonest-first. Reuses PendingMessageSummary as the row shape so the Pending
 // page can render both tabs with the same summary type.

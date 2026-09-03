@@ -214,7 +214,7 @@ def test_explicit_base_url_beats_env(monkeypatch):
 
 def test_resources_exposed():
     c = _client()
-    for name in ("agents", "messages", "conversations", "domains", "events", "webhooks", "account", "reviews", "scheduled", "templates"):
+    for name in ("agents", "messages", "conversations", "domains", "events", "webhooks", "account", "reviews", "scheduled_messages", "templates"):
         assert getattr(c, name) is not None
     assert c.account.suppressions is not None
 

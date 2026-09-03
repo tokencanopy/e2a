@@ -112,7 +112,7 @@ def test_parity_every_async_method_reachable_sync():
         # nested namespaces and both method shapes (async + pager-returning).
         expected = {
             "agents", "messages", "conversations", "domains", "events",
-            "webhooks", "inbound", "account", "reviews", "scheduled", "templates", "info", "listen",
+            "webhooks", "inbound", "account", "reviews", "scheduled_messages", "templates", "info", "listen",
             "agents.get", "agents.list", "agents.create", "agents.delete", "agents.restore",
             "messages.delete", "messages.restore",
             "messages.get_lifecycle",
@@ -120,7 +120,7 @@ def test_parity_every_async_method_reachable_sync():
             "inbound.from_event",
             "account.suppressions", "account.suppressions.list",
             "account.api_keys", "account.api_keys.create",
-            "templates.list_starters", "reviews.approve", "scheduled.list",
+            "templates.list_starters", "reviews.approve", "scheduled_messages.list",
         }
         missing = expected - seen
         assert not missing, f"parity walk did not cover: {sorted(missing)}"
