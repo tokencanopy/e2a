@@ -71,7 +71,9 @@ describe("/welcome", () => {
     await userEvent.click(screen.getByRole("radio", { name: "Other" }));
     const detail = screen.getByPlaceholderText("Tell us more (optional)");
     expect(detail).toHaveAttribute("maxLength", "200");
+    expect(screen.getByText("0/200")).toBeInTheDocument();
     await userEvent.type(detail, "a newsletter");
+    expect(screen.getByText("12/200")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/inboxes"));
     expect(lastPatchBody()).toEqual({ onboarding_survey: { source: "other", detail: "a newsletter" } });

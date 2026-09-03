@@ -1,21 +1,34 @@
 package identity_test
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/migrations"
 )
 
+// The Go enum and the SQL CHECK are two copies of one list. Read the
+// CHECK back out of the migration so adding a value to only one side
+// fails here, without a database.
 func TestAcquisitionSourcesMatchMigrationEnum(t *testing.T) {
-	want := []string{"search", "ai_assistant", "github", "x_twitter", "hn_reddit",
-		"content", "mcp_directory", "word_of_mouth", "other", "skipped"}
-	if len(identity.AcquisitionSources) != len(want) {
-		t.Fatalf("len = %d, want %d", len(identity.AcquisitionSources), len(want))
+	sql, err := migrations.FS.ReadFile("120_users_acquisition_survey.sql")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, s := range want {
-		if identity.AcquisitionSources[i] != s {
-			t.Errorf("[%d] = %q, want %q", i, identity.AcquisitionSources[i], s)
-		}
+	m := regexp.MustCompile(`(?s)acquisition_source IN \((.*?)\)`).FindStringSubmatch(string(sql))
+	if m == nil {
+		t.Fatal("no `acquisition_source IN (...)` CHECK found in migration 120")
+	}
+	var fromSQL []string
+	for _, q := range regexp.MustCompile(`'([a-z_]+)'`).FindAllStringSubmatch(m[1], -1) {
+		fromSQL = append(fromSQL, q[1])
+	}
+	if got, want := strings.Join(identity.AcquisitionSources, ","), strings.Join(fromSQL, ","); got != want {
+		t.Fatalf("Go enum %q != migration CHECK %q", got, want)
+	}
+	for _, s := range identity.AcquisitionSources {
 		if !identity.IsAcquisitionSource(s) {
 			t.Errorf("IsAcquisitionSource(%q) = false", s)
 		}
@@ -25,7 +38,7 @@ func TestAcquisitionSourcesMatchMigrationEnum(t *testing.T) {
 			t.Errorf("IsAcquisitionSource(%q) = true", bad)
 		}
 	}
-	if identity.AcquisitionSourceSkipped != "skipped" {
+	if identity.AcquisitionSourceSkipped != "skipped" || !identity.IsAcquisitionSource("skipped") {
 		t.Errorf("AcquisitionSourceSkipped = %q", identity.AcquisitionSourceSkipped)
 	}
 }

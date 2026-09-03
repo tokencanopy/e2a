@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -169,12 +170,6 @@ func (ua *UserAuth) writeMe(w http.ResponseWriter, u *identity.User) {
 		User:                    u,
 		OnboardingSurveyPending: ua.onboardingSurveyEnabled && u.AcquisitionAnsweredAt == nil,
 	})
-}
-
-func writeJSONError(w http.ResponseWriter, status int, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	writeJSON(w, map[string]string{"error": code})
 }
 
 // NewUserAuthWithOAuthConfig creates a UserAuth with a custom oauth2.Config and
@@ -642,6 +637,8 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 			Detail *string `json:"detail"`
 		} `json:"onboarding_survey"`
 	}
+	// Two short strings at most; cap the body like readJSON does elsewhere.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
@@ -653,7 +650,10 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate everything before writing anything, so a bad field in one
-	// half never leaves the other half applied.
+	// half never leaves the other half applied. The two writes below are
+	// separate statements, not a transaction: the survey write goes first
+	// because it is the one that can fail for a non-server reason (409
+	// already answered), so that outcome is decided before the name moves.
 	var name string
 	if req.Name != nil {
 		name = *req.Name
@@ -670,7 +670,7 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	var surveyDetail *string
 	if req.OnboardingSurvey != nil {
 		if !ua.onboardingSurveyEnabled {
-			writeJSONError(w, http.StatusNotFound, "onboarding_survey_disabled")
+			http.Error(w, "onboarding_survey_disabled", http.StatusNotFound)
 			return
 		}
 		if !identity.IsAcquisitionSource(req.OnboardingSurvey.Source) {
@@ -688,28 +688,39 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "onboarding_survey.detail must be at most 200 characters", http.StatusBadRequest)
 					return
 				}
+				// Postgres rejects NUL outright (a 500 otherwise) and nothing
+				// legitimate in a one-line answer needs control characters.
+				if strings.ContainsFunc(d, unicode.IsControl) {
+					http.Error(w, "onboarding_survey.detail must not contain control characters", http.StatusBadRequest)
+					return
+				}
 				surveyDetail = &d
 			}
 		}
 	}
 
 	updated := user
-	if req.Name != nil {
-		u, err := ua.store.UpdateUserName(r.Context(), user.ID, name)
-		if err != nil {
-			http.Error(w, "failed to update profile", http.StatusInternalServerError)
+	if req.OnboardingSurvey != nil {
+		u, err := ua.store.RecordAcquisitionSurvey(r.Context(), user.ID, req.OnboardingSurvey.Source, surveyDetail)
+		switch {
+		case errors.Is(err, identity.ErrAcquisitionSurveyAnswered):
+			http.Error(w, "onboarding_survey_already_answered", http.StatusConflict)
+			return
+		case errors.Is(err, pgx.ErrNoRows):
+			// The user row vanished between session auth and the write
+			// (account deletion in flight). Not a server fault.
+			http.Error(w, "not authenticated", http.StatusUnauthorized)
+			return
+		case err != nil:
+			http.Error(w, "failed to record survey", http.StatusInternalServerError)
 			return
 		}
 		updated = u
 	}
-	if req.OnboardingSurvey != nil {
-		u, err := ua.store.RecordAcquisitionSurvey(r.Context(), user.ID, req.OnboardingSurvey.Source, surveyDetail)
-		if errors.Is(err, identity.ErrAcquisitionSurveyAnswered) {
-			writeJSONError(w, http.StatusConflict, "onboarding_survey_already_answered")
-			return
-		}
+	if req.Name != nil {
+		u, err := ua.store.UpdateUserName(r.Context(), user.ID, name)
 		if err != nil {
-			http.Error(w, "failed to record survey", http.StatusInternalServerError)
+			http.Error(w, "failed to update profile", http.StatusInternalServerError)
 			return
 		}
 		updated = u

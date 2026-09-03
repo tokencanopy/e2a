@@ -78,6 +78,7 @@ export default function WelcomePage() {
   const handleSkip = async () => {
     if (busy) return;
     setBusy(true);
+    setError("");
     // Skip must never trap the user: whatever the server says (or if it
     // cannot be reached), leave. An unrecorded skip is asked again next
     // login, which is the right failure mode.
@@ -165,6 +166,9 @@ export default function WelcomePage() {
                 borderRadius: "var(--r-md)",
               }}
             />
+            <p className="mt-1 text-[11px] text-right" style={{ color: "var(--fg-muted)" }} aria-live="polite">
+              {detail.length}/{ACQUISITION_DETAIL_MAX}
+            </p>
           </div>
         )}
 

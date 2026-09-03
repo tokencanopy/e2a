@@ -23,7 +23,11 @@ export default function AppLayout({
   children: React.ReactNode;
 }) {
   const { user, loading } = useAuth();
-  const pathname = usePathname();
+  // usePathname can be null outside the app router (tests, prerender);
+  // the house guard is `?? ""`. Trailing slashes are normalized so a
+  // "/welcome/" deep link is still recognised as the survey page.
+  const rawPathname = usePathname() ?? "";
+  const pathname = rawPathname.length > 1 ? rawPathname.replace(/\/+$/, "") : rawPathname;
   const router = useRouter();
   // Onboarding survey gate. The server decides "pending" (flag on AND
   // unanswered); this shell only routes on it. The two redirects are

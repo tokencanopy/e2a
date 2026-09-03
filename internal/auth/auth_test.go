@@ -562,11 +562,22 @@ func TestHandleMe_SurveyPendingFollowsFlagAndAnswer(t *testing.T) {
 }
 
 func TestHandleUpdateMe_SurveyHappyPathEveryValue(t *testing.T) {
+	// One database, one user per source: standing up a fresh test DB per
+	// subtest multiplies the shared-Postgres truncate contention.
+	ua, store, _ := setupUserAuth(t)
+	pool := rawPool(t)
+	ua.SetOnboardingSurveyEnabled(true)
+	ctx := context.Background()
 	for _, source := range identity.AcquisitionSources {
 		t.Run(source, func(t *testing.T) {
-			ua, _, token := setupUserAuth(t)
-			pool := rawPool(t)
-			ua.SetOnboardingSurveyEnabled(true)
+			u, err := store.CreateOrGetUser(ctx, source+"@example.test", "S", "sub-"+source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := store.CreateUserSession(ctx, u.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			body := `{"onboarding_survey":{"source":"` + source + `"}}`
 			if source == "other" {
 				body = `{"onboarding_survey":{"source":"other","detail":"  a newsletter  "}}`
@@ -608,6 +619,8 @@ func TestHandleUpdateMe_SurveyValidation(t *testing.T) {
 		{"missing source", `{"onboarding_survey":{"detail":"x"}}`},
 		{"detail too long", `{"onboarding_survey":{"source":"other","detail":"` + long + `"}}`},
 		{"detail with skipped", `{"onboarding_survey":{"source":"skipped","detail":"why"}}`},
+		{"detail with NUL", `{"onboarding_survey":{"source":"other","detail":"a\u0000b"}}`},
+		{"detail with newline", `{"onboarding_survey":{"source":"other","detail":"a\nb"}}`},
 		{"bad name blocks whole request", `{"name":"","onboarding_survey":{"source":"github"}}`},
 	}
 	for _, tc := range cases {
@@ -647,7 +660,7 @@ func TestHandleUpdateMe_SurveyWriteOnceReturns409(t *testing.T) {
 	if second.Code != http.StatusConflict {
 		t.Fatalf("second: status = %d, want 409; body=%s", second.Code, second.Body.String())
 	}
-	if !strings.Contains(second.Body.String(), `"onboarding_survey_already_answered"`) {
+	if !strings.Contains(second.Body.String(), "onboarding_survey_already_answered") {
 		t.Errorf("body = %s", second.Body.String())
 	}
 }
@@ -659,13 +672,13 @@ func TestHandleUpdateMe_SurveyDisabledReturns404(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"onboarding_survey_disabled"`) {
+	if !strings.Contains(w.Body.String(), "onboarding_survey_disabled") {
 		t.Errorf("body = %s", w.Body.String())
 	}
 }
 
 func TestHandleUpdateMe_NameAndSurveyTogether(t *testing.T) {
-	ua, _, token := setupUserAuth(t)
+	ua, store, token := setupUserAuth(t)
 	ua.SetOnboardingSurveyEnabled(true)
 	w := httptest.NewRecorder()
 	ua.HandleUpdateMe(w, authedJSON("PATCH", "/api/auth/me", token, `{"name":"Jamie","onboarding_survey":{"source":"word_of_mouth"}}`))
@@ -675,5 +688,20 @@ func TestHandleUpdateMe_NameAndSurveyTogether(t *testing.T) {
 	got := decodeMe(t, w)
 	if got.Name != "Jamie" || got.OnboardingSurveyPending {
 		t.Errorf("got name=%q pending=%v, want Jamie/false", got.Name, got.OnboardingSurveyPending)
+	}
+
+	// A second combined body hits the write-once conflict BEFORE the name
+	// write, so the 409 leaves the name untouched.
+	w = httptest.NewRecorder()
+	ua.HandleUpdateMe(w, authedJSON("PATCH", "/api/auth/me", token, `{"name":"Renamed","onboarding_survey":{"source":"github"}}`))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("second: status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+	persisted, err := store.GetUserByID(context.Background(), got.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Name != "Jamie" {
+		t.Errorf("name after 409 = %q, want Jamie (partial write)", persisted.Name)
 	}
 }

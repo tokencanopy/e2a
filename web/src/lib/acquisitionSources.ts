@@ -1,6 +1,6 @@
 // Answer set for the onboarding survey ("Where did you hear about e2a?").
 // Values mirror internal/identity.AcquisitionSources and the CHECK in
-// migration 108 exactly; labels are display-only and never stored.
+// migration 120 exactly; labels are display-only and never stored.
 // "skipped" is a valid value the page sends from the Skip action but is
 // never offered as a choice.
 export type AcquisitionSource =
