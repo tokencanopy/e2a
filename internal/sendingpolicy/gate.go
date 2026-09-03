@@ -467,6 +467,7 @@ type authState struct {
 
 	envelope []string
 	notice   *noticeState
+	ramp     rampSubject
 }
 
 // noticeState is the protection-notice half of a final authorization.
@@ -673,7 +674,17 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	if err != nil {
 		return st, Decision{}, err
 	}
-	st.probation = op.Shared
+	// Probation is the ramp's answer, read before the budget counters are
+	// locked because it decides WHICH counters this transaction must take. The
+	// read is unlocked and that is sound: ramp progress is monotonic, so a
+	// stale answer can only be stale in the strict direction.
+	st.probation, err = m.rampProbation(ctx, tx, policy, op)
+	if err != nil {
+		if errors.Is(err, ErrSourceUnavailable) {
+			return st, holdDecision(ReasonSourceUnavailable, time.Time{}), nil
+		}
+		return st, Decision{}, err
+	}
 
 	// Verdicts, now that every key is held.
 	//
@@ -755,6 +766,14 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	}
 	st.envelope = envelope
 	st.units = len(st.envelope)
+
+	st.ramp, err = m.rampSubjectFor(ctx, tx, policy, op, st.units)
+	if err != nil {
+		if errors.Is(err, ErrSourceUnavailable) {
+			return st, holdDecision(ReasonSourceUnavailable, time.Time{}), nil
+		}
+		return st, Decision{}, err
+	}
 	return st, allowDecision(), nil
 }
 
@@ -969,7 +988,23 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 	// under a different policy is given back.
 	exempt := accountClassExempt(st.class) && st.op.Purpose.isCustomer()
 	if st.policy.BudgetMode == ModeDisabled || exempt || st.op.Purpose == PurposeTrustedSystem {
-		return allowDecision(), m.releaseStoredUnits(ctx, tx, st)
+		if err := m.releaseStoredUnits(ctx, tx, st); err != nil {
+			return Decision{}, err
+		}
+		// The ramp is a separate control with its own mode. A deployment can
+		// run the ramp with budgets disabled — that is exactly what production
+		// does today — so the budget being off is not a reason to skip it.
+		// A trusted account is exempt from both.
+		if exempt || st.op.Purpose == PurposeTrustedSystem {
+			return allowDecision(), nil
+		}
+		if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
+			if errors.Is(err, errRampCapacity) {
+				return holdDecision(ReasonRampCapacity, nextUTCMidnight(st.day)), nil
+			}
+			return Decision{}, err
+		}
+		return allowDecision(), nil
 	}
 
 	currentKeys, err := scopeKeys(st.op.Purpose, st.op.accountRef(), st.op.Shared, st.probation)
@@ -1044,7 +1079,56 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 	if err := plan.flush(ctx, tx); err != nil {
 		return Decision{}, err
 	}
+
+	// The ramp is last in the lock order and decided last. The budget said yes;
+	// if the ramp says no, the most restrictive answer wins and the budget
+	// units this transaction just took are given straight back — holding them
+	// would charge an account for a send its own domain was not allowed to
+	// make.
+	if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
+		if !errors.Is(err, errRampCapacity) {
+			return Decision{}, err
+		}
+		if err := m.releaseReacquiredUnits(ctx, tx, st); err != nil {
+			return Decision{}, err
+		}
+		return holdDecision(ReasonRampCapacity, nextUTCMidnight(st.day)), nil
+	}
 	return allowDecision(), nil
+}
+
+// releaseReacquiredUnits gives back the units reauthorizeBudget just took, for
+// the one case where a later control overrules it.
+//
+// The rows are already locked by this transaction, so this re-locks nothing and
+// cannot deadlock; it is the same ordered set, walked again to apply the
+// inverse delta.
+func (m *Module) releaseReacquiredUnits(ctx context.Context, tx pgx.Tx, st authState) error {
+	keys, err := scopeKeys(st.op.Purpose, st.op.accountRef(), st.op.Shared, st.probation)
+	if err != nil {
+		return err
+	}
+	refs := refsFor(keys, st.day)
+	plan, err := lockLedger(ctx, tx, nil, refs)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		plan.release(ref, st.units)
+	}
+	if err := plan.flush(ctx, tx); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE sending_budget_reservations
+		   SET state = 'released', call_state = 'none', authorization_nonce = NULL,
+		       provider_call_started_at = NULL, updated_at = now()
+		 WHERE operation_id = $1 AND submission_attempt = $2`,
+		st.op.OperationID, st.stored.Attempt)
+	if err != nil {
+		return fmt.Errorf("sendingpolicy: release ramp-held reservation: %w", err)
+	}
+	return nil
 }
 
 // authorize confirms the capacity, mints the single-use nonce, records the
@@ -1503,10 +1587,6 @@ func (m *Module) DeferAttempt(ctx context.Context, ref AttemptRef) error {
 // CancelAttempt gives back both ledgers for a terminal local cancellation such
 // as a suppression match.
 func (m *Module) CancelAttempt(ctx context.Context, ref AttemptRef) error {
-	// The ramp half arrives with Task 4's adapter; until the ramp is composed
-	// into final authorization there is no ramp reservation for this module
-	// to release, and the existing message-keyed ledger stays with its
-	// current owner.
 	return m.releaseAttempt(ctx, ref, "cancel")
 }
 
@@ -1582,6 +1662,15 @@ func (m *Module) releaseAttempt(ctx context.Context, ref AttemptRef, what string
 	); err != nil {
 		return fmt.Errorf("sendingpolicy: %s reservation: %w", what, err)
 	}
+	// A terminal local cancellation — a suppression match, say — gives back
+	// both ledgers. A rate deferral gives back only the budget: the message was
+	// not rejected by anyone, and releasing its ramp claim would let it
+	// re-qualify a stage it has already qualified.
+	if what == "cancel" && op.Purpose == PurposeCustomerMessage {
+		if err := m.rampRelease(ctx, tx, op.OperationID); err != nil {
+			return err
+		}
+	}
 	return m.commit(ctx, tx, what)
 }
 
@@ -1606,7 +1695,8 @@ func (m *Module) SettleProvider(ctx context.Context, settlement ProviderSettleme
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := lockOperation(ctx, tx, settlement.Attempt.operationID); err != nil {
+	op, err := lockOperation(ctx, tx, settlement.Attempt.operationID)
+	if err != nil {
 		return err
 	}
 	stored, err := lockReservation(ctx, tx, settlement.Attempt.operationID, settlement.Attempt.attempt)
@@ -1618,15 +1708,16 @@ func (m *Module) SettleProvider(ctx context.Context, settlement ProviderSettleme
 	}
 	// Settlement reports what the PROVIDER did, so it is only meaningful for an
 	// attempt that was authorized to reach the provider. Accepting a reserved
-	// or released attempt would let a caller advance ramp progress for a send
-	// that never happened once Task 4 hangs the ramp mutation off this call.
+	// or released attempt would advance ramp progress for a send that never
+	// happened.
 	if stored.State != "confirmed" {
 		return ErrAttemptStale
 	}
 
-	// The ramp ledger is Task 4's to move. Validating the attempt here — and
-	// taking its locks in the normative order — is what makes that composition
-	// a body change rather than a reshaping of the interface every caller
-	// already uses.
+	if op.Purpose == PurposeCustomerMessage {
+		if err := m.rampSettle(ctx, tx, op.OperationID, settlement.Outcome); err != nil {
+			return err
+		}
+	}
 	return m.commit(ctx, tx, "settle")
 }
