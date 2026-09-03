@@ -1,3 +1,5 @@
+import type { AcquisitionSource } from "../../lib/acquisitionSources";
+
 export type AgentData = {
   domain: string;
   email: string;
@@ -8,6 +10,10 @@ export type UserInfo = {
   email: string;
   name: string;
   created_at: string;
+  // True when the server's onboarding survey is enabled and this user has
+  // not answered or skipped it yet. Optional so older fixtures type-check;
+  // treat a missing value as false.
+  onboarding_survey_pending?: boolean;
 };
 
 export type DashboardAgent = {
@@ -306,8 +312,13 @@ export type CreateAPIKeyRequest = {
   expires_at?: string;
 };
 
-// Request body for PATCH /api/auth/me. Only `name` is updatable today;
-// other identity fields come from the OAuth provider.
+// Request body for PATCH /api/auth/me. `name` edits the display name;
+// `onboarding_survey` records the write-once acquisition answer (409 if
+// already answered, 404 when the server has the survey disabled).
 export type UpdateMeRequest = {
-  name: string;
+  name?: string;
+  onboarding_survey?: {
+    source: AcquisitionSource;
+    detail?: string;
+  };
 };

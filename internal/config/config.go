@@ -82,6 +82,7 @@ type Config struct {
 	Trash            TrashConfig             `yaml:"trash"`
 	Metrics          MetricsConfig           `yaml:"metrics"`
 	OutboundFooter   OutboundFooterConfig    `yaml:"outbound_footer"`
+	OnboardingSurvey OnboardingSurveyConfig  `yaml:"onboarding_survey"`
 	Notifications    NotificationsConfig     `yaml:"notifications"`
 	Env              string                  `yaml:"env"` // "development" or "production"
 	// DeploymentName names WHICH deployment of e2a this process is, for
@@ -189,6 +190,17 @@ type OutboundFooterConfig struct {
 	// HTML is the HTML fragment appended to the HTML part when the message
 	// has one. Empty = no HTML-part append.
 	HTML string `yaml:"html"`
+}
+
+// OnboardingSurveyConfig gates the dashboard's one-question acquisition
+// survey ("Where did you hear about e2a?"). Off by default: the columns
+// from migration 120 exist everywhere, but with Enabled false the write
+// path on PATCH /api/auth/me returns 404 and GET /api/auth/me reports
+// onboarding_survey_pending=false, so the dashboard never shows the page.
+// The answer set is code (internal/identity.AcquisitionSources), not config.
+type OnboardingSurveyConfig struct {
+	// Enabled turns the survey on. Override with E2A_ONBOARDING_SURVEY_ENABLED.
+	Enabled bool `yaml:"enabled"`
 }
 
 type DatabaseConfig struct {
@@ -819,6 +831,11 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OUTBOUND_FOOTER_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.OutboundFooter.Enabled = b
+		}
+	}
+	if v := os.Getenv("E2A_ONBOARDING_SURVEY_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.OnboardingSurvey.Enabled = b
 		}
 	}
 	// An explicit empty listen_addr would otherwise bind ":80" (Go's

@@ -627,6 +627,7 @@ func main() {
 
 	// User auth (Google OAuth for agent developers)
 	userAuth := auth.NewUserAuth(&cfg.OAuth, store, cfg.IsProduction())
+	userAuth.SetOnboardingSurveyEnabled(cfg.OnboardingSurvey.Enabled)
 	// Logout provenance belongs to the canonical web app, not the optional
 	// legacy Google callback. OIDC-only deployments use the OIDC callback as a
 	// safe fallback when public_url is intentionally empty.

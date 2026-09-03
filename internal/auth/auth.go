@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -56,6 +57,10 @@ type UserAuth struct {
 	// oidcLogoutURL is an operator-configured, fixed upstream logout endpoint.
 	// It is deliberately not derived from request input.
 	oidcLogoutURL string
+	// onboardingSurveyEnabled mirrors config.OnboardingSurvey.Enabled. When
+	// false, /api/auth/me never reports the survey as pending and the
+	// survey branch of PATCH returns 404.
+	onboardingSurveyEnabled bool
 }
 
 type cliLoginHandoff struct {
@@ -144,6 +149,27 @@ func NewUserAuth(cfg *config.OAuthConfig, store *identity.Store, production bool
 		baseURL:     baseURL,
 		userInfoURL: defaultUserInfoURL,
 	}
+}
+
+// SetOnboardingSurveyEnabled turns the onboarding survey on or off for
+// this handler set. Called once from main after construction.
+func (ua *UserAuth) SetOnboardingSurveyEnabled(enabled bool) {
+	ua.onboardingSurveyEnabled = enabled
+}
+
+// meResponse is the /api/auth/me shape: the user record plus the one
+// derived field the dashboard's app shell gates on.
+type meResponse struct {
+	*identity.User
+	OnboardingSurveyPending bool `json:"onboarding_survey_pending"`
+}
+
+func (ua *UserAuth) writeMe(w http.ResponseWriter, u *identity.User) {
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, meResponse{
+		User:                    u,
+		OnboardingSurveyPending: ua.onboardingSurveyEnabled && u.AcquisitionAnsweredAt == nil,
+	})
 }
 
 // NewUserAuthWithOAuthConfig creates a UserAuth with a custom oauth2.Config and
@@ -577,8 +603,7 @@ func (ua *UserAuth) HandleMe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	writeJSON(w, user)
+	ua.writeMe(w, user)
 }
 
 // HandleUpdateMe accepts a PATCH that updates the authenticated user's
@@ -593,6 +618,9 @@ func (ua *UserAuth) HandleMe(w http.ResponseWriter, r *http.Request) {
 const (
 	minDisplayNameLen = 1
 	maxDisplayNameLen = 80
+	// maxAcquisitionDetailLen is the onboarding survey's free-text detail
+	// ceiling, in Unicode code points, after trimming.
+	maxAcquisitionDetailLen = 200
 )
 
 func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
@@ -603,36 +631,102 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name *string `json:"name"`
+		Name             *string `json:"name"`
+		OnboardingSurvey *struct {
+			Source string  `json:"source"`
+			Detail *string `json:"detail"`
+		} `json:"onboarding_survey"`
 	}
+	// Two short strings at most; cap the body like readJSON does elsewhere.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 
-	if req.Name == nil {
+	if req.Name == nil && req.OnboardingSurvey == nil {
 		http.Error(w, "no fields to update", http.StatusBadRequest)
 		return
 	}
 
-	name := *req.Name
-	if name != strings.TrimSpace(name) {
-		http.Error(w, "name must not have leading or trailing whitespace", http.StatusBadRequest)
-		return
-	}
-	if len(name) < minDisplayNameLen || len(name) > maxDisplayNameLen {
-		http.Error(w, "name must be 1–80 characters", http.StatusBadRequest)
-		return
+	// Validate everything before writing anything, so a bad field in one
+	// half never leaves the other half applied. The two writes below are
+	// separate statements, not a transaction: the survey write goes first
+	// because it is the one that can fail for a non-server reason (409
+	// already answered), so that outcome is decided before the name moves.
+	var name string
+	if req.Name != nil {
+		name = *req.Name
+		if name != strings.TrimSpace(name) {
+			http.Error(w, "name must not have leading or trailing whitespace", http.StatusBadRequest)
+			return
+		}
+		if len(name) < minDisplayNameLen || len(name) > maxDisplayNameLen {
+			http.Error(w, "name must be 1–80 characters", http.StatusBadRequest)
+			return
+		}
 	}
 
-	updated, err := ua.store.UpdateUserName(r.Context(), user.ID, name)
-	if err != nil {
-		http.Error(w, "failed to update profile", http.StatusInternalServerError)
-		return
+	var surveyDetail *string
+	if req.OnboardingSurvey != nil {
+		if !ua.onboardingSurveyEnabled {
+			http.Error(w, "onboarding_survey_disabled", http.StatusNotFound)
+			return
+		}
+		if !identity.IsAcquisitionSource(req.OnboardingSurvey.Source) {
+			http.Error(w, "onboarding_survey.source is not a known value", http.StatusBadRequest)
+			return
+		}
+		if req.OnboardingSurvey.Detail != nil {
+			d := strings.TrimSpace(*req.OnboardingSurvey.Detail)
+			if d != "" {
+				if req.OnboardingSurvey.Source == identity.AcquisitionSourceSkipped {
+					http.Error(w, "onboarding_survey.detail is not allowed with source \"skipped\"", http.StatusBadRequest)
+					return
+				}
+				if utf8.RuneCountInString(d) > maxAcquisitionDetailLen {
+					http.Error(w, "onboarding_survey.detail must be at most 200 characters", http.StatusBadRequest)
+					return
+				}
+				// Postgres rejects NUL outright (a 500 otherwise) and nothing
+				// legitimate in a one-line answer needs control characters.
+				if strings.ContainsFunc(d, unicode.IsControl) {
+					http.Error(w, "onboarding_survey.detail must not contain control characters", http.StatusBadRequest)
+					return
+				}
+				surveyDetail = &d
+			}
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	writeJSON(w, updated)
+	updated := user
+	if req.OnboardingSurvey != nil {
+		u, err := ua.store.RecordAcquisitionSurvey(r.Context(), user.ID, req.OnboardingSurvey.Source, surveyDetail)
+		switch {
+		case errors.Is(err, identity.ErrAcquisitionSurveyAnswered):
+			http.Error(w, "onboarding_survey_already_answered", http.StatusConflict)
+			return
+		case errors.Is(err, pgx.ErrNoRows):
+			// The user row vanished between session auth and the write
+			// (account deletion in flight). Not a server fault.
+			http.Error(w, "not authenticated", http.StatusUnauthorized)
+			return
+		case err != nil:
+			http.Error(w, "failed to record survey", http.StatusInternalServerError)
+			return
+		}
+		updated = u
+	}
+	if req.Name != nil {
+		u, err := ua.store.UpdateUserName(r.Context(), user.ID, name)
+		if err != nil {
+			http.Error(w, "failed to update profile", http.StatusInternalServerError)
+			return
+		}
+		updated = u
+	}
+
+	ua.writeMe(w, updated)
 }
 
 // AuthenticateRequest extracts the user from the session cookie. Returns nil if not authenticated.

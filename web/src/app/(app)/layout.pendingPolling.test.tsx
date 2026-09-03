@@ -7,6 +7,11 @@ jest.mock("next/link", () => {
   };
 });
 
+jest.mock("next/navigation", () => ({
+  usePathname: () => "/inboxes",
+  useRouter: () => ({ replace: jest.fn(), push: jest.fn(), back: jest.fn() }),
+}));
+
 jest.mock("../components/AuthProvider", () => ({
   useAuth: () => ({ user: { email: "user@example.com" }, loading: false }),
 }));
