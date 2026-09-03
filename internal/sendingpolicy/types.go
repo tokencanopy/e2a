@@ -200,16 +200,30 @@ const (
 // Decision is allow-or-hold. A hold carries the earliest time a retry could
 // plausibly succeed — for a daily budget that is the next UTC midnight, which
 // lets the worker snooze rather than spin.
+//
+// Terminal separates "come back later" from "this can never proceed". Without
+// it every hold reads as retryable, and a worker faced with an operation that
+// is permanently void — its account deleted, its notice already sent, its
+// reputation class no longer the one it was derived from — would snooze on it
+// forever instead of failing the message once. A terminal hold carries no
+// RetryAt because there is no time at which the answer changes.
 type Decision struct {
-	Allow   bool
-	Reason  string
-	RetryAt time.Time
+	Allow    bool
+	Reason   string
+	RetryAt  time.Time
+	Terminal bool
 }
 
 func allowDecision() Decision { return Decision{Allow: true} }
 
 func holdDecision(reason string, retryAt time.Time) Decision {
 	return Decision{Allow: false, Reason: reason, RetryAt: retryAt}
+}
+
+// terminalHold is a hold no retry can clear. The caller must fail the message
+// rather than reschedule it.
+func terminalHold(reason string) Decision {
+	return Decision{Allow: false, Reason: reason, Terminal: true}
 }
 
 // OperationRef names one durable provider operation. Purpose, attribution, and
@@ -490,10 +504,23 @@ var ErrEnvelopeMismatch = errors.New("sendingpolicy: envelope does not match the
 // ValidateEnvelope proves the caller's actual envelope is the authorized one
 // and returns the provider header values derived from the token.
 //
-// The comparison is set equality over normalized addresses, not string
-// equality over the caller's slice: To/Cc/Bcc ordering and duplicate
-// spellings are presentation details, while the set of mailboxes SES will be
-// asked to accept is the thing the budget was charged for.
+// THE CONTRACT: submit exactly AuthorizedRecipients(). Ordering and letter case
+// are free — those are presentation. The COUNT is not: the envelope must carry
+// one entry per distinct mailbox, because the adapter issues one RCPT TO per
+// entry and the budget charged one unit per distinct mailbox.
+//
+// So a caller must collapse its own To/Cc/Bcc overlap before submitting. That
+// is a real constraint on the SMTP adapter — a reply-all naming the same
+// mailbox in To and Cc is an ordinary message, and reassembling the raw header
+// lists would be rejected here. Handing back AuthorizedRecipients() is not a
+// workaround for that; it is the intended call, and it is the only envelope
+// this token was ever priced for.
+//
+// The alternative — silently deduplicating whatever arrives — is what makes an
+// envelope of fifty case-variant spellings of one mailbox pass as "the same
+// recipient" while SES receives fifty RCPT TO commands. That is a 50x
+// reputation amplifier on one unit of budget, which is precisely the quantity
+// this module exists to bound.
 func (a ProviderAuthorization) ValidateEnvelope(recipients []string) (ProviderHeaders, error) {
 	if a.IsZero() {
 		return ProviderHeaders{}, errors.New("sendingpolicy: authorization is empty")
@@ -533,10 +560,13 @@ func (a ProviderAuthorization) ValidateEnvelope(recipients []string) (ProviderHe
 //
 // Lowercasing the whole address — local part included — is a deliberate
 // choice. RFC 5321 permits case-sensitive local parts, but no mail system e2a
-// submits to distinguishes them, and the value must dedupe and hash
-// identically on both sides of the authorization boundary. Treating "A@x" and
-// "a@x" as two recipients would let one send be charged twice and, worse, would
-// make ValidateEnvelope reject an envelope the adapter legitimately reassembled.
+// submits to distinguishes them, and the value must dedupe and hash identically
+// on both sides of the authorization boundary. Treating "A@x" and "a@x" as two
+// mailboxes would charge one send twice.
+//
+// This function is the CHARGING side, where collapsing duplicates is right.
+// ValidateEnvelope is the SUBMISSION side, where it is not: see the contract
+// there.
 func normalizeEnvelope(recipients []string) ([]string, error) {
 	out, _, err := normalizeEnvelopeCounted(recipients)
 	return out, err

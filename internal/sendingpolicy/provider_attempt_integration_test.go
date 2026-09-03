@@ -1416,3 +1416,197 @@ func TestSettledNoticeCannotBeResent(t *testing.T) {
 		t.Errorf("reason = %q, want %q", d.Reason, sendingpolicy.ReasonNoticeSettled)
 	}
 }
+
+// TestTerminalHoldsAreMarkedTerminal proves the worker can tell "come back
+// later" from "this can never proceed".
+//
+// Without the distinction every hold reads as retryable, and an operation that
+// is permanently void — its account deleted, its notice already sent, its
+// reputation class no longer the one it was derived from — would be snoozed
+// forever instead of failed once. A terminal hold carries no RetryAt because
+// there is no time at which the answer changes.
+func TestTerminalHoldsAreMarkedTerminal(t *testing.T) {
+	t.Run("deleted account", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(nil))
+		user := f.user("standard")
+		_, attempt := f.prepareAndReserve(g, f.agent(user), 1)
+		if _, err := f.pool.Exec(f.ctx, `DELETE FROM users WHERE id = $1`, user); err != nil {
+			t.Fatalf("delete account: %v", err)
+		}
+		d, _, err := g.ConsumeAttempt(f.ctx, attempt)
+		if err != nil {
+			t.Fatalf("consume: %v", err)
+		}
+		assertTerminal(t, d, sendingpolicy.ReasonAccountDeleted)
+	})
+
+	t.Run("reputation class changed", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(nil))
+		agent := f.agent(f.user("standard"))
+		messageID := f.message(agent, "own_address", 1)
+		_, ref := f.prepareMessage(g, messageID)
+		if _, err := f.pool.Exec(f.ctx,
+			`UPDATE messages SET sent_as = 'relay' WHERE id = $1`, messageID); err != nil {
+			t.Fatalf("downgrade sent_as: %v", err)
+		}
+		assertTerminal(t, f.authorize(g, ref), sendingpolicy.ReasonClassChanged)
+	})
+
+	t.Run("deleted source", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(nil))
+		agent := f.agent(f.user("standard"))
+		messageID := f.message(agent, "own_address", 1)
+		_, ref := f.prepareMessage(g, messageID)
+		_, attempt, err := g.Reserve(f.ctx, ref)
+		if err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		if _, err := f.pool.Exec(f.ctx, `DELETE FROM messages WHERE id = $1`, messageID); err != nil {
+			t.Fatalf("delete message: %v", err)
+		}
+		d, _, err := g.ConsumeAttempt(f.ctx, attempt)
+		if err != nil {
+			t.Fatalf("consume: %v", err)
+		}
+		assertTerminal(t, d, sendingpolicy.ReasonSourceUnavailable)
+	})
+
+	t.Run("budget hold is retryable, not terminal", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+			p.DefaultAccountDailyRecipients = 1
+		}))
+		agent := f.agent(f.user("standard"))
+		if d := f.send(g, f.message(agent, "own_address", 1)); !d.Allow {
+			t.Fatalf("first send: %q", d.Reason)
+		}
+		d := f.send(g, f.message(agent, "own_address", 1))
+		if d.Allow || d.Terminal {
+			t.Fatalf("a daily budget hold must be retryable (allow=%v terminal=%v)", d.Allow, d.Terminal)
+		}
+		if d.RetryAt.IsZero() {
+			t.Error("a retryable hold must advise when to come back")
+		}
+	})
+}
+
+func assertTerminal(t *testing.T, d sendingpolicy.Decision, wantReason string) {
+	t.Helper()
+	if d.Allow {
+		t.Fatalf("expected a hold, got allow")
+	}
+	if d.Reason != wantReason {
+		t.Fatalf("reason = %q, want %q", d.Reason, wantReason)
+	}
+	if !d.Terminal {
+		t.Errorf("reason %q must be terminal — a retry can never clear it", d.Reason)
+	}
+	if !d.RetryAt.IsZero() {
+		t.Errorf("a terminal hold must not advise a retry time (got %s)", d.RetryAt)
+	}
+}
+
+// TestSettlementRejectsAnAttemptThatWasNeverAuthorized proves settlement
+// reports what the PROVIDER did, so it is meaningless for an attempt that was
+// never allowed to reach one. Accepting a reserved or released attempt would
+// advance ramp progress for a send that never happened.
+func TestSettlementRejectsAnAttemptThatWasNeverAuthorized(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	_, attempt := f.prepareAndReserve(g, agent, 1)
+
+	// Reserved but never consumed.
+	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
+		Attempt: attempt, Outcome: sendingpolicy.SettlementProviderAccepted,
+	}); !errors.Is(err, sendingpolicy.ErrAttemptStale) {
+		t.Fatalf("settling an unauthorized attempt = %v, want ErrAttemptStale", err)
+	}
+
+	// Authorized: now it settles.
+	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
+		t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
+		Attempt: attempt, Outcome: sendingpolicy.SettlementProviderAccepted,
+	}); err != nil {
+		t.Fatalf("settle authorized attempt: %v", err)
+	}
+}
+
+// TestTenantHeaderSurface exercises the tenant-header modes, which otherwise
+// ship entirely unexecuted — every other fixture leaves the mode disabled.
+//
+// The two things that must not fail open: an operational or public-feedback
+// operation gets the fixed system tenant rather than silently none, and a
+// customer whose tenant has no name is held rather than handed a token whose
+// required header value is empty.
+func TestTenantHeaderSurface(t *testing.T) {
+	t.Run("operational mail uses the system tenant", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+			p.TenantHeaderMode = sendingpolicy.TenantHeaderEnforce
+		}))
+		eventID := f.pauseNotice(f.user("standard"))
+		var ref sendingpolicy.OperationRef
+		f.inTx(func(tx pgx.Tx) error {
+			var err error
+			ref, err = g.PrepareProtectionNoticeTx(f.ctx, tx,
+				sendingpolicy.NewProtectionNoticeRef(eventID, sendingpolicy.AudienceOperator))
+			return err
+		})
+		_, attempt, err := g.Reserve(f.ctx, ref)
+		if err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+		if err != nil || auth == nil {
+			t.Fatalf("authorize: auth=%v err=%v", auth, err)
+		}
+		headers, err := auth.ValidateEnvelope(auth.AuthorizedRecipients())
+		if err != nil {
+			t.Fatalf("validate: %v", err)
+		}
+		if !headers.TenantRequired || headers.TenantName != sendingpolicy.SystemPolicySubject {
+			t.Errorf("operational tenant = %v/%q, want required/%q",
+				headers.TenantRequired, headers.TenantName, sendingpolicy.SystemPolicySubject)
+		}
+	})
+
+	t.Run("customer with an unnamed tenant is held", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+			p.TenantHeaderMode = sendingpolicy.TenantHeaderEnforce
+		}))
+		user := f.user("standard")
+		agent := f.agent(user)
+		// The control row exists with ses_tenant_name '' and ready=false.
+		d := f.send(g, f.message(agent, "relay", 1))
+		if d.Allow {
+			t.Fatal("an enforcing tenant policy must not authorize an account with no tenant")
+		}
+		if d.Reason != sendingpolicy.ReasonTenantNotReady && d.Reason != sendingpolicy.ReasonTenantUnnamed {
+			t.Errorf("reason = %q, want a tenant hold", d.Reason)
+		}
+	})
+
+	t.Run("canary selects only the named account", func(t *testing.T) {
+		f := newFixture(t)
+		user := f.user("standard")
+		g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+			p.TenantHeaderMode = sendingpolicy.TenantHeaderCanary
+			p.TenantHeaderCanaryAccountIDs = []string{user}
+		}))
+		// The canary account is selected and therefore held (no tenant yet).
+		if d := f.send(g, f.message(f.agent(user), "relay", 1)); d.Allow {
+			t.Fatal("the canary account must be tenant-gated")
+		}
+		// An account outside the list is untouched by the canary.
+		if d := f.send(g, f.message(f.agent(f.user("standard")), "relay", 1)); !d.Allow {
+			t.Fatalf("a non-canary account must be unaffected: %q", d.Reason)
+		}
+	})
+}

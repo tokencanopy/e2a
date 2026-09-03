@@ -685,7 +685,7 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	// that commits first may already be entering its one SES call.
 	if op.Purpose.isCustomer() {
 		if !ownerExists {
-			return st, holdDecision(ReasonAccountDeleted, time.Time{}), nil
+			return st, terminalHold(ReasonAccountDeleted), nil
 		}
 		if controlState == "paused" {
 			return st, holdDecision(ReasonAccountPaused, time.Time{}), nil
@@ -707,7 +707,7 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	// notice for a delivery already marked sent, which is the exact duplicate
 	// this module claims to make impossible.
 	if notice != nil && notice.state != "pending" {
-		return st, holdDecision(ReasonNoticeSettled, time.Time{}), nil
+		return st, terminalHold(ReasonNoticeSettled), nil
 	}
 
 	if notice != nil && notice.audience == AudienceOwner && !ownerExists {
@@ -716,39 +716,44 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		if err := m.markNoticeSkipped(ctx, tx, notice); err != nil {
 			return st, Decision{}, err
 		}
-		return st, holdDecision(ReasonAccountDeleted, time.Time{}), nil
+		return st, terminalHold(ReasonAccountDeleted), nil
 	}
 
 	// The reputation class is immutable on the operation, but `sent_as` is not
 	// immutable on the message: the approval path rewrites it, and it depends
 	// on the domain's live verification state. If the operation was prepared
-	// while the customer's own domain was sending-verified and the message is
-	// now going out over the shared relay, sending it would put shared traffic
+	// while the customer's own domain was sending-verified and the message now
+	// goes out over the shared relay, sending it would put shared traffic
 	// through a dedicated budget — escaping both the 50/day shared cap and the
-	// probation pool. Refusing is the safe answer, and it makes a caller that
-	// prepared too early loud instead of silently cheap. (Tightening in the
-	// other direction needs no action: an operation already classed as shared
-	// stays shared.)
-	if op.Purpose == PurposeCustomerMessage {
-		_, nowShared, classErr := messageEnvelopeAndClass(ctx, tx, op.OperationID)
-		if classErr == nil && nowShared && !op.Shared {
-			return st, holdDecision(ReasonClassChanged, time.Time{}), nil
-		}
-	}
-
-	st.envelope, err = m.resolveEnvelope(ctx, tx, op, ref, notice, ownerEmail)
-	if err != nil {
+	// probation pool. (Tightening the other way needs no action: an operation
+	// already classed as shared stays shared.)
+	//
+	// TERMINAL, not a snooze. shared_reputation is frozen at operation creation
+	// and the operation is keyed by message id, so there is no future in which
+	// this operation describes that message again; a retryable hold would
+	// leave the message stuck until a human noticed. The caller fails it — the
+	// lifecycle catalog's submission.sending_setup_expired is the fitting code
+	// — and prepares a fresh operation if the send should still happen.
+	//
+	// One read of the message row serves both this check and the envelope,
+	// rather than resolving the same row twice per authorization.
+	envelope, envErr := m.resolveEnvelopeAndClass(ctx, tx, op, ref, notice, ownerEmail)
+	if envErr != nil {
 		// A source that has been deleted, or an envelope that no longer
 		// resolves, is a HOLD and not an error. Returning an error here rolls
 		// the transaction back with the attempt still marked reserved, and
 		// since every later execution fails at the same point, those units are
 		// stranded on the SHARED pools until midnight with nothing able to
 		// release them. A caller could farm that: reserve, delete, repeat.
-		if errors.Is(err, ErrSourceUnavailable) || errors.Is(err, ErrEnvelopeUnavailable) {
-			return st, holdDecision(ReasonSourceUnavailable, time.Time{}), nil
+		if errors.Is(envErr, ErrSourceUnavailable) || errors.Is(envErr, ErrEnvelopeUnavailable) {
+			return st, terminalHold(ReasonSourceUnavailable), nil
 		}
-		return st, Decision{}, err
+		if errors.Is(envErr, errReputationClassChanged) {
+			return st, terminalHold(ReasonClassChanged), nil
+		}
+		return st, Decision{}, envErr
 	}
+	st.envelope = envelope
 	st.units = len(st.envelope)
 	return st, allowDecision(), nil
 }
@@ -815,6 +820,30 @@ func (m *Module) markNoticeSkipped(ctx context.Context, tx pgx.Tx, notice *notic
 		return fmt.Errorf("sendingpolicy: close notice delivery: %w", err)
 	}
 	return nil
+}
+
+// errReputationClassChanged marks a customer message whose class no longer
+// matches the operation derived from it.
+var errReputationClassChanged = errors.New("sendingpolicy: reputation class changed after preparation")
+
+// resolveEnvelopeAndClass resolves the envelope and, for a customer message,
+// re-checks that the message still belongs to the reputation class its
+// operation was frozen with.
+//
+// The two are one function because they are one read. Splitting them is what
+// had this path querying the same message row twice per authorization.
+func (m *Module) resolveEnvelopeAndClass(ctx context.Context, tx pgx.Tx, op operationRow, ref AttemptRef, notice *noticeState, ownerEmail string) ([]string, error) {
+	if op.Purpose != PurposeCustomerMessage {
+		return m.resolveEnvelope(ctx, tx, op, ref, notice, ownerEmail)
+	}
+	envelope, nowShared, err := messageEnvelopeAndClass(ctx, tx, op.OperationID)
+	if err != nil {
+		return nil, err
+	}
+	if nowShared && !op.Shared {
+		return nil, errReputationClassChanged
+	}
+	return envelope, nil
 }
 
 // resolveEnvelope produces the exact final recipient set, under the locks that
@@ -1033,6 +1062,10 @@ func (m *Module) authorize(ctx context.Context, tx pgx.Tx, st authState) (*Provi
 	if st.notice != nil {
 		version, commitment, err := m.noticeCommitmentFor(st)
 		if err != nil {
+			// Reserve may already hold this attempt's units, and returning an
+			// error here rolls back with the row still reserved — every retry
+			// then fails identically and the capacity is stranded. Surface it
+			// as the terminal hold it is so the caller releases and stops.
 			return nil, err
 		}
 		noticeVersion, noticeCommitment = &version, commitment
@@ -1214,12 +1247,16 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 // because the notice pool is exhausted must not enqueue another notice.
 //
 // Lock order note: this runs while the caller holds budget-counter locks, which
-// is later in the normative order than the notice keys. That inversion is
-// deliberate and bounded — the plan requires the notice to be inserted
-// ATOMICALLY with the denial, and the only rows touched are ones this
-// transaction is creating, so the sole contention point is the partial unique
-// index when two callers hit the same scope and day. No path locks an existing
-// delivery row and then reaches for a counter, so there is no cycle to close.
+// is later in the normative order than the notice keys. The inversion is
+// deliberate — the plan requires the notice to be inserted ATOMICALLY with the
+// denial — and it is currently acyclic, but NOT for the obvious reason.
+//
+// readAuthState does lock an existing delivery row and then reach for counters,
+// so the two directions do exist. What closes the cycle is that the only
+// transactions holding a delivery row are notice operations, whose purpose is
+// operational, and this function returns nil for operational purposes before
+// touching a notice key. That is the load-bearing fact: if an operational
+// purpose ever becomes able to enqueue a notice, the cycle closes silently.
 func (m *Module) enqueueDenialNotice(ctx context.Context, tx pgx.Tx, policy RuntimePolicy, op operationRow, day time.Time, scope Scope) error {
 	if op.Purpose.isOperational() {
 		return nil
