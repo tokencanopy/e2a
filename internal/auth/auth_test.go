@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -502,4 +503,177 @@ func TestHandleDashboardStats_WindowQueryParam(t *testing.T) {
 	}
 
 	_ = user
+}
+
+type meBody struct {
+	identity.User
+	OnboardingSurveyPending bool `json:"onboarding_survey_pending"`
+}
+
+// rawPool opens a plain connection to the same test database setupUserAuth
+// used, for reading columns no store method exposes. Store has no pool
+// accessor by design.
+func rawPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), testutil.TestDBURL())
+	if err != nil {
+		t.Fatalf("rawPool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func decodeMe(t *testing.T, w *httptest.ResponseRecorder) meBody {
+	t.Helper()
+	var got meBody
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, w.Body.String())
+	}
+	return got
+}
+
+func TestHandleMe_SurveyPendingFollowsFlagAndAnswer(t *testing.T) {
+	ua, store, token := setupUserAuth(t)
+	ctx := context.Background()
+
+	// Flag off (the default): never pending.
+	w := httptest.NewRecorder()
+	ua.HandleMe(w, authedRequest("GET", "/api/auth/me", token))
+	if got := decodeMe(t, w); got.OnboardingSurveyPending {
+		t.Fatal("pending=true with the flag off")
+	}
+
+	ua.SetOnboardingSurveyEnabled(true)
+	w = httptest.NewRecorder()
+	ua.HandleMe(w, authedRequest("GET", "/api/auth/me", token))
+	got := decodeMe(t, w)
+	if !got.OnboardingSurveyPending {
+		t.Fatal("pending=false for an unanswered user with the flag on")
+	}
+
+	if _, err := store.RecordAcquisitionSurvey(ctx, got.ID, "github", nil); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	ua.HandleMe(w, authedRequest("GET", "/api/auth/me", token))
+	if got := decodeMe(t, w); got.OnboardingSurveyPending {
+		t.Fatal("pending=true after answering")
+	}
+}
+
+func TestHandleUpdateMe_SurveyHappyPathEveryValue(t *testing.T) {
+	for _, source := range identity.AcquisitionSources {
+		t.Run(source, func(t *testing.T) {
+			ua, _, token := setupUserAuth(t)
+			pool := rawPool(t)
+			ua.SetOnboardingSurveyEnabled(true)
+			body := `{"onboarding_survey":{"source":"` + source + `"}}`
+			if source == "other" {
+				body = `{"onboarding_survey":{"source":"other","detail":"  a newsletter  "}}`
+			}
+			w := httptest.NewRecorder()
+			ua.HandleUpdateMe(w, authedJSON("PATCH", "/api/auth/me", token, body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			got := decodeMe(t, w)
+			if got.OnboardingSurveyPending {
+				t.Error("pending still true in the PATCH response")
+			}
+			var stored, detail string
+			if err := pool.QueryRow(context.Background(),
+				`SELECT acquisition_source, COALESCE(acquisition_detail,'') FROM users WHERE id=$1`, got.ID).Scan(&stored, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if stored != source {
+				t.Errorf("stored source = %q, want %q", stored, source)
+			}
+			if source == "other" && detail != "a newsletter" {
+				t.Errorf("detail = %q, want trimmed 'a newsletter'", detail)
+			}
+		})
+	}
+}
+
+func TestHandleUpdateMe_SurveyValidation(t *testing.T) {
+	ua, _, token := setupUserAuth(t)
+	ua.SetOnboardingSurveyEnabled(true)
+	long := strings.Repeat("é", 201) // 201 code points, 402 bytes
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"unknown source", `{"onboarding_survey":{"source":"carrier_pigeon"}}`},
+		{"empty source", `{"onboarding_survey":{"source":""}}`},
+		{"missing source", `{"onboarding_survey":{"detail":"x"}}`},
+		{"detail too long", `{"onboarding_survey":{"source":"other","detail":"` + long + `"}}`},
+		{"detail with skipped", `{"onboarding_survey":{"source":"skipped","detail":"why"}}`},
+		{"bad name blocks whole request", `{"name":"","onboarding_survey":{"source":"github"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			ua.HandleUpdateMe(w, authedJSON("PATCH", "/api/auth/me", token, tc.body))
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+	// Nothing was written by any rejected request.
+	w := httptest.NewRecorder()
+	ua.HandleMe(w, authedRequest("GET", "/api/auth/me", token))
+	if got := decodeMe(t, w); !got.OnboardingSurveyPending {
+		t.Fatal("a rejected request recorded an answer")
+	}
+	// 200 code points of multibyte text is allowed.
+	ok := strings.Repeat("é", 200)
+	w = httptest.NewRecorder()
+	ua.HandleUpdateMe(w, authedJSON("PATCH", "/api/auth/me", token, `{"onboarding_survey":{"source":"other","detail":"`+ok+`"}}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("200-char detail: status = %d; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUpdateMe_SurveyWriteOnceReturns409(t *testing.T) {
+	ua, _, token := setupUserAuth(t)
+	ua.SetOnboardingSurveyEnabled(true)
+	first := httptest.NewRecorder()
+	ua.HandleUpdateMe(first, authedJSON("PATCH", "/api/auth/me", token, `{"onboarding_survey":{"source":"github"}}`))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first: %d %s", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	ua.HandleUpdateMe(second, authedJSON("PATCH", "/api/auth/me", token, `{"onboarding_survey":{"source":"search"}}`))
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second: status = %d, want 409; body=%s", second.Code, second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), `"onboarding_survey_already_answered"`) {
+		t.Errorf("body = %s", second.Body.String())
+	}
+}
+
+func TestHandleUpdateMe_SurveyDisabledReturns404(t *testing.T) {
+	ua, _, token := setupUserAuth(t) // flag stays off
+	w := httptest.NewRecorder()
+	ua.HandleUpdateMe(w, authedJSON("PATCH", "/api/auth/me", token, `{"onboarding_survey":{"source":"github"}}`))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"onboarding_survey_disabled"`) {
+		t.Errorf("body = %s", w.Body.String())
+	}
+}
+
+func TestHandleUpdateMe_NameAndSurveyTogether(t *testing.T) {
+	ua, _, token := setupUserAuth(t)
+	ua.SetOnboardingSurveyEnabled(true)
+	w := httptest.NewRecorder()
+	ua.HandleUpdateMe(w, authedJSON("PATCH", "/api/auth/me", token, `{"name":"Jamie","onboarding_survey":{"source":"word_of_mouth"}}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	got := decodeMe(t, w)
+	if got.Name != "Jamie" || got.OnboardingSurveyPending {
+		t.Errorf("got name=%q pending=%v, want Jamie/false", got.Name, got.OnboardingSurveyPending)
+	}
 }
