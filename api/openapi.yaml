@@ -4266,7 +4266,7 @@ components:
           description: The scheduled message's id (msg_…). Interchangeable with the message id on GET /v1/agents/{email}/messages/{id}.
           type: string
         scheduled_at:
-          description: "Beta: scheduled sending may change before it is declared stable. The future instant the message is queued to be submitted. Always present and in the future for items in this queue."
+          description: "Beta: scheduled sending may change before it is declared stable. The instant the message is queued to be submitted. Always present for items in this queue, but not always in the future: an overdue value means the send is still pending but its fire time has passed (e.g. it was deferred at fire time by the account's daily send cap), so it is shown here rather than hidden until it fires."
           format: date-time
           type:
             - string
@@ -8519,10 +8519,10 @@ paths:
       tags:
         - reviews
       x-stability-level: beta
-  /v1/scheduled:
+  /v1/scheduled-messages:
     get:
-      description: "The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account's inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable."
-      operationId: listScheduled
+      description: "The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account's inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable."
+      operationId: listScheduledMessages
       parameters:
         - description: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
           explode: false

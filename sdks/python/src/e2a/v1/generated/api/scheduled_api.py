@@ -40,7 +40,7 @@ class ScheduledApi:
 
 
     @validate_call
-    async def list_scheduled(
+    async def list_scheduled_messages(
         self,
         cursor: Annotated[Optional[StrictStr], Field(description="Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.")] = None,
         limit: Annotated[Optional[Annotated[int, Field(le=100, strict=True, ge=1)]], Field(description="Maximum number of items to return (1-100).")] = None,
@@ -59,7 +59,7 @@ class ScheduledApi:
     ) -> PageScheduledMessageView:
         """List messages awaiting a scheduled send (beta)
 
-        The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account's inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+        The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account's inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
 
         :param cursor: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
         :type cursor: str
@@ -87,7 +87,7 @@ class ScheduledApi:
         :return: Returns the result object.
         """ # noqa: E501
 
-        _param = self._list_scheduled_serialize(
+        _param = self._list_scheduled_messages_serialize(
             cursor=cursor,
             limit=limit,
             _request_auth=_request_auth,
@@ -111,7 +111,7 @@ class ScheduledApi:
 
 
     @validate_call
-    async def list_scheduled_with_http_info(
+    async def list_scheduled_messages_with_http_info(
         self,
         cursor: Annotated[Optional[StrictStr], Field(description="Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.")] = None,
         limit: Annotated[Optional[Annotated[int, Field(le=100, strict=True, ge=1)]], Field(description="Maximum number of items to return (1-100).")] = None,
@@ -130,7 +130,7 @@ class ScheduledApi:
     ) -> ApiResponse[PageScheduledMessageView]:
         """List messages awaiting a scheduled send (beta)
 
-        The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account's inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+        The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account's inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
 
         :param cursor: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
         :type cursor: str
@@ -158,7 +158,7 @@ class ScheduledApi:
         :return: Returns the result object.
         """ # noqa: E501
 
-        _param = self._list_scheduled_serialize(
+        _param = self._list_scheduled_messages_serialize(
             cursor=cursor,
             limit=limit,
             _request_auth=_request_auth,
@@ -182,7 +182,7 @@ class ScheduledApi:
 
 
     @validate_call
-    async def list_scheduled_without_preload_content(
+    async def list_scheduled_messages_without_preload_content(
         self,
         cursor: Annotated[Optional[StrictStr], Field(description="Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.")] = None,
         limit: Annotated[Optional[Annotated[int, Field(le=100, strict=True, ge=1)]], Field(description="Maximum number of items to return (1-100).")] = None,
@@ -201,7 +201,7 @@ class ScheduledApi:
     ) -> RESTResponseType:
         """List messages awaiting a scheduled send (beta)
 
-        The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account's inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+        The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account's inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
 
         :param cursor: Opaque pagination cursor from a previous response's next_cursor. Continuation requests must not change the other filters.
         :type cursor: str
@@ -229,7 +229,7 @@ class ScheduledApi:
         :return: Returns the result object.
         """ # noqa: E501
 
-        _param = self._list_scheduled_serialize(
+        _param = self._list_scheduled_messages_serialize(
             cursor=cursor,
             limit=limit,
             _request_auth=_request_auth,
@@ -248,7 +248,7 @@ class ScheduledApi:
         return response_data.response
 
 
-    def _list_scheduled_serialize(
+    def _list_scheduled_messages_serialize(
         self,
         cursor,
         limit,
@@ -303,7 +303,7 @@ class ScheduledApi:
 
         return self.api_client.param_serialize(
             method='GET',
-            resource_path='/v1/scheduled',
+            resource_path='/v1/scheduled-messages',
             path_params=_path_params,
             query_params=_query_params,
             header_params=_header_params,

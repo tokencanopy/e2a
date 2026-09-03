@@ -18,7 +18,7 @@ func setScheduledAt(t *testing.T, pool *pgxpool.Pool, id string, at time.Time) {
 	}
 }
 
-func TestListScheduled_ReturnsAcceptedFutureSendsSoonestFirst(t *testing.T) {
+func TestListScheduled_ReturnsAcceptedPendingSendsOverdueFirst(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
@@ -31,7 +31,11 @@ func TestListScheduled_ReturnsAcceptedFutureSendsSoonestFirst(t *testing.T) {
 	setScheduledAt(t, pool, laterID, time.Now().Add(2*time.Hour))
 	setScheduledAt(t, pool, soonerID, time.Now().Add(1*time.Hour))
 
-	// Excluded: past scheduled_at (about to fire or already fired).
+	// Included: an accepted send whose scheduled_at is already past. This is the
+	// daily-cap deferral state (outbound_async.go releases the claim, snoozes the
+	// job, and leaves scheduled_at stale) — still pending, so it must stay
+	// visible rather than vanish. soonest-first sorts it to the TOP as the most
+	// overdue.
 	pastID := seedOutboundRow(t, store, agentID, []string{"c@example.com"}, nil, nil, "past")
 	setScheduledAt(t, pool, pastID, time.Now().Add(-time.Hour))
 
@@ -54,17 +58,19 @@ func TestListScheduled_ReturnsAcceptedFutureSendsSoonestFirst(t *testing.T) {
 	for _, it := range items {
 		got = append(got, it.ID)
 	}
-	want := []string{soonerID, laterID}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("ListScheduled ids = %v, want soonest-first %v", got, want)
+	want := []string{pastID, soonerID, laterID}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("ListScheduled ids = %v, want overdue-then-soonest %v", got, want)
 	}
 
+	// The overdue row sorts first and is a genuine pending send: accepted,
+	// outbound, with recipients, and a scheduled_at now in the past.
 	first := items[0]
 	if first.DeliveryStatus != "accepted" {
 		t.Errorf("delivery_status = %q, want accepted", first.DeliveryStatus)
 	}
-	if first.ScheduledAt == nil || !first.ScheduledAt.After(time.Now()) {
-		t.Errorf("scheduled_at = %v, want a future instant", first.ScheduledAt)
+	if first.ScheduledAt == nil || !first.ScheduledAt.Before(time.Now()) {
+		t.Errorf("scheduled_at = %v, want a past instant (the overdue row)", first.ScheduledAt)
 	}
 	if first.Direction != "outbound" {
 		t.Errorf("direction = %q, want outbound", first.Direction)

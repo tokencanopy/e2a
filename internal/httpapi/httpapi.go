@@ -279,7 +279,7 @@ type Deps struct {
 	ListReviews          func(ctx context.Context, userID string, limit int, afterCreatedAt time.Time, afterID string) ([]identity.ReviewListItem, error)
 	GetReviewWithContent func(ctx context.Context, userID, messageID string) (*identity.Message, error)
 
-	// Scheduled-send queue (account-scoped /v1/scheduled). ListScheduled returns
+	// Scheduled-send queue (account-scoped /v1/scheduled-messages). ListScheduled returns
 	// outbound messages accepted and awaiting a future send_at across the user's
 	// agents, soonest-first, keyset-paginated on (scheduled_at, id): the handler
 	// passes limit+1 to detect a further page and the after-key from the previous

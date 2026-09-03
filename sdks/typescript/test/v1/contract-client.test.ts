@@ -228,7 +228,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
       });
       expect(res.status).toBe("scheduled");
 
-      const page = await client.scheduled.list({ limit: 100 }).page();
+      const page = await client.scheduledMessages.list({ limit: 100 }).page();
       const found = page.items.find((m) => m.id === res.messageId);
       expect(found, "scheduled send must appear in the account scheduled queue").toBeDefined();
       expect(found?.agentEmail).toBe(email);

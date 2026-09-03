@@ -726,12 +726,12 @@ async def test_scheduled_list_reads_scheduled_endpoint(httpx_mock):
     }
     httpx_mock.add_response(json={"items": [row], "next_cursor": None})
     async with _client() as c:
-        items = await c.scheduled.list().to_list(limit=50)
+        items = await c.scheduled_messages.list().to_list(limit=50)
     assert [m.id for m in items] == ["msg_s1"]
     assert items[0].delivery_status == "accepted"
     req = httpx_mock.get_requests()[-1]
     assert req.method == "GET"
-    assert "/v1/scheduled" in str(req.url)
+    assert "/v1/scheduled-messages" in str(req.url)
 
 
 @pytest.mark.anyio

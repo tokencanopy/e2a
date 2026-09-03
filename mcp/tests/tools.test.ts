@@ -296,7 +296,7 @@ function makeStubClient(
       messageId: id,
       reviewStatus: "pending_review",
     })),
-    listScheduled: vi.fn(async (params: { cursor?: string; limit?: number } = {}) => ({
+    listScheduledMessages: vi.fn(async (params: { cursor?: string; limit?: number } = {}) => ({
       items: [
         { id: "msg_s1", direction: "outbound", deliveryStatus: "accepted", scheduledAt: "2099-01-01T09:00:00Z" },
         { id: "msg_s2", direction: "outbound", deliveryStatus: "accepted", scheduledAt: "2099-01-02T09:00:00Z" },
@@ -2148,12 +2148,12 @@ describe("e2a MCP server", () => {
     expect(JSON.parse(content[0]!.text)).toMatchObject({ next_cursor: "reviews_next" });
   });
 
-  it("list_scheduled forwards pagination and returns the scheduled envelope", async () => {
+  it("list_scheduled_messages forwards pagination and returns the scheduled envelope", async () => {
     const result = await client.callTool({
-      name: "list_scheduled",
+      name: "list_scheduled_messages",
       arguments: { cursor: "scheduled_cursor", limit: 25 },
     });
-    expect(stub.listScheduled).toHaveBeenCalledWith({
+    expect(stub.listScheduledMessages).toHaveBeenCalledWith({
       cursor: "scheduled_cursor",
       limit: 25,
     });
@@ -2166,9 +2166,9 @@ describe("e2a MCP server", () => {
     });
   });
 
-  it("list_scheduled returns next_cursor only when another page exists", async () => {
-    const result = await client.callTool({ name: "list_scheduled", arguments: {} });
-    expect(stub.listScheduled).toHaveBeenCalledWith({});
+  it("list_scheduled_messages returns next_cursor only when another page exists", async () => {
+    const result = await client.callTool({ name: "list_scheduled_messages", arguments: {} });
+    expect(stub.listScheduledMessages).toHaveBeenCalledWith({});
     const content = result.content as Array<{ type: string; text: string }>;
     expect(JSON.parse(content[0]!.text)).toMatchObject({ next_cursor: "scheduled_next" });
   });

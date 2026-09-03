@@ -203,7 +203,7 @@ export class E2AClient {
   readonly inbound: InboundResource;
   readonly account: AccountResource;
   readonly reviews: ReviewsResource;
-  readonly scheduled: ScheduledResource;
+  readonly scheduledMessages: ScheduledResource;
   readonly templates: TemplatesResource;
   readonly contacts: ContactsResource;
   private readonly meta: PromiseMetaApi;
@@ -244,7 +244,7 @@ export class E2AClient {
     this.inbound = new InboundResource(this.messages);
     this.account = new AccountResource(new PromiseAccountApi(config));
     this.reviews = new ReviewsResource(new PromiseReviewsApi(config));
-    this.scheduled = new ScheduledResource(new PromiseScheduledApi(config));
+    this.scheduledMessages = new ScheduledResource(new PromiseScheduledApi(config));
     this.templates = new TemplatesResource(new PromiseTemplatesApi(config));
     this.contacts = new ContactsResource(new PromiseContactsApi(config));
     this.meta = new PromiseMetaApi(config);
@@ -512,10 +512,13 @@ class ReviewsResource {
 }
 
 /** The account-scoped scheduled-send queue (beta): outbound messages accepted
- *  and awaiting a future send_at to fire, soonest-first. Read-only — a scheduled
- *  send is not a hold, so there is nothing to approve or reject here. Disjoint
- *  from the review queue: a held draft is not yet accepted and appears there
- *  instead. Account-scoped credentials only. */
+ *  and awaiting a scheduled send, soonest-first. Includes overdue-but-pending
+ *  sends — a scheduled_at in the past means the send is still queued but its
+ *  fire time has passed (e.g. deferred by the daily send cap), surfaced here
+ *  rather than hidden until it fires. Read-only — a scheduled send is not a
+ *  hold, so there is nothing to approve or reject here. Disjoint from the review
+ *  queue: a held draft is not yet accepted and appears there instead.
+ *  Account-scoped credentials only. */
 class ScheduledResource {
   constructor(private readonly api: PromiseScheduledApi) {}
   /** List every outbound message queued to send at a future time across the
@@ -523,7 +526,7 @@ class ScheduledResource {
   list(params: { limit?: number } = {}): AutoPager<ScheduledMessageView> {
     // Cursor-paginated: the AutoPager walks next_cursor to completion.
     return new AutoPager(async (cursor) => {
-      const page = await call(() => this.api.listScheduled(cursor, params.limit));
+      const page = await call(() => this.api.listScheduledMessages(cursor, params.limit));
       return { items: page.items ?? [], next_cursor: page.nextCursor };
     });
   }

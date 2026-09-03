@@ -33,7 +33,7 @@ export class ScheduledMessageView {
     */
     'id': string;
     /**
-    * Beta: scheduled sending may change before it is declared stable. The future instant the message is queued to be submitted. Always present and in the future for items in this queue.
+    * Beta: scheduled sending may change before it is declared stable. The instant the message is queued to be submitted. Always present for items in this queue, but not always in the future: an overdue value means the send is still pending but its fire time has passed (e.g. it was deferred at fire time by the account\'s daily send cap), so it is shown here rather than hidden until it fires.
     */
     'scheduledAt': Date | null;
     'subject': string;

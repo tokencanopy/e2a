@@ -2598,12 +2598,12 @@ export class ObjectReviewsApi {
 import { ObservableScheduledApi } from "./ObservableAPI.js";
 import { ScheduledApiRequestFactory, ScheduledApiResponseProcessor} from "../apis/ScheduledApi.js";
 
-export interface ScheduledApiListScheduledRequest {
+export interface ScheduledApiListScheduledMessagesRequest {
     /**
      * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
      * Defaults to: undefined
      * @type string
-     * @memberof ScheduledApilistScheduled
+     * @memberof ScheduledApilistScheduledMessages
      */
     cursor?: string
     /**
@@ -2612,7 +2612,7 @@ export interface ScheduledApiListScheduledRequest {
      * Maximum: 100
      * Defaults to: 100
      * @type number
-     * @memberof ScheduledApilistScheduled
+     * @memberof ScheduledApilistScheduledMessages
      */
     limit?: number
 }
@@ -2625,21 +2625,21 @@ export class ObjectScheduledApi {
     }
 
     /**
-     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
      * List messages awaiting a scheduled send (beta)
      * @param param the request object
      */
-    public listScheduledWithHttpInfo(param: ScheduledApiListScheduledRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<PageScheduledMessageView>> {
-        return this.api.listScheduledWithHttpInfo(param.cursor, param.limit,  options).toPromise();
+    public listScheduledMessagesWithHttpInfo(param: ScheduledApiListScheduledMessagesRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<PageScheduledMessageView>> {
+        return this.api.listScheduledMessagesWithHttpInfo(param.cursor, param.limit,  options).toPromise();
     }
 
     /**
-     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
      * List messages awaiting a scheduled send (beta)
      * @param param the request object
      */
-    public listScheduled(param: ScheduledApiListScheduledRequest = {}, options?: ConfigurationOptions): Promise<PageScheduledMessageView> {
-        return this.api.listScheduled(param.cursor, param.limit,  options).toPromise();
+    public listScheduledMessages(param: ScheduledApiListScheduledMessagesRequest = {}, options?: ConfigurationOptions): Promise<PageScheduledMessageView> {
+        return this.api.listScheduledMessages(param.cursor, param.limit,  options).toPromise();
     }
 
 }

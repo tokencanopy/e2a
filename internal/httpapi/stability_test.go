@@ -36,7 +36,7 @@ var betaOperationIDs = []string{
 	"listContacts",
 	"listEngagements",
 	"listReviews",
-	"listScheduled",
+	"listScheduledMessages",
 	"listStarterTemplates",
 	"listTemplates",
 	"putAgentProtection",

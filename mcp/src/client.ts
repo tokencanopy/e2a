@@ -475,9 +475,9 @@ export class McpClient {
     return this.sdk.reviews.list(rest).page(cursor);
   }
 
-  listScheduled(params: { cursor?: string; limit?: number } = {}): Promise<Page<ScheduledMessageView>> {
+  listScheduledMessages(params: { cursor?: string; limit?: number } = {}): Promise<Page<ScheduledMessageView>> {
     const { cursor, ...rest } = params;
-    return this.sdk.scheduled.list(rest).page(cursor);
+    return this.sdk.scheduledMessages.list(rest).page(cursor);
   }
 
   getReview(messageId: string): Promise<MessageView> {

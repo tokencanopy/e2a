@@ -2512,15 +2512,15 @@ export class ObservableScheduledApi {
     }
 
     /**
-     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
      * List messages awaiting a scheduled send (beta)
      * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
      * @param [limit] Maximum number of items to return (1-100).
      */
-    public listScheduledWithHttpInfo(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<HttpInfo<PageScheduledMessageView>> {
+    public listScheduledMessagesWithHttpInfo(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<HttpInfo<PageScheduledMessageView>> {
         const _config = mergeConfiguration(this.configuration, _options);
 
-        const requestContextPromise = this.requestFactory.listScheduled(cursor, limit, _config);
+        const requestContextPromise = this.requestFactory.listScheduledMessages(cursor, limit, _config);
         // build promise chain
         let middlewarePreObservable = from<RequestContext>(requestContextPromise);
         for (const middleware of _config.middleware) {
@@ -2533,18 +2533,18 @@ export class ObservableScheduledApi {
                 for (const middleware of _config.middleware.reverse()) {
                     middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
                 }
-                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.listScheduledWithHttpInfo(rsp)));
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.listScheduledMessagesWithHttpInfo(rsp)));
             }));
     }
 
     /**
-     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
      * List messages awaiting a scheduled send (beta)
      * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
      * @param [limit] Maximum number of items to return (1-100).
      */
-    public listScheduled(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<PageScheduledMessageView> {
-        return this.listScheduledWithHttpInfo(cursor, limit, _options).pipe(map((apiResponse: HttpInfo<PageScheduledMessageView>) => apiResponse.data));
+    public listScheduledMessages(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<PageScheduledMessageView> {
+        return this.listScheduledMessagesWithHttpInfo(cursor, limit, _options).pipe(map((apiResponse: HttpInfo<PageScheduledMessageView>) => apiResponse.data));
     }
 
 }

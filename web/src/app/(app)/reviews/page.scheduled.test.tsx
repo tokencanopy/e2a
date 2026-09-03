@@ -46,7 +46,7 @@ const SCHEDULED_ROW = {
 
 function stageFetch(scheduledItems: unknown[]) {
   mockFetch.mockImplementation((url: string) => {
-    if (url === "/v1/scheduled") {
+    if (url === "/v1/scheduled-messages") {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -89,7 +89,7 @@ describe("Pending page — Scheduled tab", () => {
 
   it("expands a scheduled row to show the message body read-only (no approve/reject)", async () => {
     mockFetch.mockImplementation((url: string) => {
-      if (url === "/v1/scheduled") {
+      if (url === "/v1/scheduled-messages") {
         return Promise.resolve({
           ok: true,
           status: 200,
@@ -143,6 +143,25 @@ describe("Pending page — Scheduled tab", () => {
     // Read-only: still no approve/reject affordance.
     expect(screen.queryByText(/Approve/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Reject/)).not.toBeInTheDocument();
+  });
+
+  it("flags an overdue-but-pending scheduled send instead of a Sends label", async () => {
+    // A send whose fire time has passed but is still accepted (e.g. deferred by
+    // the daily send cap). GET /v1/scheduled now surfaces it; the row frames it
+    // as overdue rather than hiding it until it fires.
+    stageFetch([
+      { ...SCHEDULED_ROW, id: "msg_overdue_1", scheduled_at: "2020-01-01T09:00:00Z" },
+    ]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("Quarterly update")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/^Overdue · was due /)).toBeInTheDocument();
+    expect(screen.queryByText(/^Sends /)).not.toBeInTheDocument();
+    // Still read-only — overdue is not a hold.
+    expect(screen.queryByText(/Approve/)).not.toBeInTheDocument();
   });
 
   it("shows the empty state when nothing is scheduled", async () => {

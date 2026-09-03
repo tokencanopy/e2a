@@ -779,7 +779,7 @@ function scheduledSummary(r: ScheduledWire): PendingMessageSummary {
 // soonest-first. Reuses PendingMessageSummary as the row shape so the Pending
 // page can render both tabs with the same summary type.
 export async function listScheduledMessages(): Promise<PendingMessageSummary[]> {
-  const page = await request<ScheduledPageWire>("/v1/scheduled");
+  const page = await request<ScheduledPageWire>("/v1/scheduled-messages");
   return (page.items ?? []).map(scheduledSummary);
 }
 

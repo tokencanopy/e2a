@@ -34,7 +34,7 @@ class ScheduledMessageView(BaseModel):
     direction: StrictStr
     header_from: Optional[StrictStr] = Field(description="The sender identity for this outbound message; null when unavailable.")
     id: StrictStr = Field(description="The scheduled message's id (msg_…). Interchangeable with the message id on GET /v1/agents/{email}/messages/{id}.")
-    scheduled_at: Optional[datetime] = Field(description="Beta: scheduled sending may change before it is declared stable. The future instant the message is queued to be submitted. Always present and in the future for items in this queue.")
+    scheduled_at: Optional[datetime] = Field(description="Beta: scheduled sending may change before it is declared stable. The instant the message is queued to be submitted. Always present for items in this queue, but not always in the future: an overdue value means the send is still pending but its fire time has passed (e.g. it was deferred at fire time by the account's daily send cap), so it is shown here rather than hidden until it fires.")
     subject: StrictStr
     to: List[StrictStr]
     additional_properties: Dict[str, Any] = {}

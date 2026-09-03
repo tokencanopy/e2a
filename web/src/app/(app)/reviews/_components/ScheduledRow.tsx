@@ -17,7 +17,11 @@ import {
 } from "../../../components/onboarding/api";
 import type { PendingMessageSummary } from "../../../components/types";
 import { Chip } from "@e2a/ui";
-import { formatScheduledSend } from "../../../../lib/scheduledTime";
+import {
+  formatScheduledSend,
+  formatOverdueSend,
+  isScheduleOverdue,
+} from "../../../../lib/scheduledTime";
 import { joinCSV } from "./edits";
 import { EmailHtmlBody } from "../../../components/messages/EmailHtmlBody";
 
@@ -39,7 +43,10 @@ export function ScheduledRow({ summary }: { summary: PendingMessageSummary }) {
   const agentEmail = summary.agent_email;
   const id = summary.id;
   const hue = hueFor(agentEmail);
-  const sendsLabel = formatScheduledSend(summary.scheduled_at);
+  const overdue = isScheduleOverdue(summary.scheduled_at);
+  const sendsLabel = overdue
+    ? formatOverdueSend(summary.scheduled_at)
+    : formatScheduledSend(summary.scheduled_at);
   const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
 
@@ -93,7 +100,9 @@ export function ScheduledRow({ summary }: { summary: PendingMessageSummary }) {
             {summary.to && summary.to.length > 1 && ` +${summary.to.length - 1}`}
           </span>
         </span>
-        {sendsLabel && <Chip tone="success">{sendsLabel}</Chip>}
+        {sendsLabel && (
+          <Chip tone={overdue ? "warn" : "success"}>{sendsLabel}</Chip>
+        )}
         <span
           aria-hidden
           className="shrink-0 text-[11px]"
@@ -128,10 +137,15 @@ export function ScheduledRow({ summary }: { summary: PendingMessageSummary }) {
               {sendsLabel && (
                 <p
                   className="text-[12px] px-4 py-2"
-                  style={{ background: "var(--success-bg)", color: "var(--success-strong)" }}
+                  style={
+                    overdue
+                      ? { background: "var(--warn-bg)", color: "var(--warn-strong)" }
+                      : { background: "var(--success-bg)", color: "var(--success-strong)" }
+                  }
                 >
-                  {sendsLabel} — queued to send automatically. This is a preview;
-                  it has not been sent yet.
+                  {overdue
+                    ? `${sendsLabel} — its scheduled time has passed but it hasn't sent yet (for example, deferred by your daily send cap). It's still queued and will go out on the next retry. This is a preview.`
+                    : `${sendsLabel} — queued to send automatically. This is a preview; it has not been sent yet.`}
                 </p>
               )}
               <div className="px-4 py-3">

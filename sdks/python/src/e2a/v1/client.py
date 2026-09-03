@@ -360,7 +360,7 @@ class AsyncE2AClient:
         self.webhooks = WebhooksResource(WebhooksApi(self._api_client), self)
         self.account = AccountResource(AccountApi(self._api_client), self)
         self.reviews = ReviewsResource(ReviewsApi(self._api_client), self)
-        self.scheduled = ScheduledResource(ScheduledApi(self._api_client), self)
+        self.scheduled_messages = ScheduledResource(ScheduledApi(self._api_client), self)
         self.templates = TemplatesResource(TemplatesApi(self._api_client), self)
         self.contacts = ContactsResource(ContactsApi(self._api_client), self)
         self._meta = MetaApi(self._api_client)
@@ -867,10 +867,13 @@ class ReviewsResource:
 
 class ScheduledResource:
     """The account-scoped scheduled-send queue (beta): outbound messages accepted
-    and awaiting a future send_at to fire, soonest-first. Read-only — a scheduled
-    send is not a hold, so there is nothing to approve or reject here. Disjoint
-    from the review queue: a held draft is not yet accepted and appears there
-    instead. Account-scoped credentials only."""
+    and awaiting a scheduled send, soonest-first. Includes overdue-but-pending
+    sends — a scheduled_at in the past means the send is still queued but its
+    fire time has passed (e.g. deferred by the daily send cap), surfaced here
+    rather than hidden until it fires. Read-only — a scheduled send is not a
+    hold, so there is nothing to approve or reject here. Disjoint from the review
+    queue: a held draft is not yet accepted and appears there instead.
+    Account-scoped credentials only."""
 
     def __init__(self, api: ScheduledApi, client: AsyncE2AClient) -> None:
         self._api = api
@@ -879,7 +882,7 @@ class ScheduledResource:
     def list(self, *, limit: Optional[int] = None) -> AutoPager[ScheduledMessageView]:
         # Cursor-paginated: the AutoPager walks next_cursor to completion.
         async def fetch(cursor: Optional[str]) -> Page:
-            resp = await self._c._read(lambda h: self._api.list_scheduled(cursor=cursor, limit=limit, _headers=h))
+            resp = await self._c._read(lambda h: self._api.list_scheduled_messages(cursor=cursor, limit=limit, _headers=h))
             return _page(resp.items, resp.next_cursor)
 
         return AutoPager(fetch)

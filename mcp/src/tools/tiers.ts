@@ -77,7 +77,7 @@ export const ADMIN_TOOLS: ReadonlySet<string> = new Set([
   // self-approval of its own outbound mail.
   "list_reviews",
   "get_review",
-  "list_scheduled",
+  "list_scheduled_messages",
   "list_pending_messages",
   "get_pending_message",
   // Review approval is an account-owner / human review action — NOT something the

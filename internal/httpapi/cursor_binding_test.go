@@ -300,7 +300,7 @@ var cursorBoundEndpoints = []struct {
 	{"templates", "/v1/templates?limit=1", "/v1/templates?limit=1"},
 	{"api_keys", "/v1/account/api-keys?limit=1", "/v1/account/api-keys?limit=1"},
 	{"reviews", "/v1/reviews?limit=1", "/v1/reviews?limit=1"},
-	{"scheduled", "/v1/scheduled?limit=1", "/v1/scheduled?limit=1"},
+	{"scheduled", "/v1/scheduled-messages?limit=1", "/v1/scheduled-messages?limit=1"},
 	{"events", "/v1/events?limit=1", "/v1/events?limit=1"},
 	{"account_suppressions", "/v1/account/suppressions?limit=1", "/v1/account/suppressions?limit=1"},
 	{"contacts", "/v1/contacts?limit=1", "/v1/contacts?limit=1"},

@@ -11,7 +11,7 @@ import (
 
 const scheduledBetaDoc = "Beta: scheduled sending is unstable — its shape may change before it is declared stable."
 
-// The scheduled queue (/v1/scheduled) is the operator surface for outbound
+// The scheduled queue (/v1/scheduled-messages) is the operator surface for outbound
 // messages that have been accepted and are waiting for a future send_at to fire
 // (#815). It is a first-class, ACCOUNT-SCOPED resource, deliberately parallel to
 // the review queue (/v1/reviews): the two are disjoint (a held draft is never
@@ -33,7 +33,7 @@ type ScheduledMessageView struct {
 	ConversationID string     `json:"conversation_id,omitempty"`
 	DeliveryStatus string     `json:"delivery_status" doc:"Always accepted while a future scheduled_at is pending: scheduling introduces no new delivery_status (migration 084). Open set; tolerate unknown values."`
 	CreatedAt      time.Time  `json:"created_at"`
-	ScheduledAt    *time.Time `json:"scheduled_at" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. The future instant the message is queued to be submitted. Always present and in the future for items in this queue."`
+	ScheduledAt    *time.Time `json:"scheduled_at" format:"date-time" doc:"Beta: scheduled sending may change before it is declared stable. The instant the message is queued to be submitted. Always present for items in this queue, but not always in the future: an overdue value means the send is still pending but its fire time has passed (e.g. it was deferred at fire time by the account's daily send cap), so it is shown here rather than hidden until it fires."`
 }
 
 func scheduledMessageView(it identity.ScheduledListItem) ScheduledMessageView {
@@ -66,9 +66,9 @@ type listScheduledInput struct {
 
 func (s *Server) registerScheduled() {
 	registerOp(s.API, huma.Operation{
-		OperationID: "listScheduled", Method: http.MethodGet, Path: "/v1/scheduled",
+		OperationID: "listScheduledMessages", Method: http.MethodGet, Path: "/v1/scheduled-messages",
 		Summary: "List messages awaiting a scheduled send (beta)", Tags: []string{"scheduled"},
-		Description: "The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account's inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. " + scheduledBetaDoc,
+		Description: "The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account's inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. " + scheduledBetaDoc,
 		Security:    []map[string][]string{{"bearer": {}}},
 		Extensions:  beta(),
 	}, s.handleListScheduled)

@@ -38,7 +38,7 @@ func TestScheduled_ListReturnsAcceptedFutureSends(t *testing.T) {
 			{ID: "msg_2", AgentID: "support@acme.dev", Direction: "outbound", Sender: "support@acme.dev", To: []string{"cust@x.com"}, Subject: "later", DeliveryStatus: "accepted", CreatedAt: soon, ScheduledAt: &later},
 		}, nil
 	})
-	code, body := getJSON(t, srv.URL+"/v1/scheduled", "good")
+	code, body := getJSON(t, srv.URL+"/v1/scheduled-messages", "good")
 	if code != 200 {
 		t.Fatalf("status %d body %v", code, body)
 	}
@@ -66,7 +66,7 @@ func TestScheduled_RequiresAccountScope(t *testing.T) {
 		t.Fatal("ListScheduled must not be called without auth")
 		return nil, nil
 	})
-	code, _ := getJSON(t, srv.URL+"/v1/scheduled", "")
+	code, _ := getJSON(t, srv.URL+"/v1/scheduled-messages", "")
 	if code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", code)
 	}
@@ -74,7 +74,7 @@ func TestScheduled_RequiresAccountScope(t *testing.T) {
 
 func TestScheduled_NotImplementedWhenUnwired(t *testing.T) {
 	srv := scheduledServer(t, nil)
-	code, body := getJSON(t, srv.URL+"/v1/scheduled", "good")
+	code, body := getJSON(t, srv.URL+"/v1/scheduled-messages", "good")
 	if code != http.StatusNotImplemented {
 		t.Fatalf("status = %d body %v, want 501", code, body)
 	}
@@ -90,7 +90,7 @@ func TestScheduled_PaginationEmitsNextCursor(t *testing.T) {
 		}
 		return out, nil
 	})
-	code, body := getJSON(t, srv.URL+"/v1/scheduled?limit=1", "good")
+	code, body := getJSON(t, srv.URL+"/v1/scheduled-messages?limit=1", "good")
 	if code != 200 {
 		t.Fatalf("status %d body %v", code, body)
 	}

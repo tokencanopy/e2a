@@ -1820,26 +1820,26 @@ export class PromiseScheduledApi {
     }
 
     /**
-     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
      * List messages awaiting a scheduled send (beta)
      * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
      * @param [limit] Maximum number of items to return (1-100).
      */
-    public listScheduledWithHttpInfo(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<HttpInfo<PageScheduledMessageView>> {
+    public listScheduledMessagesWithHttpInfo(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<HttpInfo<PageScheduledMessageView>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.listScheduledWithHttpInfo(cursor, limit, observableOptions);
+        const result = this.api.listScheduledMessagesWithHttpInfo(cursor, limit, observableOptions);
         return result.toPromise();
     }
 
     /**
-     * The scheduled-send queue: every outbound message accepted and waiting for a future send_at to fire, across the account\'s inboxes, soonest-first. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
      * List messages awaiting a scheduled send (beta)
      * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
      * @param [limit] Maximum number of items to return (1-100).
      */
-    public listScheduled(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<PageScheduledMessageView> {
+    public listScheduledMessages(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<PageScheduledMessageView> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.listScheduled(cursor, limit, observableOptions);
+        const result = this.api.listScheduledMessages(cursor, limit, observableOptions);
         return result.toPromise();
     }
 

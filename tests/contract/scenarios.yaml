@@ -1043,7 +1043,7 @@ scenarios:
       - id: list_via_scheduled_queue
         action: request
         method: GET
-        path: /v1/scheduled
+        path: /v1/scheduled-messages
         expect:
           status: 200
           body_array_contains:
