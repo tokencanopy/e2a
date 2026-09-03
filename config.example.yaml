@@ -451,6 +451,14 @@ metrics:
 #   text: ""                # plain-text footer
 #   html: ""                # HTML fragment appended to the HTML part
 
+# One-question onboarding survey ("Where did you hear about e2a?") shown
+# once to each dashboard user before the rest of the app. Off by default;
+# the answer is stored write-once on the user row (migration 120) and is
+# only useful to operators who read their own database for analytics.
+# Override with E2A_ONBOARDING_SURVEY_ENABLED.
+# onboarding_survey:
+#   enabled: false
+
 
 
 # — Content screening (piguard) ——————————————————————————————————————————————

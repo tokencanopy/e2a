@@ -1121,3 +1121,57 @@ func TestSenderIdentityOrphanReclaim(t *testing.T) {
 			cfg.SenderIdentity.ReclaimMinAge, cfg.SenderIdentity.ReclaimMaxPerSweep)
 	}
 }
+
+func TestOnboardingSurveyDefaultsOffAndLoadsFromYAML(t *testing.T) {
+	cfg := loadConfigFromYAML(t, minimalConfigYAML)
+	if cfg.OnboardingSurvey.Enabled {
+		t.Fatal("onboarding_survey.enabled should default to false")
+	}
+	cfg = loadConfigFromYAML(t, minimalConfigYAML+"\nonboarding_survey:\n  enabled: true\n")
+	if !cfg.OnboardingSurvey.Enabled {
+		t.Fatal("onboarding_survey.enabled=true not loaded from YAML")
+	}
+}
+
+func TestOnboardingSurveyEnvOverride(t *testing.T) {
+	t.Setenv("E2A_ONBOARDING_SURVEY_ENABLED", "true")
+	cfg := loadConfigFromYAML(t, minimalConfigYAML)
+	if !cfg.OnboardingSurvey.Enabled {
+		t.Fatal("E2A_ONBOARDING_SURVEY_ENABLED=true did not override")
+	}
+	t.Setenv("E2A_ONBOARDING_SURVEY_ENABLED", "false")
+	cfg = loadConfigFromYAML(t, minimalConfigYAML+"\nonboarding_survey:\n  enabled: true\n")
+	if cfg.OnboardingSurvey.Enabled {
+		t.Fatal("E2A_ONBOARDING_SURVEY_ENABLED=false did not override YAML true")
+	}
+}
+
+const minimalConfigYAML = `
+smtp:
+  listen_addr: ":3025"
+  domain: "test.e2a.dev"
+http:
+  listen_addr: ":9090"
+database:
+  url: "postgres://test:test@localhost/test"
+signing:
+  hmac_secret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+env: "production"
+outbound_smtp:
+  host: "smtp.example.com"
+  port: 465
+  from_domain: "mail.e2a.dev"
+`
+
+func loadConfigFromYAML(t *testing.T, yaml string) *Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg
+}
