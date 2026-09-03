@@ -1,5 +1,37 @@
 # Changelog
 
+## 5.9.0
+
+### Changed
+- **Dot-segment path parameters are now rejected for *every* generated request,
+  not just the ten wrapper methods 5.8.0 covered.** The guard moved down to the
+  generated `RequestContext` chokepoint (both the constructor and `setUrl`), so
+  any `/v1` call whose templated path contains a literal `.` or `..` segment
+  throws `HttpException` ("request path contains an unsafe `..` segment")
+  *before* `new URL()` collapses the segment. Previously that collapse happened
+  before any middleware or retry layer could see it, so a caller-controlled
+  value of exactly `..` silently retargeted the request at a different,
+  larger-scoped resource. 5.8.0 closed this for the ten hand-written wrappers it
+  enumerated; every other path parameter — including any added by future codegen
+  — was still exposed. The guard is injected by a codegen post-processing step
+  rather than hand-edited, so `make generate` cannot drop it again. This is a
+  behavior change for any caller that was, deliberately or not, passing `.` or
+  `..` as a path parameter: it now throws instead of sending the (misdirected)
+  request.
+
+### Documentation
+- Regenerated model and operation docs for the outbound-metering semantics the
+  server now documents. `LimitsCapsView.maxMessagesMonth` and
+  `LimitsUsageView.messagesMonth` are described as **outbound
+  recipient-deliveries** — a message to N distinct recipients consumes N units,
+  and received mail is free and never counted. `LimitExceededDetails.resource`
+  documents the additional `messages_day` stem (a per-UTC-day send cap carried
+  by some accounts; it has no `AccountView` field and resets at midnight UTC),
+  and the `402` throw sites say to retry after the UTC day rolls over.
+  `ErrorBody.code` documents `auth_unavailable` (503 — an auth backend could not
+  judge the credential; retry). Field names, types, and runtime behavior are
+  unchanged from 5.8.0.
+
 ## 5.8.0
 
 ### Added
