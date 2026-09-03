@@ -91,7 +91,7 @@ func accountDailyLimit(policy RuntimePolicy, planCode string) int {
 //     lets a pause notice go out during the abuse wave that exhausted
 //     everything else;
 //   - trusted first-party traffic charges nothing.
-func scopeKeys(purpose Purpose, accountID string, shared, probation bool) []counterKey {
+func scopeKeys(purpose Purpose, accountID string, shared, probation bool) ([]counterKey, error) {
 	var keys []counterKey
 	switch purpose {
 	case PurposeCustomerMessage, PurposeCustomerNotification:
@@ -115,10 +115,16 @@ func scopeKeys(purpose Purpose, accountID string, shared, probation bool) []coun
 	case PurposeViolationOperational:
 		keys = append(keys, counterKey{ScopeGlobalViolation, scopeIDViolation})
 	case PurposeTrustedSystem:
-		return nil
+		return nil, nil
+	default:
+		// Charging nothing is the most permissive answer this function can
+		// give, so it must never be the answer to a question it does not
+		// understand. A purpose added to the closed set but not to this switch
+		// would otherwise become an unbudgeted send path.
+		return nil, fmt.Errorf("sendingpolicy: no budget mapping for purpose %q", purpose)
 	}
 	sortCounterKeys(keys)
-	return keys
+	return keys, nil
 }
 
 // limitFor resolves today's cap for one counter under the current policy and
@@ -139,28 +145,6 @@ func limitFor(key counterKey, policy RuntimePolicy, planCode string) int {
 		return policy.ViolationOperationalDailyRecip
 	}
 	return 0
-}
-
-// optimisticLimitFor is the cap Reserve checks against: the most permissive
-// value any plan could produce for this scope.
-//
-// Reserve does not take the account-control and plan locks that make a plan
-// read authoritative, so it cannot know whether this account is paid. That
-// leaves two ways to be wrong, and they are not symmetric. A false ALLOW here
-// costs nothing — ConsumeAttempt re-evaluates every scope under the real locks
-// and holds the message if it must. A false DENY is a customer-visible outage:
-// the worker treats an early hold as "snooze until midnight", so guessing the
-// Free cap for a paying customer would defer their mail for a day that
-// ConsumeAttempt would have allowed. So Reserve deliberately denies only when
-// no plan could have fit.
-func optimisticLimitFor(key counterKey, policy RuntimePolicy) int {
-	if key.Scope != ScopeAccountDaily {
-		return limitFor(key, policy, "")
-	}
-	if policy.AllCustomerGlobalDailyRecipients > policy.DefaultAccountDailyRecipients {
-		return policy.AllCustomerGlobalDailyRecipients
-	}
-	return policy.DefaultAccountDailyRecipients
 }
 
 // holdReasonForScope maps a denied counter to its machine-readable reason.
@@ -185,11 +169,17 @@ func holdReasonForScope(scope Scope) string {
 // ledgerDay reads the UTC date this transaction's writes belong to.
 //
 // clock_timestamp(), not now(): now() is frozen at transaction start, so a
-// transaction that began at 23:59:59 and then waited two seconds on a row lock
-// would charge yesterday's counter while the rest of the fleet had already
-// rolled over. Reading the wall clock AFTER the serializing locks are held is
-// what makes the day boundary consistent with lock acquisition, and it is why
-// the adjacent-day physical exposure bound is 2*cap rather than unbounded.
+// transaction that began at 23:59:59 and then waited two seconds on the
+// operation lock would charge yesterday's counter while the rest of the fleet
+// had already rolled over.
+//
+// Precisely: this is read after the operation and attempt locks and BEFORE the
+// counter locks, so a transaction can still wait on a contended counter after
+// fixing its day. The adjacent-day exposure bound is therefore
+// 2*cap over a window as wide as that counter lock wait, not an instant —
+// deliberately inducing contention on a global pool at 23:59:5x widens it. The
+// bound itself holds either way, because each side of the boundary is still a
+// separate counter row with its own cap.
 func ledgerDay(ctx context.Context, tx pgx.Tx) (time.Time, error) {
 	var day time.Time
 	if err := tx.QueryRow(ctx, `SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&day); err != nil {

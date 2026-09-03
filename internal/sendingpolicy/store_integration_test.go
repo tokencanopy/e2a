@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -139,6 +140,16 @@ var messageSeq int
 
 // message inserts an outbound message with `count` distinct recipients.
 func (f *fixture) message(agentID, sentAs string, count int) string {
+	return f.messageWithStatus(agentID, sentAs, count, "sent")
+}
+
+// pendingMessage inserts one awaiting human approval — the only shape a HITL
+// notification may be derived from.
+func (f *fixture) pendingMessage(agentID, sentAs string) string {
+	return f.messageWithStatus(agentID, sentAs, 1, "pending_review")
+}
+
+func (f *fixture) messageWithStatus(agentID, sentAs string, count int, status string) string {
 	f.t.Helper()
 	messageSeq++
 	id := fmt.Sprintf("msg_gate_%d", messageSeq)
@@ -148,8 +159,8 @@ func (f *fixture) message(agentID, sentAs string, count int) string {
 	}
 	if _, err := f.pool.Exec(f.ctx,
 		`INSERT INTO messages (id, agent_id, direction, to_recipients, sent_as, status)
-		 VALUES ($1, $2, 'outbound', $3, $4, 'sent')`,
-		id, agentID, to, sentAs,
+		 VALUES ($1, $2, 'outbound', $3, $4, $5)`,
+		id, agentID, to, sentAs, status,
 	); err != nil {
 		f.t.Fatalf("insert message: %v", err)
 	}
@@ -211,14 +222,23 @@ func (f *fixture) send(g sendingpolicy.Gate, messageID string) sendingpolicy.Dec
 	return f.authorize(g, ref)
 }
 
-// authorize runs Reserve then ConsumeAttempt, asserting only that the two
-// agree: an early hold must not be followed by a final allow for the same
-// exhausted pool.
+// authorize runs the worker's real sequence: Reserve, and then ConsumeAttempt
+// ONLY if Reserve allowed.
+//
+// This fidelity is load-bearing, and an earlier version of this helper did not
+// have it — it threw Reserve's decision away and always called ConsumeAttempt.
+// That made roughly twenty cap and notice tests pass over three genuine bugs,
+// because the real worker snoozes on an early hold and never reaches the final
+// authorization those tests were actually exercising. A test helper that is
+// more forgiving than production is not a helper.
 func (f *fixture) authorize(g sendingpolicy.Gate, ref sendingpolicy.OperationRef) sendingpolicy.Decision {
 	f.t.Helper()
-	_, attempt, err := g.Reserve(f.ctx, ref)
+	early, attempt, err := g.Reserve(f.ctx, ref)
 	if err != nil {
 		f.t.Fatalf("reserve: %v", err)
+	}
+	if !early.Allow {
+		return early
 	}
 	decision, auth, err := g.ConsumeAttempt(f.ctx, attempt)
 	if err != nil {
@@ -385,7 +405,7 @@ func TestSharedMailboxAndNotificationsShareOneAccountCounter(t *testing.T) {
 	}
 
 	// One HITL notification: same pool, one unit.
-	held := f.message(agent, "relay", 1)
+	held := f.pendingMessage(agent, "relay")
 	var noticeRef sendingpolicy.OperationRef
 	f.inTx(func(tx pgx.Tx) error {
 		var err error
@@ -941,5 +961,168 @@ func TestLoopbackIsNotProviderBound(t *testing.T) {
 	}
 	if ops != 0 {
 		t.Errorf("loopback created %d operations, want 0", ops)
+	}
+}
+
+// TestLoopbackExemptionIsGrantedOnShapeNotLabel proves the one unbudgeted
+// message path cannot be entered by writing a word into a column.
+//
+// `method='loopback'` is one write away from being the whole bypass, so the row
+// must also look like the only thing the spec exempts: exactly one To, no Cc,
+// no Bcc. Anything else is ordinary provider-bound mail.
+func TestLoopbackExemptionIsGrantedOnShapeNotLabel(t *testing.T) {
+	for name, shape := range map[string]struct {
+		to, cc, bcc []string
+		exempt      bool
+	}{
+		"exact self send":   {to: []string{"self@example.test"}, exempt: true},
+		"loopback plus cc":  {to: []string{"self@example.test"}, cc: []string{"out@example.test"}},
+		"loopback plus bcc": {to: []string{"self@example.test"}, bcc: []string{"out@example.test"}},
+		"loopback fan-out":  {to: []string{"self@example.test", "out@example.test"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			g := f.gate(enforcingPolicy(nil))
+			agent := f.agent(f.user("standard"))
+
+			messageSeq++
+			id := fmt.Sprintf("msg_gate_shape_%d", messageSeq)
+			if _, err := f.pool.Exec(f.ctx, `
+				INSERT INTO messages (id, agent_id, direction, method, to_recipients, cc, bcc, sent_as, status)
+				VALUES ($1, $2, 'outbound', 'loopback', $3, $4, $5, 'own_address', 'sent')`,
+				id, agent, shape.to, shape.cc, shape.bcc,
+			); err != nil {
+				t.Fatalf("insert message: %v", err)
+			}
+
+			accept, ref := f.prepareMessage(g, id)
+			if accept != sendingpolicy.AcceptanceAccept {
+				t.Fatalf("acceptance = %q, want accept", accept)
+			}
+			if ref.IsZero() != shape.exempt {
+				t.Fatalf("exempt = %v, want %v (a %q message)", ref.IsZero(), shape.exempt, name)
+			}
+		})
+	}
+}
+
+// TestHITLNotificationRequiresAMessageAwaitingReview proves a notification is
+// owed only for a message that is actually held. Deriving one from a settled
+// message would let any old row mint customer-attributed provider capacity.
+func TestHITLNotificationRequiresAMessageAwaitingReview(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	user := f.user("standard")
+	agent := f.agent(user)
+
+	settled := f.message(agent, "relay", 1) // status 'sent'
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	_, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewHITLNotificationRef(settled))
+	_ = tx.Rollback(f.ctx)
+	if !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("notification from a settled message = %v, want ErrSourceUnavailable", err)
+	}
+
+	held := f.pendingMessage(agent, "relay")
+	var ref sendingpolicy.OperationRef
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		ref, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewHITLNotificationRef(held))
+		return err
+	})
+	if ref.IsZero() {
+		t.Fatal("a held message must produce a notification operation")
+	}
+}
+
+// TestNonCustomerCorrelationsExpireAtCreation pins the retention split.
+//
+// A customer's correlation must outlive its message for as long as the account
+// exists, so a controlled recipient cannot wait out a fixed timer before
+// complaining; the post-deletion janitor sets that horizon. A non-customer
+// operation has no account to outlive, so it gets the horizon immediately
+// rather than being retained forever.
+func TestNonCustomerCorrelationsExpireAtCreation(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+
+	// Customer message: no expiry yet.
+	agent := f.agent(f.user("standard"))
+	_, customerRef := f.prepareMessage(g, f.message(agent, "own_address", 1))
+	if d := f.authorize(g, customerRef); !d.Allow {
+		t.Fatalf("customer send: %q", d.Reason)
+	}
+
+	// Public feedback: expiry set at creation.
+	feedbackRef, err := g.PreparePublicFeedback(f.ctx,
+		sendingpolicy.NewPublicFeedbackRef("sub_exp", []string{"ops@example.test"}))
+	if err != nil {
+		t.Fatalf("prepare feedback: %v", err)
+	}
+	if d := f.authorize(g, feedbackRef); !d.Allow {
+		t.Fatalf("feedback send: %q", d.Reason)
+	}
+
+	for _, tc := range []struct {
+		operation string
+		wantSet   bool
+	}{
+		{customerRef.ID(), false},
+		{feedbackRef.ID(), true},
+	} {
+		var expires *time.Time
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT expires_at FROM sending_feedback_correlations WHERE operation_id = $1`, tc.operation,
+		).Scan(&expires); err != nil {
+			t.Fatalf("read correlation for %s: %v", tc.operation, err)
+		}
+		if (expires != nil) != tc.wantSet {
+			t.Errorf("operation %s expires_at set = %v, want %v", tc.operation, expires != nil, tc.wantSet)
+		}
+	}
+}
+
+// TestReputationClassCannotBecomeCheaperAfterPreparation closes the gap between
+// an immutable class and a mutable source column.
+//
+// `shared_reputation` is frozen when the operation is prepared, but
+// `messages.sent_as` is rewritten by the approval path and depends on the
+// domain's live verification state. A message prepared while the customer's own
+// domain was sending-verified, and approved after it was not, would be
+// physically sent over the shared relay while being budgeted as dedicated —
+// escaping both the shared-domain cap and the probation pool.
+func TestReputationClassCannotBecomeCheaperAfterPreparation(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	messageID := f.message(agent, "own_address", 1)
+	_, ref := f.prepareMessage(g, messageID)
+
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE messages SET sent_as = 'relay' WHERE id = $1`, messageID); err != nil {
+		t.Fatalf("downgrade sent_as: %v", err)
+	}
+
+	d := f.authorize(g, ref)
+	if d.Allow {
+		t.Fatal("a message that became shared after preparation must not be sent on a dedicated budget")
+	}
+	if d.Reason != sendingpolicy.ReasonClassChanged {
+		t.Errorf("reason = %q, want %q", d.Reason, sendingpolicy.ReasonClassChanged)
+	}
+
+	// The other direction needs no action: an operation already classed as
+	// shared simply stays shared, which is the stricter reading.
+	shared := f.message(agent, "relay", 1)
+	_, sharedRef := f.prepareMessage(g, shared)
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE messages SET sent_as = 'own_address' WHERE id = $1`, shared); err != nil {
+		t.Fatalf("upgrade sent_as: %v", err)
+	}
+	if d := f.authorize(g, sharedRef); !d.Allow {
+		t.Fatalf("tightening in the safe direction must still send: %q", d.Reason)
 	}
 }

@@ -245,11 +245,74 @@ func TestEnvelopeComparisonIgnoresCaseAndOrder(t *testing.T) {
 		upperFirst(authorized[2]),
 		authorized[0],
 		upperFirst(authorized[1]),
-		authorized[0], // a duplicate spelling is still one recipient
 	}
 	if _, err := auth.ValidateEnvelope(reshaped); err != nil {
 		t.Fatalf("reshaped envelope rejected: %v", err)
 	}
+}
+
+// TestDuplicateSpellingsCannotAmplifyOneChargedUnit is the reputation
+// amplifier the envelope contract exists to close.
+//
+// Normalization collapses case, so a token for one mailbox would "match" an
+// envelope of fifty case-variant spellings of that mailbox — one unit of
+// charged budget authorizing fifty RCPT TO commands, and fifty chances to
+// bounce against the shared SES reputation. The accounting rule that duplicates
+// count once only holds if the submitted envelope IS the deduplicated set.
+func TestDuplicateSpellingsCannotAmplifyOneChargedUnit(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	_, attempt := f.prepareAndReserve(g, agent, 1)
+
+	_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || auth == nil {
+		t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+	authorized := auth.AuthorizedRecipients()
+	if len(authorized) != 1 {
+		t.Fatalf("authorized = %v, want one recipient", authorized)
+	}
+
+	padded := []string{authorized[0]}
+	for i := 0; i < 49; i++ {
+		padded = append(padded, caseVariant(authorized[0], i))
+	}
+
+	var s socket
+	if err := s.send(t, g, auth, padded); !errors.Is(err, sendingpolicy.ErrEnvelopeMismatch) {
+		t.Fatalf("50 case-variant spellings for 1 charged unit = %v, want ErrEnvelopeMismatch", err)
+	}
+	if s.count() != 0 {
+		t.Fatalf("opened %d sockets for a padded envelope, want 0", s.count())
+	}
+
+	// An exact repeat of the same spelling is refused for the same reason: the
+	// caller must collapse To/Cc overlap before submitting, because that is
+	// what it was charged for.
+	if _, err := auth.ValidateEnvelope([]string{authorized[0], authorized[0]}); !errors.Is(err, sendingpolicy.ErrEnvelopeMismatch) {
+		t.Errorf("repeated recipient = %v, want ErrEnvelopeMismatch", err)
+	}
+}
+
+// caseVariant flips the case of the i-th flippable byte of the local part.
+func caseVariant(addr string, i int) string {
+	b := []byte(addr)
+	at := 0
+	for at < len(b) && b[at] != '@' {
+		at++
+	}
+	seen := 0
+	for j := 0; j < at; j++ {
+		if b[j] >= 'a' && b[j] <= 'z' {
+			if seen == i%at {
+				b[j] -= 32
+				return string(b)
+			}
+			seen++
+		}
+	}
+	return string(b)
 }
 
 func upperFirst(addr string) string {
@@ -991,47 +1054,365 @@ func TestTokenCorrelationMatchesTheDurableRow(t *testing.T) {
 	}
 }
 
-// TestReserveNeverDefersAPaidAccountItCannotJudge is the asymmetry that makes
-// the early check safe to act on. Reserve does not hold the locks that make a
-// plan read authoritative, and the worker treats an early hold as "snooze until
-// midnight" — so guessing the Free cap for a paying customer would defer their
-// mail for a day that final authorization would have allowed.
-func TestReserveNeverDefersAPaidAccountItCannotJudge(t *testing.T) {
+// TestReserveJudgesTheAuthoritativePlanAndClass replaces an earlier design in
+// which Reserve guessed.
+//
+// Guessing was wrong in both directions, and neither direction was cheap.
+// Judging the account scope PESSIMISTICALLY deferred a paying customer's mail
+// to the next midnight, because the worker treats an early hold as "snooze".
+// Judging it OPTIMISTICALLY — while still charging the shared global pools at
+// their real limits — let one Free account hold the whole platform pool in
+// reservations it could never confirm. Reading the class and the plan costs one
+// FOR SHARE each and removes both failure modes.
+func TestReserveJudgesTheAuthoritativePlanAndClass(t *testing.T) {
+	t.Run("paid account is not deferred", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+			p.DefaultAccountDailyRecipients = 2
+			p.AllCustomerGlobalDailyRecipients = 50
+		}))
+		user := f.user("standard")
+		f.plan(user, "pro")
+		agent := f.agent(user)
+
+		_, ref := f.prepareMessage(g, f.message(agent, "own_address", 10))
+		early, attempt, err := g.Reserve(f.ctx, ref)
+		if err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		if !early.Allow {
+			t.Fatalf("Reserve deferred a paid account within its cap (%q)", early.Reason)
+		}
+		if d, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || !d.Allow || auth == nil {
+			t.Fatalf("final authorization: allow=%v reason=%q err=%v", d.Allow, d.Reason, err)
+		}
+	})
+
+	t.Run("free account cannot hold the global pool", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+			p.DefaultAccountDailyRecipients = 2
+			p.AllCustomerGlobalDailyRecipients = 200
+		}))
+		agent := f.agent(f.user("standard"))
+
+		// Ten 20-recipient messages from an account entitled to 2/day. Every
+		// one must be refused at its own scope WITHOUT taking global units.
+		for i := 0; i < 10; i++ {
+			_, ref := f.prepareMessage(g, f.message(agent, "own_address", 20))
+			d, _, err := g.Reserve(f.ctx, ref)
+			if err != nil {
+				t.Fatalf("reserve %d: %v", i, err)
+			}
+			if d.Allow {
+				t.Fatalf("reserve %d allowed 20 recipients against a cap of 2", i)
+			}
+			if d.Reason != sendingpolicy.ReasonAccountDailyBudget {
+				t.Fatalf("reserve %d reason = %q, want the account scope", i, d.Reason)
+			}
+		}
+		if reserved, _ := f.counter(sendingpolicy.ScopeGlobalAll, "all-customers"); reserved != 0 {
+			t.Fatalf("a Free account parked %d units in the platform pool, want 0", reserved)
+		}
+
+		// A paying tenant still finds the pool empty and is not paged about it.
+		paid := f.user("standard")
+		f.plan(paid, "scale")
+		if d := f.send(g, f.message(f.agent(paid), "own_address", 5)); !d.Allow {
+			t.Fatalf("an unrelated paid tenant was denied: %q", d.Reason)
+		}
+		var guardrails int
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM sending_protection_notice_events WHERE kind = 'global_guardrail'`,
+		).Scan(&guardrails); err != nil {
+			t.Fatalf("count guardrails: %v", err)
+		}
+		if guardrails != 0 {
+			t.Errorf("phantom reservations paged the operator %d times, want 0", guardrails)
+		}
+	})
+
+	t.Run("trusted class is not deferred either", func(t *testing.T) {
+		f := newFixture(t)
+		g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+			p.DefaultAccountDailyRecipients = 1
+			p.AllCustomerGlobalDailyRecipients = 1
+			p.ProbationGlobalDailyRecipients = 1
+			p.SharedDomainAccountDailyRecip = 1
+		}))
+		// Exhaust every pool with ordinary traffic first.
+		if d := f.send(g, f.message(f.agent(f.user("standard")), "relay", 1)); !d.Allow {
+			t.Fatalf("priming send: %q", d.Reason)
+		}
+
+		// The prober must still work during exactly this situation. An
+		// exemption that lives only in ConsumeAttempt is dead here, because the
+		// worker snoozes on Reserve's hold and never gets that far.
+		prober := f.agent(f.user("system"))
+		_, ref := f.prepareMessage(g, f.message(prober, "relay", 5))
+		early, attempt, err := g.Reserve(f.ctx, ref)
+		if err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		if !early.Allow {
+			t.Fatalf("Reserve deferred a trusted account (%q) during an exhausted-pool window", early.Reason)
+		}
+		if d, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || !d.Allow || auth == nil {
+			t.Fatalf("trusted final authorization: allow=%v reason=%q err=%v", d.Allow, d.Reason, err)
+		}
+	})
+}
+
+// TestEarlyDenialStillOwesItsNotice proves the violation notice is written
+// wherever the denial happens.
+//
+// Every scope except the account-daily one is judged identically by Reserve and
+// ConsumeAttempt, so a denial that stops at Reserve is a denial the customer
+// and the operator would otherwise never hear about: the worker snoozes, and
+// the notice writer that used to live only in final authorization is never
+// reached.
+func TestEarlyDenialStillOwesItsNotice(t *testing.T) {
 	f := newFixture(t)
 	g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
-		p.DefaultAccountDailyRecipients = 2
-		p.AllCustomerGlobalDailyRecipients = 50
+		p.SharedDomainAccountDailyRecip = 1
+		p.DefaultAccountDailyRecipients = 100
+		p.AllCustomerGlobalDailyRecipients = 100
+		p.ProbationGlobalDailyRecipients = 100
 	}))
 	user := f.user("standard")
-	f.plan(user, "pro")
 	agent := f.agent(user)
 
-	_, ref := f.prepareMessage(g, f.message(agent, "own_address", 10))
-	early, attempt, err := g.Reserve(f.ctx, ref)
+	if d := f.send(g, f.message(agent, "relay", 1)); !d.Allow {
+		t.Fatalf("first unit: %q", d.Reason)
+	}
+	// This one is refused by Reserve, before ConsumeAttempt is ever called.
+	_, ref := f.prepareMessage(g, f.message(agent, "relay", 1))
+	early, _, err := g.Reserve(f.ctx, ref)
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if !early.Allow {
-		t.Fatalf("Reserve deferred a paid account it cannot judge (%q) — an optimization must not over-deny", early.Reason)
+	if early.Allow {
+		t.Fatal("the second shared unit must be refused")
+	}
+
+	var events int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM sending_protection_notice_events
+		 WHERE kind = 'budget_violation' AND account_ref = $1`, user,
+	).Scan(&events); err != nil {
+		t.Fatalf("count violation events: %v", err)
+	}
+	if events != 1 {
+		t.Fatalf("violation events after an early denial = %d, want 1", events)
+	}
+	var audiences int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM sending_protection_notice_deliveries AS d
+		  JOIN sending_protection_notice_events AS e ON e.id = d.event_id
+		 WHERE e.kind = 'budget_violation'`).Scan(&audiences); err != nil {
+		t.Fatalf("count deliveries: %v", err)
+	}
+	if audiences != 2 {
+		t.Errorf("deliveries = %d, want owner + operator", audiences)
+	}
+}
+
+// TestArmingDoesNotReleaseUnitsNobodyTook is the phantom-release invariant.
+//
+// A reservation made while budgets were disabled holds no capacity, so the
+// first ConsumeAttempt after enforcement is armed must not hand capacity back
+// on its behalf. Getting this wrong is invisible in isolation — the counter's
+// confirmed floor hides it whenever nothing else is in flight — and shows up
+// as the global pool silently over-admitting on the exact day phase 4 arms.
+func TestArmingDoesNotReleaseUnitsNobodyTook(t *testing.T) {
+	f := newFixture(t)
+	armed := enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+		p.AllCustomerGlobalDailyRecipients = 100
+		p.DefaultAccountDailyRecipients = 100
+	})
+
+	// Account A reserves while the budget is disabled: nothing is charged.
+	off := f.gate(sendingpolicy.DisabledPolicy())
+	agentA := f.agent(f.user("standard"))
+	_, refA := f.prepareMessage(off, f.message(agentA, "own_address", 5))
+	_, attemptA, err := off.Reserve(f.ctx, refA)
+	if err != nil {
+		t.Fatalf("reserve A: %v", err)
+	}
+
+	// Account B reserves under the armed policy: 10 real units in flight.
+	on := f.gate(armed)
+	agentB := f.agent(f.user("standard"))
+	_, refB := f.prepareMessage(on, f.message(agentB, "own_address", 10))
+	if _, _, err := on.Reserve(f.ctx, refB); err != nil {
+		t.Fatalf("reserve B: %v", err)
+	}
+	if reserved, _ := f.counter(sendingpolicy.ScopeGlobalAll, "all-customers"); reserved != 10 {
+		t.Fatalf("global reserved = %d, want 10", reserved)
+	}
+
+	if d, auth, err := on.ConsumeAttempt(f.ctx, attemptA); err != nil || !d.Allow || auth == nil {
+		t.Fatalf("A final authorization: allow=%v reason=%q err=%v", d.Allow, d.Reason, err)
+	}
+	reserved, confirmed := f.counter(sendingpolicy.ScopeGlobalAll, "all-customers")
+	if reserved != 15 || confirmed != 5 {
+		t.Fatalf("global reserved=%d confirmed=%d, want 15/5 — B's in-flight units must survive A's arrival",
+			reserved, confirmed)
+	}
+}
+
+// TestDeletedSourceReleasesRatherThanStrands closes a repeatable denial-of-
+// service against the shared pools.
+//
+// When the source row disappears between Reserve and ConsumeAttempt, treating
+// that as an ERROR rolls the transaction back with the attempt still marked
+// reserved — and because every later execution fails at the same point, those
+// units sit on the global pools until midnight with nothing able to release
+// them. Reserve, delete, repeat.
+func TestDeletedSourceReleasesRatherThanStrands(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+		p.AllCustomerGlobalDailyRecipients = 10
+		p.DefaultAccountDailyRecipients = 10
+	}))
+	agent := f.agent(f.user("standard"))
+	messageID := f.message(agent, "own_address", 4)
+	_, ref := f.prepareMessage(g, messageID)
+	_, attempt, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if reserved, _ := f.counter(sendingpolicy.ScopeGlobalAll, "all-customers"); reserved != 4 {
+		t.Fatalf("global reserved = %d, want 4", reserved)
+	}
+
+	if _, err := f.pool.Exec(f.ctx, `DELETE FROM messages WHERE id = $1`, messageID); err != nil {
+		t.Fatalf("delete message: %v", err)
+	}
+
+	d, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil {
+		t.Fatalf("consume after delete: %v", err)
+	}
+	if d.Allow || auth != nil {
+		t.Fatal("a deleted source must not authorize")
+	}
+	if d.Reason != sendingpolicy.ReasonSourceUnavailable {
+		t.Errorf("reason = %q, want %q", d.Reason, sendingpolicy.ReasonSourceUnavailable)
+	}
+	if reserved, _ := f.counter(sendingpolicy.ScopeGlobalAll, "all-customers"); reserved != 0 {
+		t.Fatalf("deleting the source stranded %d units on the shared pool, want 0", reserved)
+	}
+
+	// The pool is fully usable again by everyone else.
+	if d := f.send(g, f.message(f.agent(f.user("standard")), "own_address", 10)); !d.Allow {
+		t.Fatalf("the released capacity is not reusable: %q", d.Reason)
+	}
+}
+
+// TestStaleRedemptionDoesNotRetireTheLiveAttempt proves a late worker cannot
+// destroy a live authorization it has nothing to do with.
+//
+// A stale token is already stale; retiring it retires nothing. Bumping the
+// ordinal unconditionally instead lets it retire the CURRENT attempt another
+// worker is holding — whose confirmed capacity is spent and never refunded, so
+// a supply of stale tokens becomes a livelock that burns the account's budget
+// without a single SES call.
+func TestStaleRedemptionDoesNotRetireTheLiveAttempt(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+		p.DefaultAccountDailyRecipients = 20
+	}))
+	agent := f.agent(f.user("standard"))
+	ref, first := f.prepareAndReserve(g, agent, 1)
+
+	_, staleAuth, err := g.ConsumeAttempt(f.ctx, first)
+	if err != nil || staleAuth == nil {
+		t.Fatalf("first authorization: auth=%v err=%v", staleAuth, err)
+	}
+
+	// A second worker goes around and gets the live ordinal.
+	_, second, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatalf("second reserve: %v", err)
+	}
+	_, liveAuth, err := g.ConsumeAttempt(f.ctx, second)
+	if err != nil || liveAuth == nil {
+		t.Fatalf("second authorization: auth=%v err=%v", liveAuth, err)
+	}
+	if got := f.currentAttempt(ref.ID()); got != 2 {
+		t.Fatalf("current attempt = %d, want 2", got)
+	}
+
+	// The first worker finally wakes up and redeems its superseded token.
+	var s socket
+	if err := s.send(t, g, staleAuth, staleAuth.AuthorizedRecipients()); !errors.Is(err, sendingpolicy.ErrAuthorizationInvalid) {
+		t.Fatalf("stale redemption = %v, want ErrAuthorizationInvalid", err)
+	}
+	if got := f.currentAttempt(ref.ID()); got != 2 {
+		t.Fatalf("a stale redemption moved the ordinal to %d, want it left at 2", got)
+	}
+
+	// The live token still works.
+	if err := s.send(t, g, liveAuth, liveAuth.AuthorizedRecipients()); err != nil {
+		t.Fatalf("live redemption after a stale one: %v", err)
+	}
+	if s.count() != 1 {
+		t.Fatalf("sockets = %d, want 1", s.count())
+	}
+}
+
+// TestSettledNoticeCannotBeResent proves terminality lives in this module and
+// not in the caller's query.
+func TestSettledNoticeCannotBeResent(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	user := f.user("standard")
+	eventID := f.pauseNotice(user)
+
+	var ref sendingpolicy.OperationRef
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		ref, err = g.PrepareProtectionNoticeTx(f.ctx, tx,
+			sendingpolicy.NewProtectionNoticeRef(eventID, sendingpolicy.AudienceOwner))
+		return err
+	})
+	if d := f.authorize(g, ref); !d.Allow {
+		t.Fatalf("first notice: %q", d.Reason)
+	}
+
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE sending_protection_notice_deliveries SET state = 'sent'
+		  WHERE event_id = $1 AND audience = 'owner'`, eventID); err != nil {
+		t.Fatalf("settle delivery: %v", err)
+	}
+
+	// Preparation refuses outright.
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	_, err = g.PrepareProtectionNoticeTx(f.ctx, tx,
+		sendingpolicy.NewProtectionNoticeRef(eventID, sendingpolicy.AudienceOwner))
+	_ = tx.Rollback(f.ctx)
+	if !errors.Is(err, sendingpolicy.ErrNoticeSettled) {
+		t.Fatalf("re-preparing a sent notice = %v, want ErrNoticeSettled", err)
+	}
+
+	// And a caller still holding the old reference cannot authorize another
+	// physical send either.
+	_, attempt, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
 	}
 	d, auth, err := g.ConsumeAttempt(f.ctx, attempt)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if !d.Allow || auth == nil {
-		t.Fatalf("final authorization held a paid account within its cap: %q", d.Reason)
+	if d.Allow || auth != nil {
+		t.Fatal("a settled notice must not authorize a second send")
 	}
-
-	// The mirror: a Free account past every possible cap is still denied early,
-	// so the optimization keeps its value.
-	poor := f.user("standard")
-	poorAgent := f.agent(poor)
-	_, bigRef := f.prepareMessage(g, f.message(poorAgent, "own_address", 60))
-	tooBig, _, err := g.Reserve(f.ctx, bigRef)
-	if err != nil {
-		t.Fatalf("reserve oversize: %v", err)
-	}
-	if tooBig.Allow {
-		t.Error("Reserve must still deny what no plan could fit")
+	if d.Reason != sendingpolicy.ReasonNoticeSettled {
+		t.Errorf("reason = %q, want %q", d.Reason, sendingpolicy.ReasonNoticeSettled)
 	}
 }

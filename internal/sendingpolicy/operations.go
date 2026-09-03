@@ -38,6 +38,9 @@ var (
 	// ErrAudienceNotAllowed means a notice event was asked for an audience its
 	// kind forbids — the global guardrail has no owner to blame.
 	ErrAudienceNotAllowed = errors.New("sendingpolicy: audience is not allowed for this notice")
+	// ErrNoticeSettled means the notice delivery already reached a terminal
+	// state, so there is nothing left to send.
+	ErrNoticeSettled = errors.New("sendingpolicy: notice delivery is already settled")
 )
 
 // operationRow is one row of sending_provider_operations.
@@ -196,12 +199,16 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 	// removed; attribution must come from the locked tuple.
 	var sentAs, method *string
 	var scheduledAt *time.Time
+	var toCount, ccCount, bccCount int
 	err = tx.QueryRow(ctx, `
-		SELECT sent_as, method, scheduled_at
+		SELECT sent_as, method, scheduled_at,
+		       COALESCE(cardinality(to_recipients), 0),
+		       COALESCE(cardinality(cc), 0),
+		       COALESCE(cardinality(bcc), 0)
 		  FROM messages
 		 WHERE id = $1 AND agent_id = $2 AND direction = 'outbound'
 		   FOR UPDATE`, messageID, agentID,
-	).Scan(&sentAs, &method, &scheduledAt)
+	).Scan(&sentAs, &method, &scheduledAt, &toCount, &ccCount, &bccCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", OperationRef{}, ErrSourceUnavailable
 	}
@@ -221,7 +228,13 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 	// provider operation and consumes nothing. The zero reference is the
 	// contract: a caller holding one has nothing to reserve, which is exactly
 	// right for a message that will never open a socket.
-	if method != nil && *method == "loopback" {
+	//
+	// The exemption is granted on the message's SHAPE, not on its label. A
+	// `method` column saying "loopback" is one write away from being the whole
+	// bypass, so the row must also look like the only thing the spec exempts:
+	// exactly one To and no Cc or Bcc. Anything else is treated as ordinary
+	// provider-bound mail and budgeted.
+	if method != nil && *method == "loopback" && toCount == 1 && ccCount == 0 && bccCount == 0 {
 		return AcceptanceAccept, OperationRef{}, nil
 	}
 
@@ -331,10 +344,15 @@ func lockHITLSourceOwner(ctx context.Context, tx pgx.Tx, messageID string) (stri
 		return "", err
 	}
 
+	// Recheck identity, direction AND review state under the lock. A
+	// notification is owed only for a message actually awaiting approval;
+	// deriving one from a message in any other state would let a settled
+	// message mint customer-attributed provider capacity.
 	var exists bool
 	err = tx.QueryRow(ctx, `
 		SELECT true FROM messages
 		 WHERE id = $1 AND agent_id = $2 AND direction = 'outbound'
+		   AND status = 'pending_review'
 		   FOR UPDATE`, messageID, agentID,
 	).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -383,6 +401,15 @@ func (m *Module) PrepareProtectionNoticeTx(ctx context.Context, tx pgx.Tx, ref P
 	// the invariant holds even if a future migration relaxes the constraint.
 	if kind == "global_guardrail" && ref.audience == AudienceOwner {
 		return OperationRef{}, ErrAudienceNotAllowed
+	}
+
+	// A delivery that already reached a terminal state is finished. Re-preparing
+	// it would resume its stable operation and let a fresh ordinal authorize a
+	// SECOND physical send of a notice already sent — the one thing the stable
+	// operation exists to prevent. Terminality has to live here rather than in
+	// the drain worker's query, or it is only as good as the caller.
+	if state != "pending" {
+		return OperationRef{}, ErrNoticeSettled
 	}
 
 	if existingOperation != nil && *existingOperation != "" {

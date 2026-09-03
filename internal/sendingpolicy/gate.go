@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -110,7 +111,7 @@ type reservationRow struct {
 // to target exactly those rows — otherwise a domain that graduated out of
 // probation, or a control that was disarmed, would leak reserved capacity until
 // midnight.
-func (r reservationRow) scopeKeys(shared bool) []counterKey {
+func (r reservationRow) scopeKeys(shared bool) ([]counterKey, error) {
 	account := ""
 	if r.SourceAccountRef != nil {
 		account = *r.SourceAccountRef
@@ -149,17 +150,26 @@ func lockReservation(ctx context.Context, tx pgx.Tx, operationID string, attempt
 // exactly how a naive accounting would undercount a fan-out by an order of
 // magnitude.
 func messageEnvelope(ctx context.Context, tx pgx.Tx, messageID string) ([]string, error) {
+	envelope, _, err := messageEnvelopeAndClass(ctx, tx, messageID)
+	return envelope, err
+}
+
+// messageEnvelopeAndClass also reports the message's CURRENT reputation class,
+// so final authorization can notice that it stopped matching the immutable one
+// the operation was derived from.
+func messageEnvelopeAndClass(ctx context.Context, tx pgx.Tx, messageID string) ([]string, bool, error) {
 	var to, cc, bcc []string
+	var sentAs *string
 	err := tx.QueryRow(ctx, `
-		SELECT COALESCE(to_recipients, '{}'), COALESCE(cc, '{}'), COALESCE(bcc, '{}')
+		SELECT COALESCE(to_recipients, '{}'), COALESCE(cc, '{}'), COALESCE(bcc, '{}'), sent_as
 		  FROM messages
 		 WHERE id = $1 AND direction = 'outbound'`, messageID,
-	).Scan(&to, &cc, &bcc)
+	).Scan(&to, &cc, &bcc, &sentAs)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrSourceUnavailable
+		return nil, false, ErrSourceUnavailable
 	}
 	if err != nil {
-		return nil, fmt.Errorf("sendingpolicy: read message envelope: %w", err)
+		return nil, false, fmt.Errorf("sendingpolicy: read message envelope: %w", err)
 	}
 	all := make([]string, 0, len(to)+len(cc)+len(bcc))
 	all = append(all, to...)
@@ -167,9 +177,9 @@ func messageEnvelope(ctx context.Context, tx pgx.Tx, messageID string) ([]string
 	all = append(all, bcc...)
 	envelope, err := normalizeEnvelope(all)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEnvelopeUnavailable, err)
+		return nil, false, fmt.Errorf("%w: %v", ErrEnvelopeUnavailable, err)
 	}
-	return envelope, nil
+	return envelope, sharedFromSentAs(sentAs), nil
 }
 
 // plannedUnits is how much capacity an attempt intends to take.
@@ -225,6 +235,46 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 		return Decision{}, AttemptRef{}, err
 	}
 
+	// Reserve judges the same caps ConsumeAttempt will, using the same
+	// authoritative inputs, and that is not optional.
+	//
+	// An earlier version guessed instead: it skipped these reads and widened
+	// the account cap so it could never under-admit a paid account. That trade
+	// was wrong in both directions. Judging the ACCOUNT scope optimistically
+	// while still charging the SHARED global pools at their real limits let one
+	// Free account hold the entire platform pool in reservations it could never
+	// confirm — starving every other tenant and paging the operator with a
+	// guardrail incident. And judging it pessimistically deferred a paying
+	// customer's mail to the next midnight, because the worker treats an early
+	// hold as "snooze". The only correct answer is to read the class and the
+	// plan, which costs one FOR SHARE apiece.
+	var probeAccount string
+	var probePurpose Purpose
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(source_account_ref, ''), purpose
+		  FROM sending_provider_operations
+		 WHERE operation_id = $1`, ref.id,
+	).Scan(&probeAccount, &probePurpose); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Decision{}, AttemptRef{}, ErrSourceUnavailable
+		}
+		return Decision{}, AttemptRef{}, fmt.Errorf("sendingpolicy: read operation: %w", err)
+	}
+
+	var accountClass, planCode string
+	if probePurpose.isCustomer() && probeAccount != "" {
+		if err := tx.QueryRow(ctx,
+			`SELECT account_class FROM users WHERE id = $1 FOR SHARE`, probeAccount,
+		).Scan(&accountClass); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return Decision{}, AttemptRef{}, fmt.Errorf("sendingpolicy: lock user: %w", err)
+		}
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(plan_code, '') FROM account_limits WHERE user_id = $1 FOR SHARE`, probeAccount,
+		).Scan(&planCode); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return Decision{}, AttemptRef{}, fmt.Errorf("sendingpolicy: lock account limits: %w", err)
+		}
+	}
+
 	op, err := lockOperation(ctx, tx, ref.id)
 	if err != nil {
 		return Decision{}, AttemptRef{}, err
@@ -261,13 +311,23 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 	// which is correct while the ramp itself is pass-through.
 	probation := op.Shared
 
-	state := "reserved"
+	// Trusted first-party accounts charge nothing, and that has to be true
+	// HERE and not only at final authorization. The exemption exists so
+	// probers keep working during the abuse wave that exhausted the customer
+	// pools — but an early hold makes the worker snooze without ever reaching
+	// ConsumeAttempt, so an exemption that lives only there is dead on the one
+	// path it was written for.
+	exempt := accountClassExempt(accountClass) && op.Purpose.isCustomer()
+	charged := false
 	deniedScope := Scope("")
-	if policy.BudgetMode == ModeEnforce {
-		keys := scopeKeys(op.Purpose, op.accountRef(), op.Shared, probation)
+	if policy.BudgetMode == ModeEnforce && !exempt {
+		keys, err := scopeKeys(op.Purpose, op.accountRef(), op.Shared, probation)
+		if err != nil {
+			return Decision{}, AttemptRef{}, err
+		}
 		create := make(map[ledgerRef]int, len(keys))
 		for _, key := range keys {
-			create[ledgerRef{counterKey: key, Day: day}] = optimisticLimitFor(key, policy)
+			create[ledgerRef{counterKey: key, Day: day}] = limitFor(key, policy, planCode)
 		}
 		plan, err := lockLedger(ctx, tx, create, nil)
 		if err != nil {
@@ -279,24 +339,45 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 				break
 			}
 		}
-		if deniedScope != "" {
-			// Nothing is written: the plan's deltas are discarded, so this
-			// early denial leaves the ledger exactly as it found it. The row
-			// still records the intended size so a later ConsumeAttempt can
-			// re-arm it.
-			state = "released"
-		} else if err := plan.flush(ctx, tx); err != nil {
+		if deniedScope == "" {
+			if err := plan.flush(ctx, tx); err != nil {
+				return Decision{}, AttemptRef{}, err
+			}
+			charged = true
+		}
+		// On a denial the plan's deltas are simply never flushed, so the
+		// ledger is left exactly as it was found.
+	}
+
+	// The row records that capacity is HELD only when it actually is. Writing
+	// `reserved` for an attempt that charged nothing — because the budget was
+	// disabled, or the account is exempt, or the acquisition was denied — would
+	// make a later ConsumeAttempt release units this attempt never took, and
+	// on the day enforcement is first armed that phantom release is capacity
+	// silently handed back to whoever else is in flight.
+	state := "released"
+	if charged {
+		state = "reserved"
+	}
+	if err := upsertReservation(ctx, tx, op, attempt, day, units, probation, state); err != nil {
+		return Decision{}, AttemptRef{}, err
+	}
+
+	if deniedScope != "" {
+		// The violation notice is owed HERE, not only at final authorization.
+		// Every scope except account_daily is judged identically by both
+		// calls, so a denial that stops at Reserve is a denial the customer and
+		// the operator would otherwise never hear about — the worker snoozes
+		// and ConsumeAttempt, where the notice used to be written, is never
+		// reached.
+		if err := m.enqueueDenialNotice(ctx, tx, policy, op, day, deniedScope); err != nil {
 			return Decision{}, AttemptRef{}, err
 		}
 	}
 
-	if err := upsertReservation(ctx, tx, op, attempt, day, units, probation, state); err != nil {
-		return Decision{}, AttemptRef{}, err
-	}
 	if err := m.commit(ctx, tx, "reserve"); err != nil {
 		return Decision{}, AttemptRef{}, err
 	}
-
 	if deniedScope != "" {
 		return holdDecision(holdReasonForScope(deniedScope), nextUTCMidnight(day)), out, nil
 	}
@@ -393,6 +474,7 @@ type noticeState struct {
 	eventID         string
 	audience        Audience
 	deliveryAttempt int
+	state           string
 	version         int
 	commitment      []byte
 }
@@ -549,7 +631,10 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		).Scan(&st.planCode); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return st, Decision{}, fmt.Errorf("sendingpolicy: lock account limits: %w", err)
 		}
-		st.tenantMode, st.tenantName = tenantModeFor(policy, probeAccount, tenantName)
+		st.tenantMode, st.tenantName = tenantModeFor(policy, probePurpose, probeAccount, tenantName)
+	}
+	if !probePurpose.isCustomer() {
+		st.tenantMode, st.tenantName = tenantModeFor(policy, probePurpose, "", "")
 	}
 
 	// Notice delivery, when this operation is one. Locked before the provider
@@ -609,6 +694,21 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 			return st, holdDecision(ReasonTenantNotReady, time.Time{}), nil
 		}
 	}
+	// A required header with no name to put in it is not a header. The adapter
+	// would have to either omit it or send an empty value, and both defeat the
+	// isolation the header exists for, so the send waits for a real tenant.
+	if st.tenantMode == TenantModeRequired && strings.TrimSpace(st.tenantName) == "" {
+		return st, holdDecision(ReasonTenantUnnamed, time.Time{}), nil
+	}
+
+	// A delivery that already reached a terminal state must not be re-armed.
+	// The stable-operation design guarantees a retry is a greater ordinal on
+	// one logical notice; without this check it also permits a SECOND logical
+	// notice for a delivery already marked sent, which is the exact duplicate
+	// this module claims to make impossible.
+	if notice != nil && notice.state != "pending" {
+		return st, holdDecision(ReasonNoticeSettled, time.Time{}), nil
+	}
 
 	if notice != nil && notice.audience == AudienceOwner && !ownerExists {
 		// The account this notice was about is gone. There is nobody to tell,
@@ -619,8 +719,34 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		return st, holdDecision(ReasonAccountDeleted, time.Time{}), nil
 	}
 
+	// The reputation class is immutable on the operation, but `sent_as` is not
+	// immutable on the message: the approval path rewrites it, and it depends
+	// on the domain's live verification state. If the operation was prepared
+	// while the customer's own domain was sending-verified and the message is
+	// now going out over the shared relay, sending it would put shared traffic
+	// through a dedicated budget — escaping both the 50/day shared cap and the
+	// probation pool. Refusing is the safe answer, and it makes a caller that
+	// prepared too early loud instead of silently cheap. (Tightening in the
+	// other direction needs no action: an operation already classed as shared
+	// stays shared.)
+	if op.Purpose == PurposeCustomerMessage {
+		_, nowShared, classErr := messageEnvelopeAndClass(ctx, tx, op.OperationID)
+		if classErr == nil && nowShared && !op.Shared {
+			return st, holdDecision(ReasonClassChanged, time.Time{}), nil
+		}
+	}
+
 	st.envelope, err = m.resolveEnvelope(ctx, tx, op, ref, notice, ownerEmail)
 	if err != nil {
+		// A source that has been deleted, or an envelope that no longer
+		// resolves, is a HOLD and not an error. Returning an error here rolls
+		// the transaction back with the attempt still marked reserved, and
+		// since every later execution fails at the same point, those units are
+		// stranded on the SHARED pools until midnight with nothing able to
+		// release them. A caller could farm that: reserve, delete, repeat.
+		if errors.Is(err, ErrSourceUnavailable) || errors.Is(err, ErrEnvelopeUnavailable) {
+			return st, holdDecision(ReasonSourceUnavailable, time.Time{}), nil
+		}
 		return st, Decision{}, err
 	}
 	st.units = len(st.envelope)
@@ -632,7 +758,18 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 // Canary is an explicit account list rather than a percentage: a tenant header
 // is either sent or not, and the rollout gate wants a named account it can
 // verify end to end, not a sample it has to go looking for.
-func tenantModeFor(policy RuntimePolicy, accountID, tenantName string) (TenantMode, string) {
+func tenantModeFor(policy RuntimePolicy, purpose Purpose, accountID, tenantName string) (TenantMode, string) {
+	// Operational and public-feedback mail is not a customer's traffic and has
+	// no customer tenant; it uses the fixed system tenant. Returning "no
+	// tenant" for them under an enforcing policy would fail OPEN — the one
+	// direction a header whose purpose is provider-side isolation must never
+	// fail.
+	if !purpose.isCustomer() {
+		if policy.TenantHeaderMode == TenantHeaderEnforce {
+			return TenantModeRequired, SystemPolicySubject
+		}
+		return TenantModeNone, ""
+	}
 	switch policy.TenantHeaderMode {
 	case TenantHeaderEnforce:
 		return TenantModeRequired, tenantName
@@ -663,6 +800,7 @@ func (m *Module) lockNoticeDelivery(ctx context.Context, tx pgx.Tx, operationID 
 		return nil, fmt.Errorf("sendingpolicy: lock notice delivery: %w", err)
 	}
 	st.audience = Audience(audience)
+	st.state = state
 	return &st, nil
 }
 
@@ -690,7 +828,10 @@ func (m *Module) markNoticeSkipped(ctx context.Context, tx pgx.Tx, notice *notic
 func (m *Module) resolveEnvelope(ctx context.Context, tx pgx.Tx, op operationRow, ref AttemptRef, notice *noticeState, ownerEmail string) ([]string, error) {
 	switch {
 	case notice != nil && notice.audience == AudienceOperator:
-		version := m.policyOperatorVersion(ctx, tx)
+		version, err := m.policyOperatorVersion(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
 		if m.secrets.Recipients == nil {
 			return nil, fmt.Errorf("%w: no operator recipient map is loaded", ErrEnvelopeUnavailable)
 		}
@@ -730,13 +871,24 @@ func (m *Module) resolveEnvelope(ctx context.Context, tx pgx.Tx, op operationRow
 
 // policyOperatorVersion returns the recipient version the current policy
 // selects. The database source is authoritative when it is in use.
-func (m *Module) policyOperatorVersion(ctx context.Context, tx pgx.Tx) int {
+// policyOperatorVersion returns the recipient version the current policy
+// selects.
+//
+// A read failure is propagated rather than absorbed. Falling back to the config
+// value would, on a hosted deployment whose database has rotated the operator
+// mailbox, silently select the RETIRED version — and because the redemption
+// recheck calls this same helper, the recheck would confirm the stale answer
+// instead of catching it. That is the one path whose whole guarantee is "zero
+// calls to the retired address".
+func (m *Module) policyOperatorVersion(ctx context.Context, tx pgx.Tx) (int, error) {
 	if m.source == PolicySourceDatabase {
-		if policy, err := m.currentPolicyForShare(ctx, tx); err == nil {
-			return policy.OperatorNoticeRecipientVersion
+		policy, err := m.currentPolicyForShare(ctx, tx)
+		if err != nil {
+			return 0, err
 		}
+		return policy.OperatorNoticeRecipientVersion, nil
 	}
-	return m.configPolicy.OperatorNoticeRecipientVersion
+	return m.configPolicy.OperatorNoticeRecipientVersion, nil
 }
 
 // releaseStoredUnits gives back whatever the stored attempt is holding.
@@ -745,7 +897,10 @@ func (m *Module) releaseStoredUnits(ctx context.Context, tx pgx.Tx, st authState
 	if !stored.Exists || stored.State != "reserved" {
 		return nil
 	}
-	oldKeys := stored.scopeKeys(st.op.Shared)
+	oldKeys, err := stored.scopeKeys(st.op.Shared)
+	if err != nil {
+		return err
+	}
 	refs := refsFor(oldKeys, stored.Day)
 	plan, err := lockLedger(ctx, tx, nil, refs)
 	if err != nil {
@@ -788,7 +943,10 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 		return allowDecision(), m.releaseStoredUnits(ctx, tx, st)
 	}
 
-	currentKeys := scopeKeys(st.op.Purpose, st.op.accountRef(), st.op.Shared, st.probation)
+	currentKeys, err := scopeKeys(st.op.Purpose, st.op.accountRef(), st.op.Shared, st.probation)
+	if err != nil {
+		return Decision{}, err
+	}
 	create := make(map[ledgerRef]int, len(currentKeys))
 	for _, key := range currentKeys {
 		create[ledgerRef{counterKey: key, Day: st.day}] = limitFor(key, st.policy, st.planCode)
@@ -796,7 +954,11 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 
 	var releaseRefs []ledgerRef
 	if stored.Exists && stored.State == "reserved" {
-		releaseRefs = refsFor(stored.scopeKeys(st.op.Shared), stored.Day)
+		storedKeys, err := stored.scopeKeys(st.op.Shared)
+		if err != nil {
+			return Decision{}, err
+		}
+		releaseRefs = refsFor(storedKeys, stored.Day)
 	}
 
 	plan, err := lockLedger(ctx, tx, create, releaseRefs)
@@ -840,7 +1002,7 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 		); err != nil {
 			return Decision{}, fmt.Errorf("sendingpolicy: release denied reservation: %w", err)
 		}
-		if err := m.recordDenialNotice(ctx, tx, st, deniedScope); err != nil {
+		if err := m.enqueueDenialNotice(ctx, tx, st.policy, st.op, st.day, deniedScope); err != nil {
 			return Decision{}, err
 		}
 		return holdDecision(holdReasonForScope(deniedScope), nextUTCMidnight(st.day)), nil
@@ -975,7 +1137,10 @@ func (m *Module) confirmIfCharged(ctx context.Context, tx pgx.Tx, st authState, 
 	if st.policy.BudgetMode == ModeDisabled || exempt || st.op.Purpose == PurposeTrustedSystem {
 		return nil
 	}
-	keys := scopeKeys(st.op.Purpose, st.op.accountRef(), st.op.Shared, st.probation)
+	keys, err := scopeKeys(st.op.Purpose, st.op.accountRef(), st.op.Shared, st.probation)
+	if err != nil {
+		return err
+	}
 	return confirmCounters(ctx, tx, refsFor(keys, st.day), st.units)
 }
 
@@ -992,17 +1157,29 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 	// every delivery event, so a token carrying an ID that no row holds would
 	// produce feedback nothing could ever be matched to — the failure would be
 	// invisible until the detector had been silently blind for days.
+	// Customer correlations get no expiry here: they must outlive the message
+	// for as long as the account exists, so that a controlled recipient cannot
+	// wait out a fixed timer before complaining. The post-deletion janitor sets
+	// their horizon. A non-customer operation has no account to outlive, so it
+	// receives the configured horizon at creation.
+	var expires *time.Time
+	if !st.op.Purpose.isCustomer() {
+		horizon := time.Now().UTC().Add(
+			time.Duration(st.policy.SendingFeedbackPostAcctRetention) * 24 * time.Hour)
+		expires = &horizon
+	}
+
 	var correlationID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO sending_feedback_correlations
 		    (correlation_id, operation_id, submission_attempt, source_account_ref,
-		     policy_subject_ref, purpose, shared_reputation, tenant_mode)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		     policy_subject_ref, purpose, shared_reputation, tenant_mode, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (operation_id, submission_attempt) DO UPDATE
 		    SET operation_id = EXCLUDED.operation_id
 		RETURNING correlation_id`,
 		randomID("cor_"), st.op.OperationID, attempt, st.op.SourceAccountRef,
-		st.op.PolicySubjectRef, st.op.Purpose, st.op.Shared, string(st.tenantMode),
+		st.op.PolicySubjectRef, st.op.Purpose, st.op.Shared, string(st.tenantMode), expires,
 	).Scan(&correlationID); err != nil {
 		return "", fmt.Errorf("sendingpolicy: record correlation: %w", err)
 	}
@@ -1026,7 +1203,7 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 	return correlationID, nil
 }
 
-// recordDenialNotice enqueues the notice an enforced denial owes, exactly once
+// enqueueDenialNotice writes the notice an enforced denial owes, exactly once
 // per account, scope, and UTC day.
 //
 // The three cases are deliberately asymmetric. An account-owned scope is the
@@ -1035,17 +1212,25 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 // collide with, so it produces one coalesced operator notice and blames nobody.
 // An operational purpose produces nothing at all: a notice that cannot be sent
 // because the notice pool is exhausted must not enqueue another notice.
-func (m *Module) recordDenialNotice(ctx context.Context, tx pgx.Tx, st authState, scope Scope) error {
-	if st.op.Purpose.isOperational() {
+//
+// Lock order note: this runs while the caller holds budget-counter locks, which
+// is later in the normative order than the notice keys. That inversion is
+// deliberate and bounded — the plan requires the notice to be inserted
+// ATOMICALLY with the denial, and the only rows touched are ones this
+// transaction is creating, so the sole contention point is the partial unique
+// index when two callers hit the same scope and day. No path locks an existing
+// delivery row and then reaches for a counter, so there is no cycle to close.
+func (m *Module) enqueueDenialNotice(ctx context.Context, tx pgx.Tx, policy RuntimePolicy, op operationRow, day time.Time, scope Scope) error {
+	if op.Purpose.isOperational() {
 		return nil
 	}
 
-	retention := time.Duration(st.policy.SendingControlAuditRetentionDays) * 24 * time.Hour
+	retention := time.Duration(policy.SendingControlAuditRetentionDays) * 24 * time.Hour
 	expires := time.Now().UTC().Add(retention)
 
 	switch scope {
 	case ScopeAccountDaily, ScopeAccountSharedDaily:
-		account := st.op.accountRef()
+		account := op.accountRef()
 		if account == "" {
 			return nil
 		}
@@ -1058,7 +1243,7 @@ func (m *Module) recordDenialNotice(ctx context.Context, tx pgx.Tx, st authState
 			    WHERE kind = 'budget_violation'
 			    DO NOTHING
 			RETURNING id`,
-			randomID("spn_"), account, string(scope), st.day, expires,
+			randomID("spn_"), account, string(scope), day, expires,
 		).Scan(&eventID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Already enqueued for this account, scope, and day. Later holds
@@ -1081,7 +1266,7 @@ func (m *Module) recordDenialNotice(ctx context.Context, tx pgx.Tx, st authState
 			    WHERE kind = 'global_guardrail'
 			    DO NOTHING
 			RETURNING id`,
-			randomID("spn_"), string(scope), st.day, expires,
+			randomID("spn_"), string(scope), day, expires,
 		).Scan(&eventID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -1214,7 +1399,10 @@ func (m *Module) noticeSelectorStillCurrent(ctx context.Context, tx pgx.Tx, auth
 		if m.secrets.Recipients == nil {
 			return false, nil
 		}
-		version := m.policyOperatorVersion(ctx, tx)
+		version, err := m.policyOperatorVersion(ctx, tx)
+		if err != nil {
+			return false, err
+		}
 		if version != *stored.NoticeVersion || version != auth.notice.recipientVersion {
 			return false, nil
 		}
@@ -1246,10 +1434,16 @@ func (m *Module) noticeSelectorStillCurrent(ctx context.Context, tx pgx.Tx, auth
 // is a reason to stop, not a reason to hand back reputation exposure that a
 // retry will immediately re-consume.
 func (m *Module) invalidate(ctx context.Context, tx pgx.Tx, ref AttemptRef) error {
+	// Guarded by the ordinal, not GREATEST(). An unguarded bump lets a worker
+	// arriving late with a SUPERSEDED token retire the live attempt another
+	// worker is holding — that worker's confirmed capacity is spent and never
+	// refunded, so a supply of stale tokens becomes a livelock that burns the
+	// account's budget without a single SES call. A stale token must retire
+	// only itself, and it is already stale, so the correct write is none.
 	if _, err := tx.Exec(ctx, `
 		UPDATE sending_provider_operations
-		   SET current_attempt = GREATEST(current_attempt, $2) + 1, updated_at = now()
-		 WHERE operation_id = $1`, ref.operationID, ref.attempt,
+		   SET current_attempt = current_attempt + 1, updated_at = now()
+		 WHERE operation_id = $1 AND current_attempt = $2`, ref.operationID, ref.attempt,
 	); err != nil {
 		return fmt.Errorf("sendingpolicy: invalidate attempt: %w", err)
 	}
@@ -1327,7 +1521,11 @@ func (m *Module) releaseAttempt(ctx context.Context, ref AttemptRef, what string
 		return m.commit(ctx, tx, what)
 	}
 
-	refs := refsFor(stored.scopeKeys(op.Shared), stored.Day)
+	storedKeys, err := stored.scopeKeys(op.Shared)
+	if err != nil {
+		return err
+	}
+	refs := refsFor(storedKeys, stored.Day)
 	plan, err := lockLedger(ctx, tx, nil, refs)
 	if err != nil {
 		return err
@@ -1379,6 +1577,13 @@ func (m *Module) SettleProvider(ctx context.Context, settlement ProviderSettleme
 		return err
 	}
 	if !stored.Exists {
+		return ErrAttemptStale
+	}
+	// Settlement reports what the PROVIDER did, so it is only meaningful for an
+	// attempt that was authorized to reach the provider. Accepting a reserved
+	// or released attempt would let a caller advance ramp progress for a send
+	// that never happened once Task 4 hangs the ramp mutation off this call.
+	if stored.State != "confirmed" {
 		return ErrAttemptStale
 	}
 

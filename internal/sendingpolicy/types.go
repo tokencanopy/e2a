@@ -182,6 +182,19 @@ const (
 	ReasonTenantNotReady      = "ses_tenant_not_ready"
 	ReasonRecipientSuperseded = "notice_recipient_superseded"
 	ReasonAccountDeleted      = "account_deleted"
+	// ReasonSourceUnavailable means the durable source row this operation was
+	// derived from is gone, so there is nothing left to send.
+	ReasonSourceUnavailable = "source_unavailable"
+	// ReasonNoticeSettled means the notice delivery already reached a terminal
+	// state; re-sending it would duplicate a logical notice.
+	ReasonNoticeSettled = "notice_already_settled"
+	// ReasonTenantUnnamed means the policy requires a tenant header but the
+	// account has no tenant name to send.
+	ReasonTenantUnnamed = "ses_tenant_unnamed"
+	// ReasonClassChanged means the message's reputation class stopped matching
+	// the immutable class its operation was derived from, so the operation no
+	// longer describes the send.
+	ReasonClassChanged = "reputation_class_changed"
 )
 
 // Decision is allow-or-hold. A hold carries the earliest time a retry could
@@ -315,8 +328,9 @@ type NotificationRef struct {
 }
 
 // NewHITLNotificationRef references a pending outbound message whose approval
-// request is being sent. PrepareNotificationTx validates that the message
-// exists, is outbound, and belongs to a live agent before deriving anything.
+// request is being sent. PrepareNotificationTx locks the owning agent and then
+// the message, and requires the message to still be outbound and still awaiting
+// review before deriving anything from it.
 func NewHITLNotificationRef(messageID string) NotificationRef {
 	return NotificationRef{source: NotificationHITLMessage, id: messageID}
 }
@@ -484,9 +498,20 @@ func (a ProviderAuthorization) ValidateEnvelope(recipients []string) (ProviderHe
 	if a.IsZero() {
 		return ProviderHeaders{}, errors.New("sendingpolicy: authorization is empty")
 	}
-	normalized, err := normalizeEnvelope(recipients)
+	normalized, raw, err := normalizeEnvelopeCounted(recipients)
 	if err != nil {
 		return ProviderHeaders{}, err
+	}
+	// The submission may not contain more entries than it has distinct
+	// mailboxes. Collapsing duplicates here instead would be a 50x reputation
+	// amplifier: one charged unit authorizes one mailbox, but an envelope of
+	// fifty case-variant spellings of that mailbox normalizes down to the same
+	// single authorized address while SES still receives fifty RCPT TO
+	// commands — fifty chances to bounce, against one unit of budget. The
+	// accounting rule that duplicates count once only holds if the thing
+	// submitted is the deduplicated set, so that is what a caller must submit.
+	if raw != len(normalized) {
+		return ProviderHeaders{}, ErrEnvelopeMismatch
 	}
 	if len(normalized) != len(a.recipientSet) {
 		return ProviderHeaders{}, ErrEnvelopeMismatch
@@ -513,16 +538,27 @@ func (a ProviderAuthorization) ValidateEnvelope(recipients []string) (ProviderHe
 // "a@x" as two recipients would let one send be charged twice and, worse, would
 // make ValidateEnvelope reject an envelope the adapter legitimately reassembled.
 func normalizeEnvelope(recipients []string) ([]string, error) {
+	out, _, err := normalizeEnvelopeCounted(recipients)
+	return out, err
+}
+
+// normalizeEnvelopeCounted also reports how many entries the caller actually
+// supplied, so ValidateEnvelope can tell "the same mailbox listed in To and Cc"
+// (which the caller must collapse before submitting) from "one entry per
+// mailbox" (which is what a charged unit buys).
+func normalizeEnvelopeCounted(recipients []string) ([]string, int, error) {
 	if len(recipients) == 0 {
-		return nil, errors.New("sendingpolicy: envelope has no recipients")
+		return nil, 0, errors.New("sendingpolicy: envelope has no recipients")
 	}
 	seen := make(map[string]struct{}, len(recipients))
 	out := make([]string, 0, len(recipients))
-	for _, raw := range recipients {
-		addr, err := normalizeEnvelopeRecipient(raw)
+	raw := 0
+	for _, entry := range recipients {
+		addr, err := normalizeEnvelopeRecipient(entry)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		raw++
 		if _, dup := seen[addr]; dup {
 			continue
 		}
@@ -530,10 +566,10 @@ func normalizeEnvelope(recipients []string) ([]string, error) {
 		out = append(out, addr)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("sendingpolicy: envelope has no recipients")
+		return nil, 0, errors.New("sendingpolicy: envelope has no recipients")
 	}
 	sort.Strings(out)
-	return out, nil
+	return out, raw, nil
 }
 
 // maxEnvelopeRecipientLength bounds one address. RFC 5321's path limit is 256
