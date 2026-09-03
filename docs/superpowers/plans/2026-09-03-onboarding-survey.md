@@ -4,7 +4,7 @@
 
 **Goal:** Ask every dashboard user who has not answered yet, once, "Where did you hear about e2a?" on a blocking `/welcome` page, and store the answer write-once on the `users` row.
 
-**Architecture:** Three nullable columns on `users` (migration 108). A config flag `onboarding_survey.enabled` (default off) gates the write path and a new `onboarding_survey_pending` boolean on `GET /api/auth/me`; `PATCH /api/auth/me` accepts a nested `onboarding_survey` object. The app shell redirects a pending user to `/welcome` and renders that page without the sidebar. Hosted operators flip the flag in their deployment config; self-host sees no behaviour change.
+**Architecture:** Three nullable columns on `users` (migration 120). A config flag `onboarding_survey.enabled` (default off) gates the write path and a new `onboarding_survey_pending` boolean on `GET /api/auth/me`; `PATCH /api/auth/me` accepts a nested `onboarding_survey` object. The app shell redirects a pending user to `/welcome` and renders that page without the sidebar. Hosted operators flip the flag in their deployment config; self-host sees no behaviour change.
 
 **Tech Stack:** Go 1.2x server (`internal/auth`, `internal/identity`, `internal/config`, pgx), Postgres migrations (`migrations/`), Next.js 15 app router dashboard (`web/`, Jest + Testing Library).
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Migration file name: `migrations/108_users_acquisition_survey.sql`; every statement idempotent (`IF NOT EXISTS`, constraint adds wrapped in `DO $$ ... EXCEPTION WHEN duplicate_object`).
+- Migration file name: `migrations/120_users_acquisition_survey.sql`; every statement idempotent (`IF NOT EXISTS`, constraint adds wrapped in `DO $$ ... EXCEPTION WHEN duplicate_object`).
 - Source enum, exact strings, in this order: `search`, `ai_assistant`, `github`, `x_twitter`, `hn_reddit`, `content`, `mcp_directory`, `word_of_mouth`, `other`, `skipped`.
 - Display labels, exact copy: Search engine · ChatGPT / Claude / another AI assistant · GitHub · X / Twitter · Hacker News / Reddit · YouTube, podcast, or blog · MCP directory · Friend or colleague · Other.
 - Page heading, exact copy: `Where did you hear about e2a?`. Buttons: `Continue`, `Skip`. Detail placeholder: `Tell us more (optional)`.
@@ -35,7 +35,7 @@
 
 | File | Responsibility |
 |---|---|
-| `migrations/108_users_acquisition_survey.sql` | the three columns + two CHECK constraints |
+| `migrations/120_users_acquisition_survey.sql` | the three columns + two CHECK constraints |
 | `internal/identity/migrate_test.go` | migration shape + idempotency test (append) |
 | `internal/identity/acquisition.go` | the source enum and `IsAcquisitionSource` |
 | `internal/identity/acquisition_test.go` | enum test |
@@ -57,10 +57,10 @@
 
 ---
 
-### Task 1: Migration 108
+### Task 1: Migration 120
 
 **Files:**
-- Create: `migrations/108_users_acquisition_survey.sql`
+- Create: `migrations/120_users_acquisition_survey.sql`
 - Test: `internal/identity/migrate_test.go` (append)
 
 **Interfaces:**
@@ -68,13 +68,13 @@
 
 - [ ] **Step 1: Write the failing migration test**
 
-Append to `internal/identity/migrate_test.go` (package `identity_test`; `testutil.TestDB` applies every embedded migration, so re-applying 108 proves idempotency):
+Append to `internal/identity/migrate_test.go` (package `identity_test`; `testutil.TestDB` applies every embedded migration, so re-applying 120 proves idempotency):
 
 ```go
 func TestUsersAcquisitionSurveyMigrationIsNullableIdempotentAndConstrained(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)
-	sql, err := migrations.FS.ReadFile("108_users_acquisition_survey.sql")
+	sql, err := migrations.FS.ReadFile("120_users_acquisition_survey.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,11 +111,11 @@ func TestUsersAcquisitionSurveyMigrationIsNullableIdempotentAndConstrained(t *te
 - [ ] **Step 2: Run it to verify it fails**
 
 Run: `go test ./internal/identity/ -run TestUsersAcquisitionSurveyMigration -count=1`
-Expected: FAIL with `open 108_users_acquisition_survey.sql: file does not exist`. If it says SKIP, start the test DB (`make docker-up`) and rerun.
+Expected: FAIL with `open 120_users_acquisition_survey.sql: file does not exist`. If it says SKIP, start the test DB (`make docker-up`) and rerun.
 
 - [ ] **Step 3: Write the migration**
 
-`migrations/108_users_acquisition_survey.sql`:
+`migrations/120_users_acquisition_survey.sql`:
 
 ```sql
 -- Onboarding acquisition survey ("Where did you hear about e2a?").
@@ -149,8 +149,8 @@ Expected: PASS (and the line `--- PASS`, not `--- SKIP`).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add migrations/108_users_acquisition_survey.sql internal/identity/migrate_test.go
-git commit -m "feat(db): add users acquisition survey columns (migration 108)"
+git add migrations/120_users_acquisition_survey.sql internal/identity/migrate_test.go
+git commit -m "feat(db): add users acquisition survey columns (migration 120)"
 ```
 
 ---
@@ -358,7 +358,7 @@ import "errors"
 
 // AcquisitionSources is the closed answer set for the onboarding survey
 // ("Where did you hear about e2a?"). It must match the CHECK constraint
-// in migrations/108_users_acquisition_survey.sql exactly — the values
+// in migrations/120_users_acquisition_survey.sql exactly — the values
 // are the analytics enum, so they are code, not config.
 var AcquisitionSources = []string{
 	"search",
@@ -557,7 +557,7 @@ Add the type after `OutboundFooterConfig`:
 ```go
 // OnboardingSurveyConfig gates the dashboard's one-question acquisition
 // survey ("Where did you hear about e2a?"). Off by default: the columns
-// from migration 108 exist everywhere, but with Enabled false the write
+// from migration 120 exist everywhere, but with Enabled false the write
 // path on PATCH /api/auth/me returns 404 and GET /api/auth/me reports
 // onboarding_survey_pending=false, so the dashboard never shows the page.
 // The answer set is code (internal/identity.AcquisitionSources), not config.
@@ -582,7 +582,7 @@ In `config.example.yaml`, after the `outbound_footer` block:
 ```yaml
 # One-question onboarding survey ("Where did you hear about e2a?") shown
 # once to each dashboard user before the rest of the app. Off by default;
-# the answer is stored write-once on the user row (migration 108) and is
+# the answer is stored write-once on the user row (migration 120) and is
 # only useful to operators who read their own database for analytics.
 # Override with E2A_ONBOARDING_SURVEY_ENABLED.
 # onboarding_survey:
@@ -1028,7 +1028,7 @@ Expected: FAIL, cannot find module `./acquisitionSources`.
 ```ts
 // Answer set for the onboarding survey ("Where did you hear about e2a?").
 // Values mirror internal/identity.AcquisitionSources and the CHECK in
-// migration 108 exactly; labels are display-only and never stored.
+// migration 120 exactly; labels are display-only and never stored.
 // "skipped" is a valid value the page sends from the Skip action but is
 // never offered as a choice.
 export type AcquisitionSource =
@@ -1669,7 +1669,7 @@ PR body (write the file first; delete it after `gh pr create`, it is not committ
 ```markdown
 One-question "Where did you hear about e2a?" survey shown once to each dashboard user, stored write-once on `users`, off by default.
 
-- migration 108: `users.acquisition_source / acquisition_detail / acquisition_answered_at` + CHECKs
+- migration 120: `users.acquisition_source / acquisition_detail / acquisition_answered_at` + CHECKs
 - config: `onboarding_survey.enabled` (default false; env `E2A_ONBOARDING_SURVEY_ENABLED`)
 - `GET /api/auth/me` → `onboarding_survey_pending` (flag on AND unanswered)
 - `PATCH /api/auth/me` → `onboarding_survey: {source, detail?}`; 409 on re-submit, 404 when disabled
