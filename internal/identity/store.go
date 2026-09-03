@@ -314,6 +314,11 @@ type User struct {
 	// resolved via API key (e.g. session auth), which fail-closes to standard
 	// (metered + limited) in the consuming policies.
 	AccountClass string `json:"-"`
+	// AcquisitionAnsweredAt is when the onboarding survey was answered or
+	// skipped; nil = not yet asked. Loaded by the session/ID loaders that
+	// feed /api/auth/me, hidden from API JSON (the auth handler derives a
+	// boolean from it).
+	AcquisitionAnsweredAt *time.Time `json:"-"`
 }
 
 type Message struct {
@@ -6030,8 +6035,8 @@ func (s *Store) provisionUser(ctx context.Context, q rowQuerier, externalRef, em
 func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name, google_subject, created_at, account_class FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass)
+		`SELECT id, email, name, google_subject, created_at, account_class, acquisition_answered_at FROM users WHERE id = $1`, id,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &u.AcquisitionAnsweredAt)
 	if err != nil {
 		return nil, err
 	}
@@ -6046,9 +6051,40 @@ func (s *Store) UpdateUserName(ctx context.Context, userID, name string) (*User,
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
 		`UPDATE users SET name = $1 WHERE id = $2
-		 RETURNING id, email, name, google_subject, created_at`,
+		 RETURNING id, email, name, google_subject, created_at, acquisition_answered_at`,
 		name, userID,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AcquisitionAnsweredAt)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// RecordAcquisitionSurvey stores the onboarding survey answer for a user,
+// write-once: the UPDATE is conditioned on acquisition_answered_at IS
+// NULL so two concurrent submits cannot both win. A no-op UPDATE is
+// disambiguated with a follow-up lookup — ErrAcquisitionSurveyAnswered
+// when the user exists, the lookup's not-found error otherwise. Source
+// validity is the caller's job (the handler maps it to a 400), but the
+// value is re-checked here so no path can write outside the enum.
+func (s *Store) RecordAcquisitionSurvey(ctx context.Context, userID, source string, detail *string) (*User, error) {
+	if !IsAcquisitionSource(source) {
+		return nil, fmt.Errorf("invalid acquisition source %q", source)
+	}
+	u := &User{}
+	err := s.pool.QueryRow(ctx,
+		`UPDATE users
+		 SET acquisition_source = $1, acquisition_detail = $2, acquisition_answered_at = now()
+		 WHERE id = $3 AND acquisition_answered_at IS NULL
+		 RETURNING id, email, name, google_subject, created_at, account_class, acquisition_answered_at`,
+		source, detail, userID,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &u.AcquisitionAnsweredAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, lookupErr := s.GetUserByID(ctx, userID); lookupErr != nil {
+			return nil, lookupErr
+		}
+		return nil, ErrAcquisitionSurveyAnswered
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -6075,10 +6111,10 @@ func (s *Store) CreateUserSession(ctx context.Context, userID string) (string, e
 func (s *Store) GetUserSession(ctx context.Context, token string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class
+		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class, u.acquisition_answered_at
 		 FROM user_sessions s JOIN users u ON s.user_id = u.id
 		 WHERE s.token = $1 AND s.expires_at > now()`, token,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass)
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &u.AcquisitionAnsweredAt)
 	if err != nil {
 		return nil, err
 	}
