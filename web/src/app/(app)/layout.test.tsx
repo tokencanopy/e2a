@@ -15,8 +15,15 @@ jest.mock("next/link", () => {
   };
 });
 
+const mockReplace = jest.fn();
+let mockPathname = "/inboxes";
+jest.mock("next/navigation", () => ({
+  usePathname: () => mockPathname,
+  useRouter: () => ({ replace: mockReplace, push: jest.fn(), back: jest.fn() }),
+}));
+
 let mockAuth: {
-  user: { id: string; email: string; name: string; created_at: string } | null;
+  user: { id: string; email: string; name: string; created_at: string; onboarding_survey_pending?: boolean } | null;
   loading: boolean;
 };
 jest.mock("../components/AuthProvider", () => ({
@@ -47,6 +54,8 @@ const signedIn = {
 
 beforeEach(() => {
   mockAuth = signedIn;
+  mockReplace.mockReset();
+  mockPathname = "/inboxes";
   document.body.style.overflow = "";
   window.history.replaceState(null, "", "/");
 });
@@ -195,5 +204,58 @@ describe("(app) layout — mobile navigation drawer", () => {
     expect(within(dialog).getByText("Inboxes")).toHaveFocus();
     await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
     expect(within(dialog).getByText("Domains")).toHaveFocus();
+  });
+});
+
+describe("(app) layout — onboarding survey gate", () => {
+  const pendingUser = {
+    user: { ...signedIn.user, onboarding_survey_pending: true },
+    loading: false,
+  };
+
+  it("redirects a pending user away from any app route to /welcome and hides the chrome", () => {
+    mockAuth = pendingUser;
+    mockPathname = "/api-keys";
+    render(<AppLayout><p>page body</p></AppLayout>);
+    expect(mockReplace).toHaveBeenCalledWith("/welcome");
+    expect(screen.queryByText("page body")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open menu" })).not.toBeInTheDocument();
+  });
+
+  it("renders /welcome without the sidebar or mobile header while pending", () => {
+    mockAuth = pendingUser;
+    mockPathname = "/welcome";
+    render(<AppLayout><p>survey body</p></AppLayout>);
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(screen.getByText("survey body")).toBeInTheDocument();
+    expect(screen.queryByText("Inboxes")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open menu" })).not.toBeInTheDocument();
+  });
+
+  it("bounces a non-pending user off /welcome to /inboxes", () => {
+    mockAuth = signedIn;
+    mockPathname = "/welcome";
+    render(<AppLayout><p>survey body</p></AppLayout>);
+    expect(mockReplace).toHaveBeenCalledWith("/inboxes");
+    expect(screen.queryByText("survey body")).not.toBeInTheDocument();
+  });
+
+  it("leaves a non-pending user on a normal route alone", () => {
+    mockAuth = signedIn;
+    mockPathname = "/inboxes";
+    render(<AppLayout><p>page body</p></AppLayout>);
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(screen.getByText("page body")).toBeInTheDocument();
+  });
+
+  it("does not redirect while auth is still loading or signed out", () => {
+    mockAuth = { user: null, loading: true };
+    mockPathname = "/inboxes";
+    const { unmount } = render(<AppLayout><p>page body</p></AppLayout>);
+    expect(mockReplace).not.toHaveBeenCalled();
+    unmount();
+    mockAuth = { user: null, loading: false };
+    render(<AppLayout><p>page body</p></AppLayout>);
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 });
