@@ -61,6 +61,14 @@ type Store struct{ pool *pgxpool.Pool }
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
+// Exempt flips one verified, ramp-inactive domain to 'exempt'.
+//
+// No automatic path calls this. The disabled ramp gate used to, once per
+// eligible send, which made "this sender is established" a decision taken
+// silently by the send path (see internal/agent.outboundRampGate.Reserve);
+// hosted grandfathering is the audited one-shot in internal/sendingpolicy
+// instead. This stays as the store-level primitive for an explicit,
+// single-domain operator exemption and must not be re-wired to a hot path.
 func (s *Store) Exempt(ctx context.Context, userID, domain string) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE domains SET sending_ramp_status = 'exempt'
