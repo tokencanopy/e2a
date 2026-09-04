@@ -112,6 +112,56 @@ func TestSendWorker_RateLimitedSnoozeClamped(t *testing.T) {
 	}
 }
 
+// TestSendWorker_RateLimitedBacksOffByElapsedWait proves the #771 backoff is
+// wired through the deferral path: a message that has already been waiting to
+// fire for minutes snoozes well beyond the one-window clamp (older = longer),
+// instead of re-waking every window. Contrast RateLimitedSnoozeClamped, whose
+// jobs carry no fire time and so stay on the base wait.
+func TestSendWorker_RateLimitedBacksOffByElapsedWait(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-90 * time.Second) // fired ~90s ago, still deferring
+	st := &fakeStore{job: j}
+	gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: false, RetryAt: time.Now().Add(time.Second)}}
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)
+
+	d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1)))
+	// Old fixed behavior capped at the window (1m); the elapsed backoff pushes
+	// the base to ~90s — above the window, below the 3m cap — plus proportional
+	// jitter (<= base/4).
+	if d <= time.Minute {
+		t.Errorf("snooze = %s, want > window=1m (elapsed backoff not applied)", d)
+	}
+	if d > 90*time.Second+90*time.Second/4+time.Second {
+		t.Errorf("snooze = %s, want ~90s backoff + proportional jitter (below the 3m cap)", d)
+	}
+}
+
+// TestSendWorker_RateLimitedHeldMessageAnchorsAtReview pins the #771 follow-up:
+// the backoff clock is the submission anchor (max of accept, scheduled, review),
+// not the fire time. A message held for HITL review carries an OLD AcceptedAt but
+// only just became eligible to submit at ReviewedAt. Anchoring the elapsed
+// backoff at accept would hand it the rateMaxSnooze (3m) cap on its very FIRST
+// rate deferral — avoidable latency for a message that never actually retried.
+// Anchored at review, that first deferral takes the short base wait like any
+// fresh send. Contrast RateLimitedBacksOffByElapsedWait, whose old accept has NO
+// later review and so legitimately backs off.
+func TestSendWorker_RateLimitedHeldMessageAnchorsAtReview(t *testing.T) {
+	j := acceptedJob("msg_1")
+	j.AcceptedAt = time.Now().Add(-5 * time.Minute) // accepted long ago (would hit the 3m cap)
+	j.ReviewedAt = time.Now()                       // ...but only just cleared HITL review
+	st := &fakeStore{job: j}
+	gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: false, RetryAt: time.Now().Add(time.Second)}}
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate)
+
+	d := requireSnooze(t, w.Work(context.Background(), job("msg_1", 1)))
+	// Anchored at ReviewedAt (~now), elapsed ≈ 0, so no backoff kicks in: the first
+	// deferral is the ~1s base wait + proportional jitter (<= base/4) — nowhere
+	// near the 3m cap an accept-anchored clock would have applied.
+	if d < 250*time.Millisecond || d > time.Second+time.Second/4+time.Second {
+		t.Errorf("snooze = %s, want ~1s base wait (held message anchors at review, no elapsed backoff)", d)
+	}
+}
+
 // TestSendWorker_RateLimitedJitterDeterministicPerMessage: the anti-herd
 // jitter must be stable for a given message (no RNG state drifting across
 // workers) but DIFFERENT across messages (a burst must fan out, not
