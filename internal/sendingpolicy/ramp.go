@@ -31,6 +31,23 @@ import (
 // holds until midnight and the second must not be allowed to look like a hold.
 var errRampCapacity = errors.New("sendingpolicy: ramp capacity exhausted")
 
+// errRampIdentityUnverified is the internal marker for the ramp's other
+// refusal: the domain this message would send as has no verified sending
+// identity. It is not a volume answer and must not wait for midnight — the
+// thing that clears it is the customer finishing DNS verification.
+var errRampIdentityUnverified = errors.New("sendingpolicy: sending identity is not verified")
+
+// errRampUnavailable marks a PERMANENT ramp refusal — a domain that changed
+// hands, a reservation already settled, a persisted schedule that no longer
+// validates.
+//
+// Keeping it distinct from a transport error is the whole point. Both arrive as
+// `error` from the ramp store, but a permanent one will be repeated identically
+// by every later execution, so returning it as an error rolls the transaction
+// back with the attempt still `reserved` and its units stranded on the SHARED
+// pools with nothing able to release them. A caller can farm that.
+var errRampUnavailable = errors.New("sendingpolicy: ramp permanently refused this message")
+
 // ReasonRampCapacity is the machine-readable hold reason for a domain that has
 // used its ramp allowance for the day.
 const ReasonRampCapacity = "sending_ramp_capacity_exhausted"
@@ -141,20 +158,54 @@ func (m *Module) rampAuthorize(ctx context.Context, tx pgx.Tx, policy RuntimePol
 		},
 	})
 	if err != nil {
+		var permanent *sendramp.PermanentError
+		if errors.As(err, &permanent) {
+			return fmt.Errorf("%w: %v", errRampUnavailable, err)
+		}
 		return fmt.Errorf("sendingpolicy: reserve ramp capacity: %w", err)
 	}
 	if !decision.Allowed {
+		if decision.IdentityUnverified {
+			return errRampIdentityUnverified
+		}
 		return errRampCapacity
 	}
 	return nil
 }
 
+// rampHoldFor turns a ramp refusal into the decision it deserves, and reports
+// whether it was a refusal at all.
+//
+// The distinction it draws is the one the caller cannot afford to get wrong. A
+// capacity answer waits for midnight; an unverified identity waits for the
+// customer, with no clock to advise; a permanent refusal waits for nothing and
+// must be terminal, so the worker fails the message once instead of snoozing on
+// it forever. Anything unrecognized stays an error — a transport failure that
+// looked like a hold would silently un-ramp the send.
+//
+// Every branch here is a HOLD, and every hold must be reached on a path that
+// gives the budget units back. That is why this returns a decision rather than
+// writing one: the two call sites have released their units at different
+// points, and only they know which.
+func rampHoldFor(err error, day time.Time) (Decision, bool) {
+	switch {
+	case errors.Is(err, errRampCapacity):
+		return holdDecision(ReasonRampCapacity, nextUTCMidnight(day)), true
+	case errors.Is(err, errRampIdentityUnverified):
+		return holdDecision(ReasonSendingIdentityUnverified, time.Time{}), true
+	case errors.Is(err, errRampUnavailable):
+		return terminalHold(ReasonRampUnavailable), true
+	}
+	return Decision{}, false
+}
+
 // rampRelease returns a message's ramp units for a terminal local cancellation.
 //
-// Only Cancel does this. A rate deferral deliberately retains the ramp
-// reservation: the message was not rejected by anyone, it was merely slowed
-// down, and releasing its ramp claim would let the same message re-qualify a
-// stage it has already qualified.
+// Only Cancel does this, and only through cancelRamp, which decides WHETHER the
+// units are still this caller's to give back. A rate deferral deliberately
+// retains the reservation: the message was not rejected by anyone, it was
+// merely slowed down, and releasing its ramp claim would let the same message
+// re-qualify a stage it has already qualified.
 func (m *Module) rampRelease(ctx context.Context, tx pgx.Tx, messageID string) error {
 	if err := sendramp.ReleaseTx(ctx, tx, messageID); err != nil {
 		return fmt.Errorf("sendingpolicy: release ramp capacity: %w", err)

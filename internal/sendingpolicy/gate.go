@@ -303,13 +303,22 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 		return Decision{}, AttemptRef{}, err
 	}
 
-	// Probation classification. Shared-domain traffic is probationary at every
-	// plan level and never graduates by age or payment — higher-volume
-	// initiated sending requires a customer-controlled domain. Custom-domain
-	// probation is the custom-domain ramp's answer, composed into this
-	// decision by Task 4; until then a dedicated domain is not probationary,
-	// which is correct while the ramp itself is pass-through.
-	probation := op.Shared
+	// Probation classification, from the same source final authorization uses.
+	//
+	// Shared-domain traffic is probationary at every plan level and never
+	// graduates by age or payment — higher-volume initiated sending requires a
+	// customer-controlled domain. Custom-domain probation is the ramp's answer,
+	// and reading it HERE rather than only at final authorization is what makes
+	// the early hold bound the probation pool at all: a worker that is going to
+	// be stopped by the platform's Sybil guardrail must learn it before it
+	// composes and signs a message. It also keeps the stored `probation` column
+	// equal to the class the release path will target, and saves every
+	// authorization a needless release-and-reacquire on the platform's hottest
+	// counter rows.
+	probation, err := m.rampProbation(ctx, tx, policy, op)
+	if err != nil {
+		return Decision{}, AttemptRef{}, err
+	}
 
 	// Trusted first-party accounts charge nothing, and that has to be true
 	// HERE and not only at final authorization. The exemption exists so
@@ -680,8 +689,12 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	// stale answer can only be stale in the strict direction.
 	st.probation, err = m.rampProbation(ctx, tx, policy, op)
 	if err != nil {
+		// TERMINAL, exactly as the envelope resolution below answers the same
+		// loss. This read runs FIRST, so a retryable answer here would pre-empt
+		// the correct one whenever the ramp is armed, and the worker would
+		// snooze forever on an operation whose message no longer exists.
 		if errors.Is(err, ErrSourceUnavailable) {
-			return st, holdDecision(ReasonSourceUnavailable, time.Time{}), nil
+			return st, terminalHold(ReasonSourceUnavailable), nil
 		}
 		return st, Decision{}, err
 	}
@@ -769,8 +782,11 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 
 	st.ramp, err = m.rampSubjectFor(ctx, tx, policy, op, st.units)
 	if err != nil {
+		// Defensive: rampProbation resolves the same rows earlier and would
+		// already have answered. Terminal for the same reason it is above — a
+		// vanished source is not something a retry can restore.
 		if errors.Is(err, ErrSourceUnavailable) {
-			return st, holdDecision(ReasonSourceUnavailable, time.Time{}), nil
+			return st, terminalHold(ReasonSourceUnavailable), nil
 		}
 		return st, Decision{}, err
 	}
@@ -999,8 +1015,10 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 			return allowDecision(), nil
 		}
 		if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
-			if errors.Is(err, errRampCapacity) {
-				return holdDecision(ReasonRampCapacity, nextUTCMidnight(st.day)), nil
+			// releaseStoredUnits above already gave back whatever an earlier
+			// Reserve was holding, so every hold here leaves the ledger clean.
+			if hold, ok := rampHoldFor(err, st.day); ok {
+				return hold, nil
 			}
 			return Decision{}, err
 		}
@@ -1086,13 +1104,20 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 	// would charge an account for a send its own domain was not allowed to
 	// make.
 	if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
-		if !errors.Is(err, errRampCapacity) {
+		hold, ok := rampHoldFor(err, st.day)
+		if !ok {
 			return Decision{}, err
 		}
+		// Every ramp refusal — capacity, identity, or permanent — gives the
+		// budget units this transaction just took straight back. A permanent
+		// one especially: returning it as an error would roll back with the
+		// attempt still `reserved`, and since every later execution fails at
+		// the same point, those units would sit on the SHARED pools until
+		// midnight with nothing able to release them.
 		if err := m.releaseReacquiredUnits(ctx, tx, st); err != nil {
 			return Decision{}, err
 		}
-		return holdDecision(ReasonRampCapacity, nextUTCMidnight(st.day)), nil
+		return hold, nil
 	}
 	return allowDecision(), nil
 }
@@ -1585,9 +1610,55 @@ func (m *Module) DeferAttempt(ctx context.Context, ref AttemptRef) error {
 }
 
 // CancelAttempt gives back both ledgers for a terminal local cancellation such
-// as a suppression match.
+// as a suppression match — the ramp half only while nothing has been authorized
+// to send this message. See cancelRamp.
 func (m *Module) CancelAttempt(ctx context.Context, ref AttemptRef) error {
 	return m.releaseAttempt(ctx, ref, "cancel")
+}
+
+// cancelRamp gives the message-keyed ramp reservation back for a terminal local
+// cancellation, but only when no attempt of this operation has ever been
+// authorized to reach the provider.
+//
+// The two ledgers are keyed differently, and that asymmetry is the hazard. A
+// sending-budget reservation belongs to ONE submission attempt and refuses to
+// refund a confirmed one, so a cancel can never hand back capacity a socket may
+// have used. The ramp reservation is keyed by MESSAGE and has no ordinal at
+// all: cancelling attempt N+1 releases exactly the units attempt N handed to
+// SES. An unsettled attempt is the ordinary state after an ambiguous SMTP
+// result — settlement deliberately leaves the reservation standing, because a
+// message that might have been delivered must not release capacity — so the
+// refund repeats on every retry, and a repeatable refund makes the stage cap
+// advisory rather than binding.
+//
+// The question is therefore about the OPERATION, not the ordinal: if any
+// attempt was ever authorized, the ramp units are spent whichever attempt is
+// being cancelled, and only SettleProvider — holding a definite provider
+// outcome — may give them back. A reservation that no attempt has authorized is
+// still refundable, which is the shape the outbound worker produces today when
+// it reserves ramp capacity before this module is involved.
+//
+// The read needs no lock: the caller holds the operation row FOR UPDATE and
+// every authorization takes that same row, so no attempt can become confirmed
+// underneath it.
+func (m *Module) cancelRamp(ctx context.Context, tx pgx.Tx, op operationRow, what string) error {
+	if what != "cancel" || op.Purpose != PurposeCustomerMessage {
+		return nil
+	}
+	var authorized bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		    SELECT 1 FROM sending_budget_reservations
+		     WHERE operation_id = $1
+		       AND (state = 'confirmed' OR call_state <> 'none')
+		)`, op.OperationID,
+	).Scan(&authorized); err != nil {
+		return fmt.Errorf("sendingpolicy: read authorized attempts: %w", err)
+	}
+	if authorized {
+		return nil
+	}
+	return m.rampRelease(ctx, tx, op.OperationID)
 }
 
 // releaseAttempt is the shared release path. Both callers are valid only while
@@ -1633,8 +1704,17 @@ func (m *Module) releaseAttempt(ctx context.Context, ref AttemptRef, what string
 		return ErrAttemptStale
 	}
 	if stored.State == "released" {
-		// Already given back. Releases run on retry-prone paths, so repeating
-		// one must be a no-op rather than an error or a double refund.
+		// The BUDGET half is already given back, and repeating it must be a
+		// no-op rather than an error or a double refund — releases run on
+		// retry-prone paths. The RAMP half may still be outstanding: a
+		// deferral releases the budget and deliberately keeps the ramp, so a
+		// suppression discovered immediately afterwards arrives here holding
+		// the terminal answer the ramp was waiting for. Returning early would
+		// leave a message that will never send holding its domain's allowance
+		// until midnight.
+		if err := m.cancelRamp(ctx, tx, op, what); err != nil {
+			return err
+		}
 		return m.commit(ctx, tx, what)
 	}
 
@@ -1666,10 +1746,8 @@ func (m *Module) releaseAttempt(ctx context.Context, ref AttemptRef, what string
 	// both ledgers. A rate deferral gives back only the budget: the message was
 	// not rejected by anyone, and releasing its ramp claim would let it
 	// re-qualify a stage it has already qualified.
-	if what == "cancel" && op.Purpose == PurposeCustomerMessage {
-		if err := m.rampRelease(ctx, tx, op.OperationID); err != nil {
-			return err
-		}
+	if err := m.cancelRamp(ctx, tx, op, what); err != nil {
+		return err
 	}
 	return m.commit(ctx, tx, what)
 }
