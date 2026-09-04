@@ -1,0 +1,52 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("approval-gate-in-infrastructure");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: {
+    title: post.title,
+    description: post.description,
+    url: `https://e2a.dev/blog/${post.slug}`,
+    type: "article",
+    publishedTime: new Date(post.date + "T00:00:00Z").toISOString(),
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: post.title,
+    description: post.description,
+  },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Your approval gate shouldn't live in your agent's code
+
+If you're building a support agent or a voice agent that emails customers, you've probably already had the thought: this thing is going to send something wrong to a real person, and I need a human to see it first.
+
+The usual way to build that checkpoint looks like this: the LLM drafts a reply, your application code runs a policy check, and iffy replies get parked as drafts until someone approves them. It works. It's how most teams do it, and there are good public tutorials for exactly this pattern.
+
+But notice where the checkpoint lives: in your process, in code you wrote, on the happy path you remembered to route through. The gate only holds for the code paths that call it. A retry loop that re-invokes the send tool. A second agent with the same API key. A bug that skips the policy function. A prompt-injected email that talks your model into a "yes." Each one is a send path that never saw your gate.
+
+We took a different cut with e2a: the gate belongs in the email infrastructure, below all of your code.
+
+When an e2a agent's protection config holds outbound mail, `send` and `reply` simply don't dispatch. The API stores the message as `pending_review` and returns `202 Accepted`. There is no "send anyway" path for the agent to find, because the decision isn't in the agent's process at all - it's enforced where the mail actually leaves.
+
+What that buys you in practice:
+
+- **One review queue for everything.** The queue is account-scoped: every held message across every inbox you run shows up in one place, approvable from the dashboard, the API, the MCP tools, or a magic-link email that fires when a hold triggers. Your reviewer doesn't need your app running to approve.
+- **Explicit expiry, your call.** Holds carry a configurable TTL, and you decide the terminal state when it lapses: auto-approve (the message goes out) or reject (it's discarded). A stuck reviewer degrades to a policy you chose, not to silence.
+- **The agent can't negotiate with it.** Inbound screening (prompt-injection and phishing detection) feeds the same queue, and it's fail-safe - if a detector times out, the message fails to review, never to a silent allow.
+
+Two honest caveats, because you'd find them anyway. First, the protection and review surface is marked beta in our OpenAPI spec - the core `/v1` send/receive API is GA and frozen, but this part can still change. Second, turning on "hold everything" today is non-obvious: "hold for review" only fires on recipients that fail the trust gate, so with the gate open nothing holds. The working config is an allowlist with an empty list, which is a riddle, not a feature. We filed it ourselves as [issue #989](https://github.com/tokencanopy/e2a/issues/989) and a dedicated boolean toggle is coming.
+
+And since e2a is Apache 2.0 and self-hostable, none of this requires trusting us with the trail: self-host and the review queue, the verdicts, and the message history live in your own Postgres.
+
+The pattern question isn't whether to put a human in the loop. It's whether the loop holds when your code is the thing that fails.

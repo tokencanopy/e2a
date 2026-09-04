@@ -95,6 +95,15 @@ export const posts: Post[] = [
     author: "e2a",
     readingMinutes: 5,
   },
+  {
+    slug: "approval-gate-in-infrastructure",
+    title: "Your approval gate shouldn't live in your agent's code",
+    description:
+      "Most teams put the human-approval checkpoint in their own application code, where it only holds for the code paths that remember to call it. Where the gate should live instead: the email API boundary.",
+    date: "2026-09-04",
+    author: "e2a",
+    readingMinutes: 3,
+  },
 ];
 
 export function getPost(slug: string): Post | undefined {
