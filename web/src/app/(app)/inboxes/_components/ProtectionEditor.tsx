@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Chip, Eyebrow } from "@e2a/ui";
 import { setProtection } from "../../../components/onboarding/api";
 import type {
   ProtectionConfig,
@@ -81,6 +82,16 @@ function directionToConfig(d: DirectionDraft) {
     },
     scan: { sensitivity: d.scan },
   };
+}
+
+function isDirectionDirty(current: DirectionDraft, baseline: DirectionDraft): boolean {
+  if (current.policy !== baseline.policy) return true;
+  if (current.action !== baseline.action) return true;
+  if (current.scan !== baseline.scan) return true;
+  if (current.policy !== "open" && current.allowlist !== baseline.allowlist) {
+    return true;
+  }
+  return false;
 }
 
 function Segmented<T extends string>({
@@ -196,14 +207,36 @@ export function ProtectionEditor({
   const [onExpiry, setOnExpiry] = useState<"approve" | "reject">(
     config.holds.on_expiry ?? "reject",
   );
+  const [baseline, setBaseline] = useState(() => ({
+    inbound: directionFromConfig(config.inbound),
+    outbound: directionFromConfig(config.outbound),
+    ttl: config.holds.ttl_seconds ?? 604800,
+    onExpiry: (config.holds.on_expiry ?? "reject") as "approve" | "reject",
+  }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setBaseline({
+      inbound: directionFromConfig(config.inbound),
+      outbound: directionFromConfig(config.outbound),
+      ttl: config.holds.ttl_seconds ?? 604800,
+      onExpiry: (config.holds.on_expiry ?? "reject") as "approve" | "reject",
+    });
+  }, [config]);
+
+  const hasEdits =
+    isDirectionDirty(inbound, baseline.inbound) ||
+    isDirectionDirty(outbound, baseline.outbound) ||
+    ttl !== baseline.ttl ||
+    onExpiry !== baseline.onExpiry;
 
   const ttlIsPreset = TTL_PRESETS.some((p) => p.seconds === ttl);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!hasEdits || saving) return;
     if (ttl <= 0 || ttl > MAX_TTL) {
       setError(`Approval window must be between 1 and ${MAX_TTL} seconds (7 days).`);
       return;
@@ -217,6 +250,12 @@ export function ProtectionEditor({
         outbound: directionToConfig(outbound),
         holds: { ttl_seconds: ttl, on_expiry: onExpiry },
       });
+      setBaseline({
+        inbound,
+        outbound,
+        ttl,
+        onExpiry,
+      });
       setSaved(true);
       onSaved();
     } catch (err) {
@@ -227,7 +266,48 @@ export function ProtectionEditor({
   };
 
   return (
-    <form onSubmit={handleSave} className="space-y-4">
+    <form
+      onSubmit={handleSave}
+      className="mb-6 space-y-4"
+      style={{
+        background: "var(--bg-panel)",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--r-lg)",
+        padding: "20px 22px",
+      }}
+    >
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <Eyebrow>Protection</Eyebrow>
+            <Chip tone="warn">Beta</Chip>
+          </div>
+          <p
+            className="mt-2 text-[13px] leading-relaxed"
+            style={{
+              color: "var(--fg-muted)",
+              maxWidth: 580,
+            }}
+          >
+            Control who may send to and from this inbox, how aggressively content
+            is scanned, and what happens to messages held for review.
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1.5 shrink-0 self-start">
+          <div className="flex items-center gap-2">
+            {saved && <span className="text-xs text-success font-medium">Saved ✓</span>}
+            <button
+              type="submit"
+              disabled={saving || !hasEdits}
+              className="text-xs px-3 py-1.5 bg-foreground text-background rounded-md hover:opacity-90 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer font-medium"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+          {error && <p className="text-xs text-red-600 max-w-[280px] text-right">{error}</p>}
+        </div>
+      </div>
+
       <DirectionFields
         title="Inbound"
         gateLabel="Who may send to this inbox"
@@ -320,18 +400,6 @@ export function ProtectionEditor({
         action above. Held messages and their body + attachments remain in
         message history after the review reaches a terminal state.
       </p>
-
-      <div className="flex items-center gap-2">
-        <button
-          type="submit"
-          disabled={saving}
-          className="text-xs px-3 py-1.5 bg-foreground text-background rounded-md hover:opacity-90 transition disabled:opacity-50"
-        >
-          {saving ? "Saving…" : "Save"}
-        </button>
-        {saved && <span className="text-xs text-success">Saved ✓</span>}
-        {error && <p className="text-xs text-red-600">{error}</p>}
-      </div>
     </form>
   );
 }
