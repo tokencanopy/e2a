@@ -25,10 +25,29 @@ sustained over-cap admission or a ramp-store incident.
 ## Exemptions
 
 Migration `067_domain_sending_ramp.sql` exempts domains that were already
-sending-verified when the feature shipped. A verified domain that sends while `sending_ramp.enabled` is
-false is also persistently exempt. Enabling the feature later does not revoke
-those exemptions. This prevents a rollout from unexpectedly throttling an
+sending-verified when the feature shipped. Enabling the feature later does not
+revoke those exemptions. This prevents a rollout from unexpectedly throttling an
 established sender.
+
+While `sending_ramp.enabled` is false the gate is pass-through: the send is
+allowed and **no ramp state is written**. A domain that sends under a disabled
+ramp stays `inactive` — it is not exempted, and the domain API keeps reporting
+`sending_ramp.status: inactive`. Turning the ramp on therefore ramps every
+domain that has not been exempted deliberately.
+
+Exempting the fleet that is already sending is a one-shot operator decision,
+not a side effect of traffic. Activate the sending-protection policy with
+`-grandfather-current-sending-domains`: it flips every sending-verified,
+ramp-inactive domain to `exempt` inside the activation transaction, behind a
+replay marker and a `SHARE ROW EXCLUSIVE` lock on `domains`, so a concurrent
+pending→verified sender transition either linearizes into the snapshot or meets
+the armed ramp. A second run reports `already grandfathered` and writes nothing.
+
+A deployment that ran an earlier build with the ramp disabled may already hold
+`exempt` rows that the send path stamped once per sending domain. Those rows are
+not remediated automatically; decide per deployment whether they should stand
+(treat that traffic as grandfathered) or be returned to `inactive` with the
+reset below so the domains ramp when the feature is enabled.
 
 ## Operator-only reset
 

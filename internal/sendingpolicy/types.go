@@ -195,6 +195,15 @@ const (
 	// the immutable class its operation was derived from, so the operation no
 	// longer describes the send.
 	ReasonClassChanged = "reputation_class_changed"
+	// ReasonSendingIdentityUnverified means the domain this message would send
+	// as no longer has a verified sending identity, so the ramp has no proven
+	// scope to charge and the send waits for the customer to finish verifying.
+	ReasonSendingIdentityUnverified = "sending_identity_unverified"
+	// ReasonRampUnavailable means the ramp ledger permanently refused this
+	// message — a domain that changed hands, a reservation already settled, a
+	// stored schedule that no longer validates. No retry of this operation can
+	// change the answer.
+	ReasonRampUnavailable = "sending_ramp_unavailable"
 )
 
 // Decision is allow-or-hold. A hold carries the earliest time a retry could
