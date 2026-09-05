@@ -1,0 +1,49 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("inbox-is-transport");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: {
+    title: post.title,
+    description: post.description,
+    url: `https://e2a.dev/blog/${post.slug}`,
+    type: "article",
+    publishedTime: new Date(post.date + "T00:00:00Z").toISOString(),
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: post.title,
+    description: post.description,
+  },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Your agent's inbox is storage, not transport
+
+A common agent email setup: the agent polls its inbox every 30 minutes. Between polls, radio silence. A customer emails your support agent at 9:02 and gets a reply at 9:30, not because the agent was thinking, but because 9:30 is when the cron fired.
+
+That inbox isn't transport. It's storage with a visiting schedule - the agent checks mail the way you'd check a PO box.
+
+The standard fix is webhooks, and it does fix the latency. But a webhook receiver means a public HTTPS endpoint: a deployed URL, signature verification, retry handling. If your agent is a cloud service, fine. If your agent runs on your laptop, in a homelab, or behind a corporate firewall - which is where a lot of agents actually live - "just use webhooks" means a deployment project before you've received a single email. So people hand-roll the poll and live with the silence. That's not a discipline problem. It's a transport problem.
+
+We built e2a's inbound around the idea that delivery should fit where your agent runs, not where the email API wishes it ran. Four channels, chosen per integration:
+
+- **Signed webhooks** for when you do have a public URL. Every delivery is HMAC-signed (`X-E2A-Signature`, `whsec_…` secret, 5-minute replay window), and the SDKs verify and parse in one call - `construct_event` / `constructEvent` - so you never trust a field on an unverified payload.
+- **WebSocket** for when you don't. A per-agent real-time stream that works from a laptop, no public URL required. If the client disconnects, messages accumulate as unread and the server drains them as notifications on reconnect.
+- **REST polling**, kept on purpose. Sometimes a poll is the right shape - a batch job, an agent that wakes on its own schedule. It should be a choice, not a fallback.
+- **MCP tools** for agent frameworks. Point any MCP-aware runtime at the hosted server and the inbox becomes native tools - `list_messages`, `get_message`, `get_attachment` - over the same REST API. No REST glue to write.
+
+Notifications stay lightweight on every channel - message id, sender, subject - and you fetch the full body and attachments over REST when you actually need them.
+
+For the laptop case there's a shorter path still: `e2a listen` streams inbound mail over WebSocket and bridges it to a local HTTP handler. Point that handler at an OpenAI Responses endpoint and each inbound email becomes a Responses payload whose output goes back out as the reply. An agent that answers email in real time, running on the machine in front of you.
+
+The poll-then-silence pattern isn't a character flaw in your agent. It's what happens when the only push channel on offer demands infrastructure your agent doesn't have. Give the agent a transport that reaches it where it lives, and the PO box schedule goes away on its own.
