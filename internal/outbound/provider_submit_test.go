@@ -691,12 +691,20 @@ func TestProviderSubmitterSocketCounterObservesADial(t *testing.T) {
 // vanishingRelay fronts a server that takes the whole DATA body and then
 // closes without a 250 — the lost-acceptance shape.
 func vanishingRelay(t *testing.T) (*outbound.SMTPRelay, func() int) {
+	return afterDotRelay(t, "")
+}
+
+// afterDotRelay fronts a server that takes the whole DATA body and then does
+// `then`: "" closes silently, "stall" never answers, anything else is sent as
+// the final reply line.
+func afterDotRelay(t *testing.T, then string) (*outbound.SMTPRelay, func() int) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop); _ = listener.Close() })
 	var mu sync.Mutex
 	bodies := 0
 	go func() {
@@ -720,7 +728,17 @@ func vanishingRelay(t *testing.T) (*outbound.SMTPRelay, func() int) {
 							mu.Lock()
 							bodies++
 							mu.Unlock()
-							return // no 250: the connection just dies
+							switch then {
+							case "":
+								return // no 250: the connection just dies
+							case "stall":
+								<-stop // hold the connection open, silently
+								return
+							default:
+								fmt.Fprint(conn, then+"\r\n")
+								inData = false
+								continue
+							}
 						}
 						continue
 					}
@@ -846,5 +864,62 @@ func TestProviderSubmitterLostAcceptanceIsUnsettledAndMarked(t *testing.T) {
 	}
 	if state := f.callState(ref.ID(), 1); state != "started" {
 		t.Fatalf("call_state = %s, want started", state)
+	}
+}
+
+// TestProviderSubmitterLostAcceptanceSurvivesTheDeadline: the likeliest way
+// to lose a 250 is the caller's deadline. The marker must survive the relay's
+// context remap, or the worker cannot tell "maybe sent" from "not sent".
+func TestProviderSubmitterLostAcceptanceSurvivesTheDeadline(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, bodies := afterDotRelay(t, "stall")
+	spy := &spyGate{Gate: f.gate}
+	s := outbound.NewProviderSubmitter(relay, spy)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	ctx, cancel := context.WithTimeout(f.ctx, 400*time.Millisecond)
+	defer cancel()
+	_, err := s.SubmitOnce(ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the deadline", err)
+	}
+	if !errors.Is(err, outbound.ErrProviderAcceptanceUnknown) {
+		t.Fatalf("err = %v, want ErrProviderAcceptanceUnknown preserved through the remap", err)
+	}
+	if bodies() != 1 {
+		t.Fatalf("provider took %d bodies, want 1", bodies())
+	}
+	if got := spy.settled(); len(got) != 0 {
+		t.Fatalf("settlements = %+v, want none", got)
+	}
+}
+
+// TestProviderSubmitterPostDataRejectionIsDefinite: SES answers a content
+// rejection AFTER the body with an ordinary 554. That is a definite answer —
+// settled as rejected, classified permanent, and never marked ambiguous.
+func TestProviderSubmitterPostDataRejectionIsDefinite(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, bodies := afterDotRelay(t, "554 5.6.0 Message rejected")
+	spy := &spyGate{Gate: f.gate}
+	s := outbound.NewProviderSubmitter(relay, spy)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if err == nil || !outbound.IsPermanentSMTPError(err) {
+		t.Fatalf("err = %v, want permanent", err)
+	}
+	if errors.Is(err, outbound.ErrProviderAcceptanceUnknown) {
+		t.Fatalf("err = %v carries the ambiguity marker on a definite reply", err)
+	}
+	if bodies() != 1 {
+		t.Fatalf("provider took %d bodies, want 1", bodies())
+	}
+	got := spy.settled()
+	if len(got) != 1 || got[0].Outcome != sendingpolicy.SettlementProviderPermanentlyRejected {
+		t.Fatalf("settlements = %+v, want one permanent rejection", got)
 	}
 }

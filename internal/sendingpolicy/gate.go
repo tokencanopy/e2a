@@ -1421,8 +1421,15 @@ func (m *Module) RedeemProviderCall(ctx context.Context, auth ProviderAuthorizat
 	// whose whole point is "stop now". The read is deliberately UNLOCKED: the
 	// account-control key precedes the operation key in the normative order
 	// and this transaction already holds the operation, so locking it here
-	// would invert the order. A committed pause is visible to a plain read,
-	// and the check can only refuse, never widen.
+	// would invert the order. A committed pause is visible to a plain read
+	// because the transaction runs READ COMMITTED (each statement sees a
+	// fresh snapshot; under REPEATABLE READ this re-check would silently
+	// read the snapshot taken at effectivePolicy and prove nothing), and the
+	// check can only refuse, never widen. The window that remains runs from
+	// this read to the dial — the reservation update, commit, and return.
+	//
+	// Protection notices are exempt: the notice telling an account it was
+	// paused is SOURCED from that paused account, and it must go out.
 	if op.Purpose.isCustomer() && op.SourceAccountRef != nil {
 		var state string
 		err := tx.QueryRow(ctx,

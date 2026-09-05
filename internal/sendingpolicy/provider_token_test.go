@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
@@ -210,5 +211,61 @@ func TestProviderTokenHoldsOnATenantNameThatCannotBeAHeader(t *testing.T) {
 	d := f.authorize(g, ref)
 	if d.Allow || d.Reason != sendingpolicy.ReasonTenantUnnamed {
 		t.Fatalf("decision = %+v, want a hold with reason %q", d, sendingpolicy.ReasonTenantUnnamed)
+	}
+}
+
+// TestProviderTokenPauseNoticeToAPausedOwnerStillRedeems pins the customer-only
+// guard on RedeemProviderCall's pause re-check: the notice telling an account
+// it was paused is SOURCED from that paused account, so an unguarded re-read
+// would refuse the one email the pause exists to send.
+func TestProviderTokenPauseNoticeToAPausedOwnerStillRedeems(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	user := f.user("standard")
+	f.pause(user)
+	eventID := f.pauseNotice(user)
+
+	var ref sendingpolicy.OperationRef
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		ref, err = g.PrepareProtectionNoticeTx(f.ctx, tx,
+			sendingpolicy.NewProtectionNoticeRef(eventID, sendingpolicy.AudienceOwner))
+		return err
+	})
+	_, attempt, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	decision, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || auth == nil {
+		t.Fatalf("consume: decision=%+v auth=%v err=%v", decision, auth, err)
+	}
+	if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+		t.Fatalf("redeem of a pause notice to a PAUSED owner: %v — the notice must still go out", err)
+	}
+}
+
+// TestProviderTokenSettlementComparesNormalizedProviderMessageID: a row bound
+// by another writer in the qualified spelling must not refuse a bare replay.
+func TestProviderTokenSettlementComparesNormalizedProviderMessageID(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	ref, auth := f.redeemed(g, f.agent(f.user("standard")))
+	if _, err := f.pool.Exec(f.ctx, `
+		UPDATE sending_feedback_correlations SET provider_message_id = $3
+		 WHERE operation_id = $1 AND submission_attempt = $2`,
+		ref.ID(), 1, "<010f0193abcdef00-000000@us-east-2.amazonses.com>",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
+		Attempt: auth.Attempt(), Outcome: sendingpolicy.SettlementProviderAccepted, ProviderMessageID: "010f0193abcdef00-000000",
+	}); err != nil {
+		t.Fatalf("bare replay over a qualified binding: %v", err)
+	}
+	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
+		Attempt: auth.Attempt(), Outcome: sendingpolicy.SettlementProviderAccepted, ProviderMessageID: "other-000000",
+	}); !errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+		t.Fatalf("different id err = %v, want ErrProviderMessageIDConflict", err)
 	}
 }
