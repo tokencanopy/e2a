@@ -7,7 +7,7 @@
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import useSWR from "swr";
-import { Chip, Eyebrow } from "@e2a/ui";
+import { Eyebrow } from "@e2a/ui";
 import { deleteAgent, getProtection } from "../../../../components/onboarding/api";
 import { useAgents } from "../../../../components/hooks/useAgents";
 import {
@@ -135,17 +135,11 @@ function AgentSettingsContent({ email }: { email: string }) {
           domain verification (the approve/reject pipeline needs a real
           domain) and on the protection config having loaded. */}
       {agent.domain_verified && protection && (
-        <Section
-          title="Protection"
-          beta
-          subtitle="Control who may send to and from this inbox, how aggressively content is scanned, and what happens to messages held for review."
-        >
-          <ProtectionEditor
-            email={agent.email}
-            config={protection}
-            onSaved={onEditorSaved}
-          />
-        </Section>
+        <ProtectionEditor
+          email={agent.email}
+          config={protection}
+          onSaved={onEditorSaved}
+        />
       )}
 
       {/* Danger zone */}
@@ -210,46 +204,5 @@ function AgentSettingsContent({ email }: { email: string }) {
         )}
       </section>
     </div>
-  );
-}
-
-function Section({
-  title,
-  subtitle,
-  beta = false,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  beta?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <section
-      className="mb-6"
-      style={{
-        background: "var(--bg-panel)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--r-lg)",
-        padding: "20px 22px",
-      }}
-    >
-      <div className="flex items-center gap-2">
-        <Eyebrow>{title}</Eyebrow>
-        {beta && <Chip tone="warn">Beta</Chip>}
-      </div>
-      <p
-        className="mt-2 mb-4"
-        style={{
-          fontSize: 13,
-          color: "var(--fg-muted)",
-          lineHeight: 1.6,
-          maxWidth: 580,
-        }}
-      >
-        {subtitle}
-      </p>
-      {children}
-    </section>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "../components/AuthProvider";
 import { SWRProvider } from "../components/swr/SWRProvider";
 import { PendingPollingOwner } from "../components/swr/PendingPollingOwner";
@@ -22,6 +23,24 @@ export default function AppLayout({
   children: React.ReactNode;
 }) {
   const { user, loading } = useAuth();
+  // usePathname can be null outside the app router (tests, prerender);
+  // the house guard is `?? ""`. Trailing slashes are normalized so a
+  // "/welcome/" deep link is still recognised as the survey page.
+  const rawPathname = usePathname() ?? "";
+  const pathname = rawPathname.length > 1 ? rawPathname.replace(/\/+$/, "") : rawPathname;
+  const router = useRouter();
+  // Onboarding survey gate. The server decides "pending" (flag on AND
+  // unanswered); this shell only routes on it. The two redirects are
+  // mutually exclusive on the pending bit, so no state satisfies both
+  // and there is no loop: pending → must be on /welcome; not pending →
+  // must not be.
+  const surveyPending = Boolean(user?.onboarding_survey_pending);
+  const onWelcome = pathname === "/welcome";
+  const surveyRedirecting = Boolean(user) && !loading && surveyPending !== onWelcome;
+  useEffect(() => {
+    if (!surveyRedirecting) return;
+    router.replace(surveyPending ? "/welcome" : "/inboxes");
+  }, [surveyRedirecting, surveyPending, router]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   // The hamburger button is the open trigger; we stash a ref so the
   // drawer can restore focus to it on close (otherwise focus would
@@ -83,17 +102,19 @@ export default function AppLayout({
     };
   }, [mobileNavOpen, closeMobileNav]);
 
+  const loadingScreen = (
+    <div
+      className="min-h-screen flex items-center justify-center"
+      style={{ background: "var(--bg)", color: "var(--fg)" }}
+    >
+      <p className="text-[13px]" style={{ color: "var(--fg-muted)" }}>
+        Loading...
+      </p>
+    </div>
+  );
+
   if (loading) {
-    return (
-      <div
-        className="min-h-screen flex items-center justify-center"
-        style={{ background: "var(--bg)", color: "var(--fg)" }}
-      >
-        <p className="text-[13px]" style={{ color: "var(--fg-muted)" }}>
-          Loading...
-        </p>
-      </div>
-    );
+    return loadingScreen;
   }
 
   if (!user) {
@@ -120,6 +141,20 @@ export default function AppLayout({
             />
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (surveyRedirecting) {
+    return loadingScreen;
+  }
+
+  if (onWelcome) {
+    // Survey pending and already on /welcome: render it alone. No
+    // sidebar, no mobile header — every link would just bounce back.
+    return (
+      <div className="min-h-screen" style={{ background: "var(--bg)" }} data-app-surface="">
+        {children}
       </div>
     );
   }

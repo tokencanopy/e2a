@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.5.1
+
+Bug fix only. No flag, output-field, or exit-code meaning changes from 2.5.0.
+
+**Fixed:** `e2a contacts import` no longer bakes a stray carriage return into
+imported contact metadata. The CSV parser dropped `\r` unconditionally outside
+a quoted field but appended it verbatim inside one, so a CRLF export from
+Excel, Sheets, or a CRM containing a multi-line cell stored the cell's internal
+line breaks as `\r\n`. Quoted fields now normalize the same way the unquoted
+branch already did, matching the parser's documented RFC 4180 conformance.
+
+**Documentation:** corrected the `--send-at` description in the README and in
+this changelog's 2.2.0 entry. Both claimed a review hold *drops* the schedule;
+in fact a scheduled send caught by a hold keeps its `send_at` — approving the
+message submits at that instant if it is still in the future, or immediately if
+it has already passed. No command behavior changed.
+
 ## 2.5.0
 
 Additive only for every input that already succeeded in 2.4.0 — no flag,

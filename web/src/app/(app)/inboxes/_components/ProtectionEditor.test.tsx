@@ -38,6 +38,17 @@ beforeEach(() => {
 });
 
 describe("ProtectionEditor — initialization from config", () => {
+  it("renders the header title, beta chip, and subtitle", () => {
+    renderEditor();
+    expect(screen.getByText("Protection")).toBeInTheDocument();
+    expect(screen.getByText("Beta")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Control who may send to and from this inbox, how aggressively content is scanned, and what happens to messages held for review.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("selects the configured policy, action, and sensitivity per direction", () => {
     renderEditor();
     expect(gateGroup("Inbound").getByRole("button", { name: "Addresses" }))
@@ -120,6 +131,31 @@ describe("ProtectionEditor — validation", () => {
 });
 
 describe("ProtectionEditor — save", () => {
+  it("disables the Save button when there are no edits", () => {
+    renderEditor();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("does not call the API if submitted when there are no edits", () => {
+    const { container } = renderEditor();
+    fireEvent.submit(container.querySelector("form")!);
+    expect(mockSetProtection).not.toHaveBeenCalled();
+  });
+
+  it("enables the Save button when an edit is made, and disables it if reverted", async () => {
+    renderEditor();
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    expect(saveButton).toBeDisabled();
+
+    // Make an edit (TTL preset)
+    await userEvent.click(screen.getByRole("button", { name: "1 day" }));
+    expect(saveButton).toBeEnabled();
+
+    // Revert back to original preset (1 hour)
+    await userEvent.click(screen.getByRole("button", { name: "1 hour" }));
+    expect(saveButton).toBeDisabled();
+  });
+
   it("PUTs the wholesale replace with the edited drafts", async () => {
     mockSetProtection.mockResolvedValue(undefined);
     const { onSaved } = renderEditor();
@@ -146,6 +182,7 @@ describe("ProtectionEditor — save", () => {
       holds: { ttl_seconds: 86400, on_expiry: "approve" },
     });
     expect(await screen.findByText("Saved ✓")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(onSaved).toHaveBeenCalledTimes(1);
   });
 
@@ -167,6 +204,7 @@ describe("ProtectionEditor — save", () => {
     mockSetProtection.mockResolvedValue(undefined);
     renderEditor();
 
+    await userEvent.click(screen.getByRole("button", { name: "1 day" }));
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Saved ✓")).toBeInTheDocument();
 
@@ -175,12 +213,14 @@ describe("ProtectionEditor — save", () => {
         .getByRole("button", { name: "High" }),
     );
     expect(screen.queryByText("Saved ✓")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
   });
 
   it("shows the server error when the PUT fails", async () => {
     mockSetProtection.mockRejectedValue(new Error("ttl_seconds out of range"));
     renderEditor();
 
+    await userEvent.click(screen.getByRole("button", { name: "1 day" }));
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByText("ttl_seconds out of range")).toBeInTheDocument();

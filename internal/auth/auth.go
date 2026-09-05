@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -49,6 +50,17 @@ type UserAuth struct {
 	secure      bool   // true in production (Secure cookie flag)
 	baseURL     string // frontend origin for post-login redirect
 	userInfoURL string // Google userinfo endpoint (overridable for testing)
+	// logoutOrigin is the canonical web-app origin used for logout provenance.
+	// It is separate from baseURL because generic OIDC deployments may not
+	// configure the legacy Google OAuth callback.
+	logoutOrigin string
+	// oidcLogoutURL is an operator-configured, fixed upstream logout endpoint.
+	// It is deliberately not derived from request input.
+	oidcLogoutURL string
+	// onboardingSurveyEnabled mirrors config.OnboardingSurvey.Enabled. When
+	// false, /api/auth/me never reports the survey as pending and the
+	// survey branch of PATCH returns 404.
+	onboardingSurveyEnabled bool
 }
 
 type cliLoginHandoff struct {
@@ -139,6 +151,27 @@ func NewUserAuth(cfg *config.OAuthConfig, store *identity.Store, production bool
 	}
 }
 
+// SetOnboardingSurveyEnabled turns the onboarding survey on or off for
+// this handler set. Called once from main after construction.
+func (ua *UserAuth) SetOnboardingSurveyEnabled(enabled bool) {
+	ua.onboardingSurveyEnabled = enabled
+}
+
+// meResponse is the /api/auth/me shape: the user record plus the one
+// derived field the dashboard's app shell gates on.
+type meResponse struct {
+	*identity.User
+	OnboardingSurveyPending bool `json:"onboarding_survey_pending"`
+}
+
+func (ua *UserAuth) writeMe(w http.ResponseWriter, u *identity.User) {
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, meResponse{
+		User:                    u,
+		OnboardingSurveyPending: ua.onboardingSurveyEnabled && u.AcquisitionAnsweredAt == nil,
+	})
+}
+
 // NewUserAuthWithOAuthConfig creates a UserAuth with a custom oauth2.Config and
 // userinfo URL. This is intended for testing against fake OAuth servers.
 func NewUserAuthWithOAuthConfig(cfg *config.OAuthConfig, oauthCfg *oauth2.Config, store *identity.Store, production bool, userInfoURL string) *UserAuth {
@@ -153,6 +186,43 @@ func NewUserAuthWithOAuthConfig(cfg *config.OAuthConfig, oauthCfg *oauth2.Config
 		baseURL:     baseURL,
 		userInfoURL: userInfoURL,
 	}
+}
+
+// SetOIDCLogoutURL configures the fixed upstream logout endpoint used after
+// the local e2a session is revoked. The value must come from validated server
+// configuration; callers must never pass request-controlled URLs here.
+func (ua *UserAuth) SetOIDCLogoutURL(logoutURL string) {
+	ua.oidcLogoutURL = logoutURL
+}
+
+// SetLogoutOrigin configures the canonical web-app origin used to validate
+// browser logout requests. The value must come from trusted server
+// configuration, never from a request parameter.
+func (ua *UserAuth) SetLogoutOrigin(origin string) {
+	ua.logoutOrigin = normalizeHTTPOrigin(origin)
+}
+
+func normalizeHTTPOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil ||
+		(u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if strings.Contains(host, ":") { // IPv6 literal
+		host = "[" + host + "]"
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return strings.ToLower(u.Scheme) + "://" + host
 }
 
 func generateNonce() string {
@@ -301,7 +371,13 @@ func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	ua.setCookie(w, StateCookieName, nonce, 600)
 
-	http.Redirect(w, r, ua.oauthConfig.AuthCodeURL(EncodeOAuthState(state)), http.StatusFound)
+	// prompt=select_account forces Google to show the account chooser instead
+	// of silently re-authenticating a single signed-in account, ensuring users
+	// can switch accounts after signing out.
+	http.Redirect(w, r, ua.oauthConfig.AuthCodeURL(
+		EncodeOAuthState(state),
+		oauth2.SetAuthURLParam("prompt", "select_account"),
+	), http.StatusFound)
 }
 
 // validateReturnToPath enforces the same-origin / known-route allow-list
@@ -444,11 +520,24 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ua.baseURL+"/dashboard", http.StatusFound)
 }
 
-// HandleLogout deletes the session and clears the cookie.
+// HandleLogout deletes the session and clears the cookie. Browser callers then
+// follow a 303 to either the configured upstream OIDC logout endpoint or the
+// local application root. A native navigation is required for the upstream
+// endpoint so its cross-origin session cookies can be cleared.
 func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(SessionCookieName)
+	hasValidSession := false
 	if err == nil {
-		ua.store.DeleteUserSession(r.Context(), cookie.Value)
+		_, sessionErr := ua.store.GetUserSession(r.Context(), cookie.Value)
+		if sessionErr != nil && !errors.Is(sessionErr, pgx.ErrNoRows) {
+			http.Error(w, "logout temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		hasValidSession = sessionErr == nil
+		if err := ua.store.DeleteUserSession(r.Context(), cookie.Value); err != nil {
+			http.Error(w, "logout temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -461,7 +550,50 @@ func (ua *UserAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 	})
 
-	w.WriteHeader(http.StatusOK)
+	if ua.oidcLogoutURL != "" && hasValidSession {
+		if !ua.isSameOriginLogoutRequest(r) {
+			http.Error(w, "logout request origin is not allowed", http.StatusForbidden)
+			return
+		}
+		http.Redirect(w, r, ua.oidcLogoutURL, http.StatusSeeOther)
+		return
+	}
+	logoutOrigin := ua.logoutOrigin
+	if logoutOrigin == "" {
+		logoutOrigin = normalizeHTTPOrigin(ua.baseURL)
+	}
+	if logoutOrigin != "" {
+		http.Redirect(w, r, logoutOrigin+"/", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// isSameOriginLogoutRequest validates the browser provenance needed before a
+// configured upstream logout handoff. Origin is preferred; Referer is a
+// compatibility fallback for browsers that omit Origin on native form posts.
+// An absent or unparsable provenance header fails closed for the upstream
+// handoff, while local session revocation has already completed.
+func (ua *UserAuth) isSameOriginLogoutRequest(r *http.Request) bool {
+	expected := ua.logoutOrigin
+	if expected == "" {
+		expected = normalizeHTTPOrigin(ua.baseURL)
+	}
+	if expected == "" {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return normalizeHTTPOrigin(origin) == expected
+	}
+	referer := r.Header.Get("Referer")
+	if referer == "" {
+		return false
+	}
+	u, err := url.Parse(referer)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return false
+	}
+	return normalizeHTTPOrigin(u.Scheme+"://"+u.Host) == expected
 }
 
 // HandleMe returns the current authenticated user's info.
@@ -471,8 +603,7 @@ func (ua *UserAuth) HandleMe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	writeJSON(w, user)
+	ua.writeMe(w, user)
 }
 
 // HandleUpdateMe accepts a PATCH that updates the authenticated user's
@@ -487,6 +618,9 @@ func (ua *UserAuth) HandleMe(w http.ResponseWriter, r *http.Request) {
 const (
 	minDisplayNameLen = 1
 	maxDisplayNameLen = 80
+	// maxAcquisitionDetailLen is the onboarding survey's free-text detail
+	// ceiling, in Unicode code points, after trimming.
+	maxAcquisitionDetailLen = 200
 )
 
 func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
@@ -497,36 +631,102 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name *string `json:"name"`
+		Name             *string `json:"name"`
+		OnboardingSurvey *struct {
+			Source string  `json:"source"`
+			Detail *string `json:"detail"`
+		} `json:"onboarding_survey"`
 	}
+	// Two short strings at most; cap the body like readJSON does elsewhere.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 
-	if req.Name == nil {
+	if req.Name == nil && req.OnboardingSurvey == nil {
 		http.Error(w, "no fields to update", http.StatusBadRequest)
 		return
 	}
 
-	name := *req.Name
-	if name != strings.TrimSpace(name) {
-		http.Error(w, "name must not have leading or trailing whitespace", http.StatusBadRequest)
-		return
-	}
-	if len(name) < minDisplayNameLen || len(name) > maxDisplayNameLen {
-		http.Error(w, "name must be 1–80 characters", http.StatusBadRequest)
-		return
+	// Validate everything before writing anything, so a bad field in one
+	// half never leaves the other half applied. The two writes below are
+	// separate statements, not a transaction: the survey write goes first
+	// because it is the one that can fail for a non-server reason (409
+	// already answered), so that outcome is decided before the name moves.
+	var name string
+	if req.Name != nil {
+		name = *req.Name
+		if name != strings.TrimSpace(name) {
+			http.Error(w, "name must not have leading or trailing whitespace", http.StatusBadRequest)
+			return
+		}
+		if len(name) < minDisplayNameLen || len(name) > maxDisplayNameLen {
+			http.Error(w, "name must be 1–80 characters", http.StatusBadRequest)
+			return
+		}
 	}
 
-	updated, err := ua.store.UpdateUserName(r.Context(), user.ID, name)
-	if err != nil {
-		http.Error(w, "failed to update profile", http.StatusInternalServerError)
-		return
+	var surveyDetail *string
+	if req.OnboardingSurvey != nil {
+		if !ua.onboardingSurveyEnabled {
+			http.Error(w, "onboarding_survey_disabled", http.StatusNotFound)
+			return
+		}
+		if !identity.IsAcquisitionSource(req.OnboardingSurvey.Source) {
+			http.Error(w, "onboarding_survey.source is not a known value", http.StatusBadRequest)
+			return
+		}
+		if req.OnboardingSurvey.Detail != nil {
+			d := strings.TrimSpace(*req.OnboardingSurvey.Detail)
+			if d != "" {
+				if req.OnboardingSurvey.Source == identity.AcquisitionSourceSkipped {
+					http.Error(w, "onboarding_survey.detail is not allowed with source \"skipped\"", http.StatusBadRequest)
+					return
+				}
+				if utf8.RuneCountInString(d) > maxAcquisitionDetailLen {
+					http.Error(w, "onboarding_survey.detail must be at most 200 characters", http.StatusBadRequest)
+					return
+				}
+				// Postgres rejects NUL outright (a 500 otherwise) and nothing
+				// legitimate in a one-line answer needs control characters.
+				if strings.ContainsFunc(d, unicode.IsControl) {
+					http.Error(w, "onboarding_survey.detail must not contain control characters", http.StatusBadRequest)
+					return
+				}
+				surveyDetail = &d
+			}
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	writeJSON(w, updated)
+	updated := user
+	if req.OnboardingSurvey != nil {
+		u, err := ua.store.RecordAcquisitionSurvey(r.Context(), user.ID, req.OnboardingSurvey.Source, surveyDetail)
+		switch {
+		case errors.Is(err, identity.ErrAcquisitionSurveyAnswered):
+			http.Error(w, "onboarding_survey_already_answered", http.StatusConflict)
+			return
+		case errors.Is(err, pgx.ErrNoRows):
+			// The user row vanished between session auth and the write
+			// (account deletion in flight). Not a server fault.
+			http.Error(w, "not authenticated", http.StatusUnauthorized)
+			return
+		case err != nil:
+			http.Error(w, "failed to record survey", http.StatusInternalServerError)
+			return
+		}
+		updated = u
+	}
+	if req.Name != nil {
+		u, err := ua.store.UpdateUserName(r.Context(), user.ID, name)
+		if err != nil {
+			http.Error(w, "failed to update profile", http.StatusInternalServerError)
+			return
+		}
+		updated = u
+	}
+
+	ua.writeMe(w, updated)
 }
 
 // AuthenticateRequest extracts the user from the session cookie. Returns nil if not authenticated.

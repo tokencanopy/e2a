@@ -82,6 +82,7 @@ type Config struct {
 	Trash            TrashConfig             `yaml:"trash"`
 	Metrics          MetricsConfig           `yaml:"metrics"`
 	OutboundFooter   OutboundFooterConfig    `yaml:"outbound_footer"`
+	OnboardingSurvey OnboardingSurveyConfig  `yaml:"onboarding_survey"`
 	Notifications    NotificationsConfig     `yaml:"notifications"`
 	Env              string                  `yaml:"env"` // "development" or "production"
 	// DeploymentName names WHICH deployment of e2a this process is, for
@@ -191,6 +192,17 @@ type OutboundFooterConfig struct {
 	HTML string `yaml:"html"`
 }
 
+// OnboardingSurveyConfig gates the dashboard's one-question acquisition
+// survey ("Where did you hear about e2a?"). Off by default: the columns
+// from migration 120 exist everywhere, but with Enabled false the write
+// path on PATCH /api/auth/me returns 404 and GET /api/auth/me reports
+// onboarding_survey_pending=false, so the dashboard never shows the page.
+// The answer set is code (internal/identity.AcquisitionSources), not config.
+type OnboardingSurveyConfig struct {
+	// Enabled turns the survey on. Override with E2A_ONBOARDING_SURVEY_ENABLED.
+	Enabled bool `yaml:"enabled"`
+}
+
 type DatabaseConfig struct {
 	URL string `yaml:"url"`
 }
@@ -227,6 +239,10 @@ type OIDCConfig struct {
 	RedirectURL string `yaml:"redirect_url"`
 	// UserIDClaim names the ID-token claim containing an existing users.id.
 	UserIDClaim string `yaml:"user_id_claim"`
+	// LogoutURL is an optional fixed URL to visit after local logout. Hosted
+	// deployments can use this to cascade logout through their OIDC control
+	// plane; it is never taken from a request parameter.
+	LogoutURL string `yaml:"logout_url"`
 }
 
 type SigningConfig struct {
@@ -759,6 +775,9 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OIDC_USER_ID_CLAIM"); v != "" {
 		cfg.OIDC.UserIDClaim = v
 	}
+	if v := os.Getenv("E2A_OIDC_LOGOUT_URL"); v != "" {
+		cfg.OIDC.LogoutURL = v
+	}
 	if v := os.Getenv("E2A_DELEGATED_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Delegated.Enabled = b
@@ -812,6 +831,11 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OUTBOUND_FOOTER_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.OutboundFooter.Enabled = b
+		}
+	}
+	if v := os.Getenv("E2A_ONBOARDING_SURVEY_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.OnboardingSurvey.Enabled = b
 		}
 	}
 	// An explicit empty listen_addr would otherwise bind ":80" (Go's
@@ -977,6 +1001,15 @@ func (c *Config) Validate() error {
 		redirectURL, err := absoluteHTTPURL(c.OIDC.RedirectURL)
 		if err != nil || redirectURL.Fragment != "" {
 			return fmt.Errorf("config: oidc.redirect_url must be an absolute http(s) URL without a fragment")
+		}
+	}
+	if c.OIDC.LogoutURL != "" {
+		logoutURL, err := absoluteHTTPURL(c.OIDC.LogoutURL)
+		if err != nil || logoutURL.RawQuery != "" || logoutURL.Fragment != "" {
+			return fmt.Errorf("config: oidc.logout_url must be an absolute http(s) URL without query or fragment")
+		}
+		if c.IsProduction() && logoutURL.Scheme != "https" {
+			return fmt.Errorf("config: oidc.logout_url must use https in production")
 		}
 	}
 	if c.Delegated.Enabled {

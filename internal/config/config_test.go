@@ -344,6 +344,7 @@ func TestLoadConfigOIDCEnvOverrides(t *testing.T) {
 	t.Setenv("E2A_OIDC_CLIENT_SECRET", "secret")
 	t.Setenv("E2A_OIDC_REDIRECT_URL", "https://e2a.example.com/api/auth/oidc/callback")
 	t.Setenv("E2A_OIDC_USER_ID_CLAIM", "e2a_user_id")
+	t.Setenv("E2A_OIDC_LOGOUT_URL", "https://issuer.example.com/auth/logout")
 
 	cfg, err := Load(cfgPath)
 	if err != nil {
@@ -366,6 +367,9 @@ func TestLoadConfigOIDCEnvOverrides(t *testing.T) {
 	}
 	if cfg.OIDC.UserIDClaim != "e2a_user_id" {
 		t.Errorf("OIDC.UserIDClaim = %q", cfg.OIDC.UserIDClaim)
+	}
+	if cfg.OIDC.LogoutURL != "https://issuer.example.com/auth/logout" {
+		t.Errorf("OIDC.LogoutURL = %q", cfg.OIDC.LogoutURL)
 	}
 }
 
@@ -401,6 +405,7 @@ oidc:
   client_secret: "secret"
   redirect_url: "https://e2a.example.com/api/auth/oidc/callback"
   user_id_claim: "e2a_user_id"
+  logout_url: "https://issuer.example.com/auth/logout"
 `), 0644)
 
 	cfg, err := Load(cfgPath)
@@ -410,6 +415,9 @@ oidc:
 	if !cfg.OIDC.Enabled {
 		t.Error("expected OIDC.Enabled = true")
 	}
+	if cfg.OIDC.LogoutURL != "https://issuer.example.com/auth/logout" {
+		t.Errorf("OIDC.LogoutURL = %q", cfg.OIDC.LogoutURL)
+	}
 }
 
 func TestValidateOIDCEnabledRequiresAbsoluteHTTPURLs(t *testing.T) {
@@ -417,12 +425,17 @@ func TestValidateOIDCEnabledRequiresAbsoluteHTTPURLs(t *testing.T) {
 		name        string
 		issuerURL   string
 		redirectURL string
+		logoutURL   string
 		want        string
 	}{
 		{name: "relative issuer", issuerURL: "/issuer", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", want: "issuer_url"},
 		{name: "issuer query", issuerURL: "https://issuer.example.com?tenant=one", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", want: "issuer_url"},
 		{name: "relative redirect", issuerURL: "https://issuer.example.com", redirectURL: "/api/auth/oidc/callback", want: "redirect_url"},
 		{name: "non-http redirect", issuerURL: "https://issuer.example.com", redirectURL: "javascript:alert(1)", want: "redirect_url"},
+		{name: "relative logout", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "/auth/logout", want: "logout_url"},
+		{name: "logout query", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "https://issuer.example.com/auth/logout?return_to=/", want: "logout_url"},
+		{name: "logout fragment", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "https://issuer.example.com/auth/logout#done", want: "logout_url"},
+		{name: "non-http logout", issuerURL: "https://issuer.example.com", redirectURL: "https://e2a.example.com/api/auth/oidc/callback", logoutURL: "javascript:alert(1)", want: "logout_url"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -437,7 +450,8 @@ oidc:
   client_secret: "secret"
   redirect_url: %q
   user_id_claim: "e2a_user_id"
-`, test.issuerURL, test.redirectURL)
+  logout_url: %q
+`, test.issuerURL, test.redirectURL, test.logoutURL)
 			if err := os.WriteFile(cfgPath, []byte(body), 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -460,6 +474,32 @@ oidc:
 
 	if _, err := Load(cfgPath); err != nil {
 		t.Fatalf("Load should accept oidc.enabled=false with empty fields, got: %v", err)
+	}
+}
+
+func TestValidateOIDCLogoutURLRequiresHTTPSInProduction(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(cfgPath, []byte(`
+env: "production"
+signing:
+  hmac_secret: "0123456789abcdef0123456789abcdef"
+oidc:
+  enabled: true
+  issuer_url: "https://issuer.example.com"
+  client_id: "e2a"
+  client_secret: "secret"
+  redirect_url: "https://e2a.example.com/api/auth/oidc/callback"
+  user_id_claim: "e2a_user_id"
+  logout_url: "http://issuer.example.com/auth/logout"
+`), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Load(cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "logout_url must use https") {
+		t.Fatalf("Load error = %v, want production HTTPS logout URL validation", err)
 	}
 }
 
@@ -1080,4 +1120,58 @@ func TestSenderIdentityOrphanReclaim(t *testing.T) {
 		t.Errorf("explicit zeros were re-defaulted: min_age=%v max_per_sweep=%d",
 			cfg.SenderIdentity.ReclaimMinAge, cfg.SenderIdentity.ReclaimMaxPerSweep)
 	}
+}
+
+func TestOnboardingSurveyDefaultsOffAndLoadsFromYAML(t *testing.T) {
+	cfg := loadConfigFromYAML(t, minimalConfigYAML)
+	if cfg.OnboardingSurvey.Enabled {
+		t.Fatal("onboarding_survey.enabled should default to false")
+	}
+	cfg = loadConfigFromYAML(t, minimalConfigYAML+"\nonboarding_survey:\n  enabled: true\n")
+	if !cfg.OnboardingSurvey.Enabled {
+		t.Fatal("onboarding_survey.enabled=true not loaded from YAML")
+	}
+}
+
+func TestOnboardingSurveyEnvOverride(t *testing.T) {
+	t.Setenv("E2A_ONBOARDING_SURVEY_ENABLED", "true")
+	cfg := loadConfigFromYAML(t, minimalConfigYAML)
+	if !cfg.OnboardingSurvey.Enabled {
+		t.Fatal("E2A_ONBOARDING_SURVEY_ENABLED=true did not override")
+	}
+	t.Setenv("E2A_ONBOARDING_SURVEY_ENABLED", "false")
+	cfg = loadConfigFromYAML(t, minimalConfigYAML+"\nonboarding_survey:\n  enabled: true\n")
+	if cfg.OnboardingSurvey.Enabled {
+		t.Fatal("E2A_ONBOARDING_SURVEY_ENABLED=false did not override YAML true")
+	}
+}
+
+const minimalConfigYAML = `
+smtp:
+  listen_addr: ":3025"
+  domain: "test.e2a.dev"
+http:
+  listen_addr: ":9090"
+database:
+  url: "postgres://test:test@localhost/test"
+signing:
+  hmac_secret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+env: "production"
+outbound_smtp:
+  host: "smtp.example.com"
+  port: 465
+  from_domain: "mail.e2a.dev"
+`
+
+func loadConfigFromYAML(t *testing.T, yaml string) *Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg
 }

@@ -1762,3 +1762,43 @@ func TestRunMigrations_PartialState(t *testing.T) {
 		}
 	})
 }
+
+// TestUsersAcquisitionSurveyMigrationIsNullableIdempotentAndConstrained
+// exercises migration 120 (the plan's "108" slot was already taken by
+// 108_external_principal_mappings.sql by the time this landed; 120 is
+// the next free slot per TestEmbeddedMigrationNumbersAreUniqueFrom108).
+func TestUsersAcquisitionSurveyMigrationIsNullableIdempotentAndConstrained(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	sql, err := migrations.FS.ReadFile("120_users_acquisition_survey.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, string(sql)); err != nil {
+		t.Fatalf("second migration application: %v", err)
+	}
+	for _, column := range []string{"acquisition_source", "acquisition_detail", "acquisition_answered_at"} {
+		var nullable, defaultValue string
+		if err := pool.QueryRow(ctx, `SELECT is_nullable,COALESCE(column_default,'') FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name=$1`, column).Scan(&nullable, &defaultValue); err != nil {
+			t.Fatalf("column %s: %v", column, err)
+		}
+		if nullable != "YES" || defaultValue != "" {
+			t.Fatalf("column %s nullable=%q default=%q", column, nullable, defaultValue)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, email, name, google_subject) VALUES ('usr_mig120', 'mig120@example.test', 'M', 'sub-mig120')`); err != nil {
+		t.Fatal(err)
+	}
+	// Unknown source is rejected by the CHECK.
+	if _, err := pool.Exec(ctx, `UPDATE users SET acquisition_source='carrier_pigeon', acquisition_answered_at=now() WHERE id='usr_mig120'`); err == nil {
+		t.Fatal("unknown acquisition_source was accepted")
+	}
+	// Source without timestamp is rejected (both-null-or-both-set).
+	if _, err := pool.Exec(ctx, `UPDATE users SET acquisition_source='github' WHERE id='usr_mig120'`); err == nil {
+		t.Fatal("acquisition_source without acquisition_answered_at was accepted")
+	}
+	// Valid pair is accepted.
+	if _, err := pool.Exec(ctx, `UPDATE users SET acquisition_source='github', acquisition_answered_at=now() WHERE id='usr_mig120'`); err != nil {
+		t.Fatalf("valid pair rejected: %v", err)
+	}
+}

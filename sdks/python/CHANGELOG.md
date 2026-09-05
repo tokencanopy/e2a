@@ -1,5 +1,25 @@
 # Changelog
 
+## 5.8.1
+
+Documentation only. No public name, signature, type, validation, or runtime
+behavior differs from 5.8.0 — every 5.8.0 call site keeps working identically
+on both ``AsyncE2AClient`` and the synchronous ``E2AClient``.
+
+### Documentation
+- Regenerated the model field descriptions from the current OpenAPI document so
+  the shipped ``pydantic`` ``Field(description=...)`` text matches the server.
+  ``LimitsCapsView.max_messages_month`` and ``LimitsUsageView.messages_month``
+  now state that the monthly allowance counts **outbound recipient-deliveries**
+  — a message to N distinct recipients consumes N units, and received mail is
+  free and never counted. ``LimitExceededDetails.resource`` documents the
+  additional ``messages_day`` stem (a per-UTC-day send cap carried by some
+  accounts; it has no ``AccountView`` field and resets at midnight UTC), so a
+  ``limit_exceeded`` on it clears when the UTC day rolls over rather than on an
+  upgrade. ``ErrorBody.code`` documents ``auth_unavailable`` (503 — an auth
+  backend such as a delegated-token verifier or the identity store could not
+  judge the credential; retry).
+
 ## 5.8.0
 
 ### Changed

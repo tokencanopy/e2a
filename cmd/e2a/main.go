@@ -627,6 +627,11 @@ func main() {
 
 	// User auth (Google OAuth for agent developers)
 	userAuth := auth.NewUserAuth(&cfg.OAuth, store, cfg.IsProduction())
+	userAuth.SetOnboardingSurveyEnabled(cfg.OnboardingSurvey.Enabled)
+	// Logout provenance belongs to the canonical web app, not the optional
+	// legacy Google callback. OIDC-only deployments use the OIDC callback as a
+	// safe fallback when public_url is intentionally empty.
+	userAuth.SetLogoutOrigin(cfg.HTTP.PublicURL)
 	// Generic OIDC Authorization Code login. Disabled configurations perform
 	// no discovery and leave both OIDC routes unregistered. Enabled
 	// configurations construct synchronously (no network call) and discover
@@ -644,6 +649,12 @@ func main() {
 	}
 	if oidcAuth != nil {
 		log.Printf("[auth] OIDC login enabled (issuer=%s); discovering issuer in the background", cfg.OIDC.IssuerURL)
+		if cfg.HTTP.PublicURL == "" {
+			userAuth.SetLogoutOrigin(cfg.OIDC.RedirectURL)
+		}
+		if cfg.OIDC.LogoutURL != "" {
+			userAuth.SetOIDCLogoutURL(cfg.OIDC.LogoutURL)
+		}
 	}
 
 	// HTTP API

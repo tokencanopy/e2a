@@ -63,8 +63,16 @@ const attestationCommitRecoveryTimeout = 5 * time.Second
 // by this same object; the Postgres store stays private because there is only
 // ever one adapter.
 type Module struct {
-	pool              *pgxpool.Pool
-	secrets           Secrets
+	pool    *pgxpool.Pool
+	secrets Secrets
+
+	// source and configPolicy say where provider authorization reads its
+	// policy. NewGate sets them from validated startup state; NewModule leaves
+	// the safe self-host default in place, because the operator commands
+	// address the database row explicitly and never consult these.
+	source       PolicySource
+	configPolicy RuntimePolicy
+
 	commitAttestation func(context.Context, pgx.Tx) error
 }
 
@@ -73,8 +81,10 @@ type Module struct {
 // on config source) must not pay for a query.
 func NewModule(pool *pgxpool.Pool, secrets Secrets) *Module {
 	return &Module{
-		pool:    pool,
-		secrets: secrets,
+		pool:         pool,
+		secrets:      secrets,
+		source:       PolicySourceConfig,
+		configPolicy: DisabledPolicy(),
 		commitAttestation: func(ctx context.Context, tx pgx.Tx) error {
 			return tx.Commit(ctx)
 		},
