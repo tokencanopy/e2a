@@ -1624,9 +1624,62 @@ func (m *Module) SettleProvider(ctx context.Context, settlement ProviderSettleme
 		return ErrAttemptStale
 	}
 
+	if err := bindProviderMessageID(ctx, tx, settlement); err != nil {
+		return err
+	}
 	// The ramp ledger is Task 4's to move. Validating the attempt here — and
 	// taking its locks in the normative order — is what makes that composition
 	// a body change rather than a reshaping of the interface every caller
 	// already uses.
 	return m.commit(ctx, tx, "settle")
+}
+
+// bindProviderMessageID records the provider's id on the attempt's feedback
+// correlation, exactly once.
+//
+// It runs after the operation and reservation locks, which is the only place
+// the correlation row is ever written after its insert, so no additional key
+// joins the normative order. Replaying the same id is a no-op — the
+// synchronous success branch and the delayed feedback finalizer both settle
+// the same attempt — while a different id is refused outright. A correlation
+// that has already aged out of retention is left alone: there is nothing to
+// attribute feedback to any more, and failing a late settlement over it would
+// only make the caller retry forever.
+func bindProviderMessageID(ctx context.Context, tx pgx.Tx, settlement ProviderSettlement) error {
+	id := strings.TrimSpace(settlement.ProviderMessageID)
+	if id == "" {
+		return nil
+	}
+	if settlement.Outcome != SettlementProviderAccepted {
+		return fmt.Errorf("sendingpolicy: a %q settlement cannot carry a provider message id", settlement.Outcome)
+	}
+	var bound *string
+	err := tx.QueryRow(ctx, `
+		SELECT provider_message_id
+		  FROM sending_feedback_correlations
+		 WHERE operation_id = $1 AND submission_attempt = $2
+		   FOR UPDATE`,
+		settlement.Attempt.operationID, settlement.Attempt.attempt,
+	).Scan(&bound)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sendingpolicy: lock correlation: %w", err)
+	}
+	if bound != nil {
+		if *bound == id {
+			return nil
+		}
+		return ErrProviderMessageIDConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE sending_feedback_correlations
+		   SET provider_message_id = $3
+		 WHERE operation_id = $1 AND submission_attempt = $2`,
+		settlement.Attempt.operationID, settlement.Attempt.attempt, id,
+	); err != nil {
+		return fmt.Errorf("sendingpolicy: bind provider message id: %w", err)
+	}
+	return nil
 }

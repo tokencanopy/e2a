@@ -403,7 +403,20 @@ func (o SettlementOutcome) valid() bool {
 type ProviderSettlement struct {
 	Attempt AttemptRef
 	Outcome SettlementOutcome
+	// ProviderMessageID is the id SES assigned when it accepted the message.
+	// It is bound to the attempt's feedback correlation so delivery feedback
+	// that arrives by provider id — the common case — resolves to the same
+	// attempt as feedback that arrives by the random attempt header. Only an
+	// accepted settlement may carry one; a rejection has nothing to bind.
+	ProviderMessageID string
 }
+
+// ErrProviderMessageIDConflict means an attempt is being settled with a
+// different provider message id than the one already bound to it. One attempt
+// is exactly one DATA transaction and SES assigns exactly one id to it, so a
+// second, different id is evidence of two physical sends for one charged
+// attempt — the invariant this module exists to hold — and is never absorbed.
+var ErrProviderMessageIDConflict = errors.New("sendingpolicy: attempt already settled with a different provider message id")
 
 // TenantMode is the closed tenant-header state carried by an authorization.
 // It is resolved under the final account-control lock, so a job that was
