@@ -19,6 +19,15 @@ import (
 
 var smtpRetryBackoffs = []time.Duration{1 * time.Second, 5 * time.Second, 15 * time.Second}
 
+// ErrProviderAcceptanceUnknown marks a failure that happened AFTER the whole
+// message body was handed to the provider: the terminating dot was written and
+// the 250 never arrived. The provider may have accepted the message. No
+// classifier can call this permanent or transient, and a caller that retries
+// it as if nothing was sent will deliver the message twice. The sending
+// protection seam leaves such an attempt unsettled; delivery feedback carrying
+// the attempt header is the only authoritative answer.
+var ErrProviderAcceptanceUnknown = errors.New("outbound smtp: message body delivered, provider acceptance unknown")
+
 type SMTPRelay struct {
 	cfg *config.OutboundSMTPConfig
 }
@@ -289,7 +298,7 @@ func (r *SMTPRelay) sendOnceContext(ctx context.Context, envelopeFrom string, re
 	// 250 response is waiting in the buffer. Read it directly.
 	_, msg, err := text.ReadResponse(250)
 	if err != nil {
-		return "", fmt.Errorf("data final: %w", err)
+		return "", fmt.Errorf("data final: %w", errors.Join(ErrProviderAcceptanceUnknown, err))
 	}
 
 	// Parse Message-ID from response like "Ok <xxx@us-east-2.amazonses.com>"

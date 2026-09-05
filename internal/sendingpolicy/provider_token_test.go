@@ -125,3 +125,90 @@ func TestProviderTokenAcceptanceWithoutIDStillSettles(t *testing.T) {
 		t.Fatalf("bound = %v, want ses-late", got)
 	}
 }
+
+// TestProviderTokenSettlementNormalizesProviderMessageID: the relay reports
+// SES's id qualified (<id@region.amazonses.com>) and SES's feedback reports it
+// bare. Both spellings must be one binding, or the two writers that settle the
+// same attempt will refuse each other.
+func TestProviderTokenSettlementNormalizesProviderMessageID(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	ref, auth := f.redeemed(g, f.agent(f.user("standard")))
+
+	qualified := sendingpolicy.ProviderSettlement{
+		Attempt: auth.Attempt(), Outcome: sendingpolicy.SettlementProviderAccepted,
+		ProviderMessageID: "<010f0193abcdef00-000000@us-east-2.amazonses.com>",
+	}
+	if err := g.SettleProvider(f.ctx, qualified); err != nil {
+		t.Fatalf("settle qualified: %v", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 1); got == nil || *got != "010f0193abcdef00-000000" {
+		t.Fatalf("bound = %v, want the bare id", got)
+	}
+	bare := qualified
+	bare.ProviderMessageID = "010f0193abcdef00-000000"
+	if err := g.SettleProvider(f.ctx, bare); err != nil {
+		t.Fatalf("settle bare after qualified: %v (want idempotent)", err)
+	}
+	bracketed := qualified
+	bracketed.ProviderMessageID = "<010f0193abcdef00-000000>"
+	if err := g.SettleProvider(f.ctx, bracketed); err != nil {
+		t.Fatalf("settle bracketed after qualified: %v (want idempotent)", err)
+	}
+	other := qualified
+	other.ProviderMessageID = "<010f0193abcdef00-000001@us-east-2.amazonses.com>"
+	if err := g.SettleProvider(f.ctx, other); !errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+		t.Fatalf("different id err = %v, want ErrProviderMessageIDConflict", err)
+	}
+}
+
+// TestProviderTokenSettlementRequiresTheSocketToHaveOpened: an attempt that
+// was authorized but never redeemed cannot be settled as accepted — nothing
+// reached the provider, so there is no provider outcome to record.
+func TestProviderTokenSettlementRequiresTheSocketToHaveOpened(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	ref, attempt := f.prepareAndReserve(g, f.agent(f.user("standard")), 1)
+	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
+		t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+
+	err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
+		Attempt: attempt, Outcome: sendingpolicy.SettlementProviderAccepted, ProviderMessageID: "ses-id-never-sent",
+	})
+	if !errors.Is(err, sendingpolicy.ErrAttemptStale) {
+		t.Fatalf("settle without redeem err = %v, want ErrAttemptStale", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 1); got != nil {
+		t.Fatalf("bound = %q for an attempt that never dialed", *got)
+	}
+	if _, callState := f.reservationState(ref.ID(), 1); callState != "authorized" {
+		t.Fatalf("call_state = %s, want authorized (untouched)", callState)
+	}
+}
+
+// TestProviderTokenHoldsOnATenantNameThatCannotBeAHeader: a tenant name with a
+// line break would be refused by the adapter, silently and forever. The gate
+// holds the send with a visible reason instead.
+func TestProviderTokenHoldsOnATenantNameThatCannotBeAHeader(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) {
+		p.TenantHeaderMode = sendingpolicy.TenantHeaderEnforce
+	}))
+	user := f.user("standard")
+	agent := f.agent(user)
+	if _, err := f.pool.Exec(f.ctx, `
+		INSERT INTO account_sending_controls (user_id, ses_tenant_name, ses_tenant_ready, ses_tenant_ready_at)
+		VALUES ($1, $2, true, now())
+		ON CONFLICT (user_id) DO UPDATE
+		    SET ses_tenant_name = EXCLUDED.ses_tenant_name, ses_tenant_ready = true, ses_tenant_ready_at = now()`,
+		user, "good\r\nX-SES-CONFIGURATION-SET: attacker-set",
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, ref := f.prepareMessage(g, f.message(agent, "own_address", 1))
+	d := f.authorize(g, ref)
+	if d.Allow || d.Reason != sendingpolicy.ReasonTenantUnnamed {
+		t.Fatalf("decision = %+v, want a hold with reason %q", d, sendingpolicy.ReasonTenantUnnamed)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -212,7 +213,22 @@ func countingListener(t *testing.T) (*outbound.SMTPRelay, func() int) {
 	}()
 	addr := listener.Addr().(*net.TCPAddr)
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: addr.IP.String(), Port: addr.Port})
-	return relay, func() int { mu.Lock(); defer mu.Unlock(); return count }
+	// The accept goroutine runs after the client's dial returns, so a caller
+	// that reads immediately could miss a connection that did happen. Give a
+	// connection time to be observed: return as soon as one is, or after a
+	// grace period that is long compared to a loopback accept.
+	return relay, func() int {
+		deadline := time.Now().Add(300 * time.Millisecond)
+		for {
+			mu.Lock()
+			c := count
+			mu.Unlock()
+			if c > 0 || time.Now().After(deadline) {
+				return c
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 // acceptingRelay fronts testutil's fake SMTP server.
@@ -222,8 +238,8 @@ func acceptingRelay(t *testing.T) (*outbound.SMTPRelay, func() []testutil.SMTPMe
 	return outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: addr.Host, Port: addr.Port}), messages
 }
 
-// rejectingRelay fronts a server that answers every RCPT TO with a 550.
-func rejectingRelay(t *testing.T) *outbound.SMTPRelay {
+// rejectingRelay fronts a server that answers every RCPT TO with `reply`.
+func rejectingRelay(t *testing.T, reply string) *outbound.SMTPRelay {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -247,7 +263,7 @@ func rejectingRelay(t *testing.T) *outbound.SMTPRelay {
 					}
 					switch upper := strings.ToUpper(strings.TrimSpace(line)); {
 					case strings.HasPrefix(upper, "RCPT TO:"):
-						fmt.Fprint(conn, "550 5.1.1 no such user\r\n")
+						fmt.Fprint(conn, reply+"\r\n")
 					case upper == "QUIT":
 						fmt.Fprint(conn, "221 Bye\r\n")
 						return
@@ -341,7 +357,10 @@ func TestProviderSubmitterZeroNetworkOnEnvelopeMismatch(t *testing.T) {
 	}
 }
 
-func TestProviderSubmitterZeroNetworkWhenRelayUnconfigured(t *testing.T) {
+// TestProviderSubmitterUnconfiguredRelayLeavesTokenIntact: with no relay host
+// there is nothing to dial and nothing to count; what matters is that the
+// token survives, because the failure is the deployment's, not the message's.
+func TestProviderSubmitterUnconfiguredRelayLeavesTokenIntact(t *testing.T) {
 	f := newGateFixture(t, nil)
 	s := outbound.NewProviderSubmitter(outbound.NewSMTPRelay(&config.OutboundSMTPConfig{}), f.gate)
 	messageID, to := f.message(1)
@@ -367,7 +386,7 @@ func TestProviderSubmitterAuthorizedTokenIsSingleUse(t *testing.T) {
 	messageID, to := f.message(1)
 	ref := f.prepare(messageID)
 	auth := f.authorize(ref)
-	env := outbound.Envelope{MessageID: messageID, From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")}
+	env := outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")}
 
 	res, err := s.SubmitOnce(f.ctx, auth, env)
 	if err != nil || res.SettlementErr != nil || res.ProviderMessageID == "" {
@@ -421,7 +440,7 @@ func TestProviderSubmitterAttemptHeaderDerivesOnlyFromToken(t *testing.T) {
 	ref := f.prepare(messageID)
 	auth := f.authorize(ref)
 
-	res, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{MessageID: messageID, From: "agent@agents.e2a.dev", Recipients: to, Message: outbound.SmuggledMIME()})
+	res, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: outbound.SmuggledMIME()})
 	if err != nil || res.SettlementErr != nil {
 		t.Fatalf("submit: res=%+v err=%v", res, err)
 	}
@@ -489,7 +508,7 @@ func TestProviderSubmitterRetryRedeemsADistinctAttempt(t *testing.T) {
 	s := outbound.NewProviderSubmitter(relay, f.gate)
 	messageID, to := f.message(1)
 	ref := f.prepare(messageID)
-	env := outbound.Envelope{MessageID: messageID, From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")}
+	env := outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")}
 
 	first := f.authorize(ref)
 	if _, err := s.SubmitOnce(f.ctx, first, env); err != nil {
@@ -531,8 +550,9 @@ func TestProviderSubmitterBindsProviderMessageIDOnAcceptance(t *testing.T) {
 		t.Errorf("result attempt = %d, want 1", res.Attempt.Attempt())
 	}
 	_, bound := f.correlation(ref.ID(), 1)
-	if bound == nil || *bound != res.ProviderMessageID {
-		t.Fatalf("correlation provider_message_id = %v, want %q", bound, res.ProviderMessageID)
+	want := sendingpolicy.NormalizeProviderMessageID(res.ProviderMessageID)
+	if bound == nil || *bound != want {
+		t.Fatalf("correlation provider_message_id = %v, want %q (normalized from %q)", bound, want, res.ProviderMessageID)
 	}
 }
 
@@ -541,7 +561,8 @@ func TestProviderSubmitterBindsProviderMessageIDOnAcceptance(t *testing.T) {
 // provider id, and surfaces as a permanent error the worker can classify.
 func TestProviderSubmitterPermanentRejectionIsSettledNotRetried(t *testing.T) {
 	f := newGateFixture(t, nil)
-	s := outbound.NewProviderSubmitter(rejectingRelay(t), f.gate)
+	spy := &spyGate{Gate: f.gate}
+	s := outbound.NewProviderSubmitter(rejectingRelay(t, "550 5.1.1 no such user"), spy)
 	messageID, to := f.message(1)
 	ref := f.prepare(messageID)
 	auth := f.authorize(ref)
@@ -555,5 +576,275 @@ func TestProviderSubmitterPermanentRejectionIsSettledNotRetried(t *testing.T) {
 	}
 	if _, bound := f.correlation(ref.ID(), 1); bound != nil {
 		t.Fatalf("provider_message_id = %q bound on a rejection", *bound)
+	}
+	got := spy.settled()
+	if len(got) != 1 || got[0].Outcome != sendingpolicy.SettlementProviderPermanentlyRejected || got[0].ProviderMessageID != "" {
+		t.Fatalf("settlements = %+v, want exactly one permanent rejection without a provider id", got)
+	}
+}
+
+// spyGate records settlements and can be made to fail them, so a test can see
+// the one effect of SubmitOnce that has no observable row yet.
+type spyGate struct {
+	sendingpolicy.Gate
+	mu        sync.Mutex
+	settleErr error
+	calls     []sendingpolicy.ProviderSettlement
+}
+
+func (g *spyGate) SettleProvider(ctx context.Context, s sendingpolicy.ProviderSettlement) error {
+	g.mu.Lock()
+	g.calls = append(g.calls, s)
+	g.mu.Unlock()
+	if g.settleErr != nil {
+		return g.settleErr
+	}
+	return g.Gate.SettleProvider(ctx, s)
+}
+
+func (g *spyGate) settled() []sendingpolicy.ProviderSettlement {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]sendingpolicy.ProviderSettlement(nil), g.calls...)
+}
+
+// TestProviderSubmitterAmbiguousOutcomeIsNotSettled: a 4xx might still be
+// delivered on retry, so nothing is settled and the error is not permanent.
+func TestProviderSubmitterAmbiguousOutcomeIsNotSettled(t *testing.T) {
+	f := newGateFixture(t, nil)
+	spy := &spyGate{Gate: f.gate}
+	s := outbound.NewProviderSubmitter(rejectingRelay(t, "451 4.3.0 try again later"), spy)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if err == nil || outbound.IsPermanentSMTPError(err) {
+		t.Fatalf("err = %v, want a non-permanent SMTP error", err)
+	}
+	if got := spy.settled(); len(got) != 0 {
+		t.Fatalf("settlements = %+v, want none for an ambiguous outcome", got)
+	}
+	if state := f.callState(ref.ID(), 1); state != "started" {
+		t.Fatalf("call_state = %s, want started (the socket did open; a retry needs a new ordinal)", state)
+	}
+}
+
+// TestProviderSubmitterAcceptedButUnsettledIsReportedNotRetried pins the
+// at-least-once contract: SES took the message, so the failure to settle is
+// carried on the result with a nil error. A caller that resubmitted here would
+// send the message twice.
+func TestProviderSubmitterAcceptedButUnsettledIsReportedNotRetried(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, captured := acceptingRelay(t)
+	spy := &spyGate{Gate: f.gate, settleErr: errors.New("settle: database unavailable")}
+	s := outbound.NewProviderSubmitter(relay, spy)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	res, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if err != nil {
+		t.Fatalf("err = %v, want nil — the message was accepted", err)
+	}
+	if res.SettlementErr == nil || res.ProviderMessageID == "" || res.Attempt.Attempt() != 1 {
+		t.Fatalf("result = %+v, want provider id, attempt 1, and a settlement error", res)
+	}
+	if n := len(captured()); n != 1 {
+		t.Fatalf("provider received %d messages, want 1", n)
+	}
+	got := spy.settled()
+	if len(got) != 1 || got[0].Outcome != sendingpolicy.SettlementProviderAccepted || got[0].ProviderMessageID != res.ProviderMessageID {
+		t.Fatalf("settlement attempted = %+v, want one acceptance carrying %q", got, res.ProviderMessageID)
+	}
+	// The caller's recovery is to settle again, idempotently — never to resubmit.
+	if err := f.gate.SettleProvider(f.ctx, got[0]); err != nil {
+		t.Fatalf("late settlement: %v", err)
+	}
+	if _, bound := f.correlation(ref.ID(), 1); bound == nil || *bound != sendingpolicy.NormalizeProviderMessageID(res.ProviderMessageID) {
+		t.Fatalf("bound = %v, want the normalized provider id", bound)
+	}
+}
+
+// TestProviderSubmitterSocketCounterObservesADial is the positive control for
+// every zero-network assertion above: a redeemed token that reaches the dial
+// is seen by the counter exactly once.
+func TestProviderSubmitterSocketCounterObservesADial(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, sockets := countingListener(t)
+	s := outbound.NewProviderSubmitter(relay, f.gate)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	if _, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")}); err == nil {
+		t.Fatal("a dropped connection was reported as success")
+	}
+	if sockets() != 1 {
+		t.Fatalf("sockets = %d, want exactly 1", sockets())
+	}
+	if state := f.callState(ref.ID(), 1); state != "started" {
+		t.Fatalf("call_state = %s, want started", state)
+	}
+}
+
+// vanishingRelay fronts a server that takes the whole DATA body and then
+// closes without a 250 — the lost-acceptance shape.
+func vanishingRelay(t *testing.T) (*outbound.SMTPRelay, func() int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	var mu sync.Mutex
+	bodies := 0
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				r := bufio.NewReader(conn)
+				fmt.Fprint(conn, "220 vanish ready\r\n")
+				inData := false
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if inData {
+						if strings.TrimRight(line, "\r\n") == "." {
+							mu.Lock()
+							bodies++
+							mu.Unlock()
+							return // no 250: the connection just dies
+						}
+						continue
+					}
+					switch upper := strings.ToUpper(strings.TrimSpace(line)); {
+					case upper == "DATA":
+						inData = true
+						fmt.Fprint(conn, "354 Go ahead\r\n")
+					case upper == "QUIT":
+						fmt.Fprint(conn, "221 Bye\r\n")
+						return
+					default:
+						fmt.Fprint(conn, "250 OK\r\n")
+					}
+				}
+			}(conn)
+		}
+	}()
+	addr := listener.Addr().(*net.TCPAddr)
+	return outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: addr.IP.String(), Port: addr.Port}),
+		func() int { mu.Lock(); defer mu.Unlock(); return bodies }
+}
+
+// TestProviderSubmitterPauseBetweenConsumeAndSubmitOpensNoSocket: the abuse
+// pause is re-proved at redemption, so a pause that lands after the token was
+// minted still stops the send.
+func TestProviderSubmitterPauseBetweenConsumeAndSubmitOpensNoSocket(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, sockets := countingListener(t)
+	s := outbound.NewProviderSubmitter(relay, f.gate)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE account_sending_controls SET state = 'paused' WHERE user_id = $1`, f.userID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if !errors.Is(err, sendingpolicy.ErrAuthorizationInvalid) {
+		t.Fatalf("err = %v, want ErrAuthorizationInvalid", err)
+	}
+	if sockets() != 0 {
+		t.Fatalf("sockets = %d, want 0", sockets())
+	}
+}
+
+// TestProviderSubmitterMalformedHeaderSectionOpensNoSocket: a bare CR in the
+// header section, or a leading continuation, is refused before redemption.
+func TestProviderSubmitterMalformedHeaderSectionOpensNoSocket(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, sockets := countingListener(t)
+	s := outbound.NewProviderSubmitter(relay, f.gate)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	for name, mime := range map[string]string{
+		"bare CR hides a header":    "Subject: a\rX-SES-TENANT: evil\r\n\r\nbody",
+		"CR CR LF pseudo-separator": "Subject: s\r\n\r\r\nX-SES-TENANT: evil\r\n\r\nbody",
+		"leading continuation":      " evil-suffix\r\nSubject: s\r\n\r\nbody",
+	} {
+		_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte(mime)})
+		if !errors.Is(err, outbound.ErrMalformedHeaderSection) {
+			t.Errorf("%s: err = %v, want ErrMalformedHeaderSection", name, err)
+		}
+		if state := f.callState(ref.ID(), 1); state != "authorized" {
+			t.Errorf("%s: call_state = %s, want authorized", name, state)
+		}
+	}
+	if sockets() != 0 {
+		t.Fatalf("sockets = %d, want 0", sockets())
+	}
+}
+
+// TestProviderSubmitterSubmitsTheCanonicalEnvelope: the caller's spelling of a
+// recipient is validated but never sent; RCPT TO carries the normalized
+// address the token was priced for.
+func TestProviderSubmitterSubmitsTheCanonicalEnvelope(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, captured := acceptingRelay(t)
+	s := outbound.NewProviderSubmitter(relay, f.gate)
+	messageID, to := f.message(2)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	padded := []string{"  " + strings.ToUpper(to[1]) + "  ", to[0]}
+	if _, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: padded, Message: []byte("Subject: x\r\n\r\nbody")}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	msgs := captured()
+	if len(msgs) != 1 {
+		t.Fatalf("captured %d messages, want 1", len(msgs))
+	}
+	want := auth.AuthorizedRecipients()
+	if strings.Join(msgs[0].Recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("RCPT TO = %q, want the canonical %q", msgs[0].Recipients, want)
+	}
+}
+
+// TestProviderSubmitterLostAcceptanceIsUnsettledAndMarked: the body was
+// delivered and the 250 never came. Nothing is settled, and the error carries
+// the marker so the worker can tell "maybe sent" from "not sent".
+func TestProviderSubmitterLostAcceptanceIsUnsettledAndMarked(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, bodies := vanishingRelay(t)
+	spy := &spyGate{Gate: f.gate}
+	s := outbound.NewProviderSubmitter(relay, spy)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if !errors.Is(err, outbound.ErrProviderAcceptanceUnknown) {
+		t.Fatalf("err = %v, want ErrProviderAcceptanceUnknown", err)
+	}
+	if outbound.IsPermanentSMTPError(err) {
+		t.Fatalf("err = %v classified permanent; a delivered body must never be", err)
+	}
+	if bodies() != 1 {
+		t.Fatalf("provider took %d bodies, want 1", bodies())
+	}
+	if got := spy.settled(); len(got) != 0 {
+		t.Fatalf("settlements = %+v, want none while acceptance is unknown", got)
+	}
+	if state := f.callState(ref.ID(), 1); state != "started" {
+		t.Fatalf("call_state = %s, want started", state)
 	}
 }

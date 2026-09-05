@@ -86,7 +86,7 @@ func TestDBURL() string {
 	// prevent, so a base too long to derive from has to fail loudly rather than
 	// quietly reintroduce it.
 	if name := strings.TrimPrefix(u.Path, "/"); len(name) > maxPostgresIdentifier {
-		panic(fmt.Sprintf("testutil: derived test database name %q is %d bytes, over Postgres's "+
+		panic(fmt.Sprintf("testdb: derived test database name %q is %d bytes, over Postgres's "+
 			"%d-byte identifier limit — Postgres would truncate it silently and collide sibling "+
 			"packages onto one database. Shorten the base in E2A_TEST_DATABASE_URL; the derived "+
 			"suffix needs %d bytes.", name, len(name), maxPostgresIdentifier, len(suffix)))

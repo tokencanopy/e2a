@@ -57,9 +57,9 @@ func TestProviderHeaderLinesFailClosed(t *testing.T) {
 		"no tenant, no set, no id": {
 			h: sendingpolicy.ProviderHeaders{AttemptCorrelationID: "cor_1"}, want: "X-E2A-Provider-Attempt: cor_1\r\n",
 		},
-		"everything": {
+		"everything, in the legacy path's order": {
 			h: sendingpolicy.ProviderHeaders{AttemptCorrelationID: "cor_1", TenantRequired: true, TenantName: "tenant_a"}, set: "cs", id: "msg_1",
-			want: "X-E2A-Message-ID: msg_1\r\nX-E2A-Provider-Attempt: cor_1\r\nX-SES-TENANT: tenant_a\r\nX-SES-CONFIGURATION-SET: cs\r\n",
+			want: "X-SES-CONFIGURATION-SET: cs\r\nX-E2A-Message-ID: msg_1\r\nX-E2A-Provider-Attempt: cor_1\r\nX-SES-TENANT: tenant_a\r\n",
 		},
 	} {
 		got, err := providerHeaderLines(tc.h, tc.set, tc.id)
@@ -73,7 +73,10 @@ func TestProviderHeaderLinesFailClosed(t *testing.T) {
 }
 
 func TestStripProviderHeaders(t *testing.T) {
-	for name, tc := range map[string]struct{ in, want string }{
+	for name, tc := range map[string]struct {
+		in, want string
+		wantErr  error
+	}{
 		"mixed case, duplicates, folded": {
 			in:   string(smuggledMIME()),
 			want: "From: agent@agents.e2a.dev\r\nSubject: hello\r\n\r\nX-SES-TENANT: body-decoy\r\nbody line\r\n",
@@ -102,9 +105,25 @@ func TestStripProviderHeaders(t *testing.T) {
 			in:   "Subject: long\r\n subject\r\nX-SES-TENANT: a\r\n b\r\nTo: x@example.test\r\n\r\n",
 			want: "Subject: long\r\n subject\r\nTo: x@example.test\r\n\r\n",
 		},
+		"body may contain bare CR": {
+			in:   "Subject: s\r\n\r\nbinary\rbody\r\n",
+			want: "Subject: s\r\n\r\nbinary\rbody\r\n",
+		},
+		"bare CR hiding a header is refused": {
+			in:      "Subject: a\rX-SES-TENANT: evil\r\n\r\nbody\r\n",
+			wantErr: ErrMalformedHeaderSection,
+		},
+		"CR CR LF pseudo-separator is refused": {
+			in:      "Subject: s\r\n\r\r\nX-SES-TENANT: evil\r\n\r\nbody",
+			wantErr: ErrMalformedHeaderSection,
+		},
 		"empty": {in: "", want: ""},
 	} {
-		if got := string(stripProviderHeaders([]byte(tc.in))); got != tc.want {
+		got, err := stripProviderHeaders([]byte(tc.in))
+		if !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: err = %v, want %v", name, err, tc.wantErr)
+		}
+		if string(got) != tc.want {
 			t.Errorf("%s:\n got %q\nwant %q", name, got, tc.want)
 		}
 	}

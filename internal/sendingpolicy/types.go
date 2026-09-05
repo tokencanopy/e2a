@@ -418,6 +418,25 @@ type ProviderSettlement struct {
 // attempt — the invariant this module exists to hold — and is never absorbed.
 var ErrProviderMessageIDConflict = errors.New("sendingpolicy: attempt already settled with a different provider message id")
 
+// NormalizeProviderMessageID reduces a provider message id to the bare form the
+// provider itself reports in delivery feedback.
+//
+// The SMTP relay returns SES's id angle-bracketed and qualified with the
+// region domain (<id@us-east-2.amazonses.com>) because that is the on-wire
+// Message-ID replies must anchor on; SES's SNS feedback carries the same id
+// BARE. The correlation row exists so feedback can find its attempt, and two
+// writers — the synchronous worker and the delayed feedback finalizer — must
+// agree on one spelling or the second one is refused as a conflict. Every
+// write and comparison goes through this function; readers should too.
+func NormalizeProviderMessageID(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimSuffix(strings.TrimPrefix(id, "<"), ">")
+	if at := strings.IndexByte(id, '@'); at >= 0 {
+		id = id[:at]
+	}
+	return strings.TrimSpace(id)
+}
+
 // TenantMode is the closed tenant-header state carried by an authorization.
 // It is resolved under the final account-control lock, so a job that was
 // enqueued before a tenant flip still submits with the post-flip header.
