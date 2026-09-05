@@ -26,6 +26,9 @@ type Jobs struct {
 	pool      *pgxpool.Pool
 	enq       jobs.Enqueuer
 	metrics   Metrics
+
+	// registered is the send worker the last RegisterJobs call handed to River.
+	registered *SendWorker
 }
 
 // NewJobs builds the integration with its dependencies (no client yet). pool
@@ -57,6 +60,10 @@ func (j *Jobs) SendWorker() *SendWorker {
 func (j *Jobs) TerminalReconcileWorker() *TerminalReconcileWorker {
 	return NewTerminalReconcileWorker(j.pool, j.store).WithMetrics(j.metrics).WithGate(j.gate)
 }
+
+// RegisteredSendWorker returns the send worker the last RegisterJobs call
+// registered with River, or nil before any registration.
+func (j *Jobs) RegisteredSendWorker() *SendWorker { return j.registered }
 
 // Gate exposes the wired sending-protection gate, for the composition root's
 // wiring test. nil when none is wired.
@@ -91,7 +98,11 @@ func (j *Jobs) WithRateGate(g RateGate) *Jobs {
 // RegisterJobs adds the SendWorker and terminal-state safety net to the shared
 // client's bundle. Implements jobs.Registrar.
 func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
-	river.AddWorker(w, j.SendWorker())
+	// The worker registered here is recorded so the composition root's
+	// wiring test can inspect the exact object River will run, not merely
+	// what a constructor would produce.
+	j.registered = j.SendWorker()
+	river.AddWorker(w, j.registered)
 	river.AddWorker(w, j.TerminalReconcileWorker())
 	return []*river.PeriodicJob{
 		river.NewPeriodicJob(

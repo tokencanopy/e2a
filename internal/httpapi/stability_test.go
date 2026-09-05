@@ -436,12 +436,13 @@ func TestSpecBetaMarkers(t *testing.T) {
 		}
 	}
 
-	// The error discriminator remains stable; only the gate-policy value is
-	// experimental.
+	// The error discriminator remains stable; only the two values produced by
+	// controls that ship disabled — the outbound gate policy and the sending
+	// abuse pause — are experimental.
 	errorCode, _ := schemaProps(t, doc, "ErrorBody")["code"].(map[string]any)
 	rawErrorValues, _ := errorCode["x-experimental-values"].([]any)
-	if len(rawErrorValues) != 1 || rawErrorValues[0] != "blocked_by_policy" {
-		t.Errorf("ErrorBody.code x-experimental-values = %v, want [blocked_by_policy]", rawErrorValues)
+	if len(rawErrorValues) != 2 || rawErrorValues[0] != "blocked_by_policy" || rawErrorValues[1] != "sending_paused" {
+		t.Errorf("ErrorBody.code x-experimental-values = %v, want [blocked_by_policy sending_paused]", rawErrorValues)
 	}
 
 	// Managed unsubscribe is a beta opt-in nested inside otherwise-stable

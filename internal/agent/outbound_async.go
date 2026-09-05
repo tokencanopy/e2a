@@ -146,7 +146,7 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 					anchor = *p.ScheduledAt
 				}
 				if !anchor.IsZero() && time.Since(anchor) > outboundsend.SendRetryHorizon {
-					if _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+					if _, _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
 						"daily_send_cap_timeout: daily send limit still exceeded past the retry horizon",
 						delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); failErr != nil {
 						return nil, failErr
@@ -164,7 +164,7 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 				log.Printf("[outbound-send:%s] daily send cap exhausted at fire time, deferring to %s", p.ID, retryAt.Format(time.RFC3339))
 				return nil, &outboundsend.DailyQuotaDeferredError{RetryAt: retryAt}
 			}
-			if _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+			if _, _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
 				"send canceled: monthly send limit exceeded at send time",
 				delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); failErr != nil {
 				return nil, failErr
@@ -367,7 +367,7 @@ func (a *outboundSendStore) FinalizeScheduledCancellationTx(
 // time is the occurred_at the write actually used: the provider-accept
 // evidence time on an evidence settle, the caller's occurredAt on a failure,
 // zero on a no-op.
-func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error) {
+func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, string, error) {
 	detail = messagelifecycle.SafeDiagnostic(detail)
 	blockedRecipients = normalizeBlockedRecipients(blockedRecipients)
 	var settled delivery.Status
@@ -415,12 +415,12 @@ func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jo
 		e.ID = webhookpub.DeterministicEventID(messageID, webhookpub.EventEmailFailed)
 		return a.outbox.PublishTx(ctx, tx, e)
 	}); err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, "", err
 	}
 	if resolved != nil {
 		log.Printf("[outbound-send] %s: terminal-failure guard settled as sent on provider evidence (provider id %q)", messageID, resolvedProviderID)
 	}
-	return settled, settledAt, nil
+	return settled, settledAt, resolvedProviderID, nil
 }
 
 func (a *outboundSendStore) PreserveTerminalFailure(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) error {

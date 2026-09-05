@@ -1271,7 +1271,7 @@ func TestOutboundSendStore_MarkFailed(t *testing.T) {
 
 	adapter := agent.NewOutboundSendStore(store, outbox, usage.NewNoopUsageTracker())
 	occurredAt := time.Now().UTC()
-	settled, settledAt, err := adapter.MarkFailed(ctx, res.MessageID, 999, 6, occurredAt, "550 mailbox unavailable", delivery.FailureSourceProvider, messagelifecycle.ReasonSubmissionProviderRejected, nil)
+	settled, settledAt, _, err := adapter.MarkFailed(ctx, res.MessageID, 999, 6, occurredAt, "550 mailbox unavailable", delivery.FailureSourceProvider, messagelifecycle.ReasonSubmissionProviderRejected, nil)
 	if err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}

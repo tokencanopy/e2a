@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/riverqueue/river"
+
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
@@ -48,7 +50,13 @@ func TestSendingPolicyWiring(t *testing.T) {
 	// The worker RegisterJobs registers is what runs in production; it, not
 	// the bundle, must carry the gate and the legacy resolver. Without the
 	// resolver every job in flight at cutover would fail closed.
-	worker := composed.jobs.SendWorker()
+	// Register exactly as main does and inspect what River received — the
+	// constructor alone would not catch a RegisterJobs that bypassed it.
+	composed.jobs.RegisterJobs(river.NewWorkers())
+	worker := composed.jobs.RegisteredSendWorker()
+	if worker == nil {
+		t.Fatal("RegisterJobs registered no send worker")
+	}
 	if worker.Gate() != composed.gate {
 		t.Fatal("the registered send worker does not hold the composed gate")
 	}

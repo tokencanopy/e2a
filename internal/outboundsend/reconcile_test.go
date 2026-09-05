@@ -1055,11 +1055,11 @@ func (s failingTerminalStore) RecordHold(context.Context, string, outboundsend.H
 func (s failingTerminalStore) MarkSent(context.Context, string, int64, int, time.Time, string, string) error {
 	return nil
 }
-func (s failingTerminalStore) MarkFailed(_ context.Context, _ string, _ int64, _ int, occurredAt time.Time, _ string, _ delivery.FailureSource, _ messagelifecycle.ReasonCode, _ []string) (delivery.Status, time.Time, error) {
+func (s failingTerminalStore) MarkFailed(_ context.Context, _ string, _ int64, _ int, occurredAt time.Time, _ string, _ delivery.FailureSource, _ messagelifecycle.ReasonCode, _ []string) (delivery.Status, time.Time, string, error) {
 	if s.err != nil {
-		return "", time.Time{}, s.err
+		return "", time.Time{}, "", s.err
 	}
-	return delivery.StatusFailed, occurredAt, nil
+	return delivery.StatusFailed, occurredAt, "", nil
 }
 func (s failingTerminalStore) PreserveTerminalFailure(context.Context, string, int64, int, time.Time, string, delivery.FailureSource, messagelifecycle.ReasonCode, []string) error {
 	return nil
