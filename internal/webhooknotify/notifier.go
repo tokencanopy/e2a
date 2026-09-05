@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -130,33 +129,57 @@ func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
 	return n
 }
 
-// Deliver composes and sends one health email, classifying the result for
-// the NotifyWorker. Implements Deliverer.
-func (n *Notifier) Deliver(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
-	if err := n.send(ctx, wh, kind, auth); err != nil {
-		return DeliverOutcome{
-			Err:       err,
-			Permanent: outbound.IsPermanentSMTPError(err) || errors.Is(err, errNoOwnerEmail),
-			Outage:    outbound.IsConnectionError(err),
-		}
+// Compose implements Deliverer: the provider-free half (owner lookup, failure
+// stats, MIME, Message-ID, DKIM), classified like a send so the worker
+// treats a permanent compose failure the same way.
+func (n *Notifier) Compose(ctx context.Context, wh *identity.Webhook, kind string) (outbound.Envelope, DeliverOutcome) {
+	env, err := n.compose(ctx, wh, kind)
+	if err != nil {
+		return outbound.Envelope{}, classify(err)
+	}
+	return env, DeliverOutcome{}
+}
+
+// Submit implements Deliverer: one authorized submission, classified for the
+// NotifyWorker.
+func (n *Notifier) Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	if _, err := n.submitter.SubmitOnce(ctx, auth, env); err != nil {
+		return classify(fmt.Errorf("webhook notify: smtp send: %w", err))
 	}
 	return DeliverOutcome{}
 }
 
-func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) error {
-	if n == nil {
-		return nil
+// Deliver composes and sends one health email with an already-authorized
+// attempt: Compose then Submit in one call, for callers that hold the token
+// up front (tests). The worker runs the two phases itself so the token is
+// consumed last.
+func (n *Notifier) Deliver(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	env, out := n.Compose(ctx, wh, kind)
+	if out.Err != nil {
+		return out
 	}
+	return n.Submit(ctx, env, auth)
+}
+
+func classify(err error) DeliverOutcome {
+	return DeliverOutcome{
+		Err:       err,
+		Permanent: outbound.IsPermanentSMTPError(err) || errors.Is(err, errNoOwnerEmail),
+		Outage:    outbound.IsConnectionError(err),
+	}
+}
+
+func (n *Notifier) compose(ctx context.Context, wh *identity.Webhook, kind string) (outbound.Envelope, error) {
 	if wh == nil {
-		return fmt.Errorf("webhook notify: webhook is nil")
+		return outbound.Envelope{}, fmt.Errorf("webhook notify: webhook is nil")
 	}
 
 	owner, err := n.store.GetUserByID(ctx, wh.UserID)
 	if err != nil {
-		return fmt.Errorf("webhook notify: lookup owner: %w", err)
+		return outbound.Envelope{}, fmt.Errorf("webhook notify: lookup owner: %w", err)
 	}
 	if owner.Email == "" {
-		return fmt.Errorf("webhook notify: owner %s: %w", owner.ID, errNoOwnerEmail)
+		return outbound.Envelope{}, fmt.Errorf("webhook notify: owner %s: %w", owner.ID, errNoOwnerEmail)
 	}
 
 	window := identity.WarnWindow
@@ -165,7 +188,7 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string, 
 	}
 	stats, err := n.store.RecentWebhookFailureStats(ctx, wh.ID, window)
 	if err != nil {
-		return fmt.Errorf("webhook notify: failure stats: %w", err)
+		return outbound.Envelope{}, fmt.Errorf("webhook notify: failure stats: %w", err)
 	}
 
 	reason := stats.LastError
@@ -208,7 +231,7 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string, 
 		"",           // no conversation_id
 	)
 	if err != nil {
-		return fmt.Errorf("webhook notify: compose: %w", err)
+		return outbound.Envelope{}, fmt.Errorf("webhook notify: compose: %w", err)
 	}
 
 	// Deterministic Message-ID so a crash-after-send re-drive collapses at
@@ -236,16 +259,7 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string, 
 		message = signed
 	}
 
-	if _, err := n.submitter.SubmitOnce(ctx, auth, outbound.Envelope{
-		From:       n.fromAddress,
-		Recipients: []string{owner.Email},
-		Message:    message,
-	}); err != nil {
-		return fmt.Errorf("webhook notify: smtp send: %w", err)
-	}
-
-	log.Printf("[webhook-notify] sent %s email: webhook=%s owner=%s", kind, wh.ID, owner.ID)
-	return nil
+	return outbound.Envelope{From: n.fromAddress, Recipients: []string{owner.Email}, Message: message}, nil
 }
 
 // endpointLabel condenses the webhook URL for the subject line: host when

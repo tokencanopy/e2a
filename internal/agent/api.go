@@ -1644,6 +1644,10 @@ func (a *API) SetProviderSubmitter(submitter *outbound.ProviderSubmitter, gate s
 	a.gate = gate
 }
 
+// ProviderSubmitterWired reports whether the platform-mail seam is armed, for
+// the composition root's wiring test.
+func (a *API) ProviderSubmitterWired() bool { return a.submitter != nil && a.gate != nil }
+
 // SendTestCore accepts (or HITL-holds) a platform test email to the agent's
 // own address. HTTP-free; shared by the legacy handler and the v1 layer. The
 // caller has already authed, resolved + owned the agent, domain-verified,
@@ -1971,8 +1975,14 @@ func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, s
 	// own charged ordinal: Reserve, ConsumeAttempt, one authorized submit.
 	// The operation is keyed by a server-minted submission id and its
 	// envelope is configuration, never the request, so the form cannot
-	// become an open relay however it is retried.
-	submissionID := feedbackSubmissionID()
+	// become an open relay however it is retried. What goes on the wire is
+	// the token's canonical recipient set: the configured TO/CC lists may
+	// overlap or differ in case, and the seam refuses an envelope whose raw
+	// count disagrees with its normalized one.
+	submissionID, err := feedbackSubmissionID()
+	if err != nil {
+		return err
+	}
 	ref, err := a.gate.PreparePublicFeedback(ctx, sendingpolicy.NewPublicFeedbackRef(submissionID, rcpts))
 	if err != nil {
 		return fmt.Errorf("prepare feedback operation: %w", err)
@@ -1982,7 +1992,7 @@ func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, s
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return errors.Join(ctx.Err(), last)
 			case <-time.After(feedbackRetryBackoff[attempt-1]):
 			}
 		}
@@ -1995,12 +2005,19 @@ func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, s
 		}
 		decision, auth, err := a.gate.ConsumeAttempt(ctx, attemptRef)
 		if err != nil {
+			// The ordinal is reserved and nothing will Reserve it again on
+			// this path (the request ends here), so give its units back
+			// rather than leave them charged until midnight. Best effort:
+			// the gate's day-scoped expiry is the backstop.
+			if cerr := a.gate.CancelAttempt(context.WithoutCancel(ctx), attemptRef); cerr != nil {
+				log.Printf("[feedback] release reserved attempt after authorize error: %v", cerr)
+			}
 			return fmt.Errorf("authorize feedback attempt: %w", err)
 		}
 		if !decision.Allow || auth == nil {
 			return fmt.Errorf("feedback send held by sending policy: %s", decision.Reason)
 		}
-		_, err = a.submitter.SubmitOnce(ctx, *auth, outbound.Envelope{From: from, Recipients: rcpts, Message: raw})
+		_, err = a.submitter.SubmitOnce(ctx, *auth, outbound.Envelope{From: from, Recipients: auth.AuthorizedRecipients(), Message: raw})
 		if err == nil {
 			return nil
 		}
@@ -2016,20 +2033,21 @@ func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, s
 }
 
 // feedbackSendAttempts bounds the physical submissions one feedback request
-// may make; feedbackRetryBackoff paces them. Each is a distinct charged
-// attempt on the feedback operation.
+// may make; feedbackRetryBackoff paces them so every attempt fits inside
+// feedbackEmailTimeout. Each is a distinct charged attempt on the feedback
+// operation.
 const feedbackSendAttempts = 4
 
-var feedbackRetryBackoff = []time.Duration{time.Second, 5 * time.Second, 15 * time.Second}
+var feedbackRetryBackoff = []time.Duration{time.Second, 2 * time.Second, 3 * time.Second}
 
 // feedbackSubmissionID mints the server-side identity one feedback request's
 // operation is keyed by.
-func feedbackSubmissionID() string {
+func feedbackSubmissionID() (string, error) {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic(fmt.Sprintf("feedback submission id: %v", err))
+		return "", fmt.Errorf("feedback submission id: %w", err)
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }
 
 // splitFeedbackAddrs parses a comma-separated address list from env config,

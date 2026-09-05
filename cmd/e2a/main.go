@@ -393,10 +393,17 @@ func main() {
 	// later via SetDeliverer — mirrors inbound's late-bound Processor. Gated on the
 	// same relay+public-URL config as the notifier itself; when unconfigured, no jobs
 	// register and the hold takes the plain path (no notification).
-	var notifyJobs *hitlnotify.Jobs
 	notifierEnabled := cfg.OutboundSMTP.FromDomain != "" && cfg.HTTP.PublicURL != ""
-	if notifierEnabled {
-		notifyJobs = hitlnotify.NewJobs(store).WithGate(sendingGate, pool)
+	notification := newNotificationJobs(notificationDeps{
+		store:          store,
+		pool:           pool,
+		gate:           sendingGate,
+		metrics:        metrics,
+		hitlEnabled:    notifierEnabled,
+		webhookEnabled: cfg.OutboundSMTP.FromDomain != "",
+	})
+	notifyJobs := notification.hitl
+	if notifyJobs != nil {
 		registrars = append(registrars, notifyJobs)
 	}
 
@@ -409,9 +416,8 @@ func main() {
 	// (generic dashboard copy instead of a link). When unconfigured, no jobs
 	// register and the sweep transitions state without notifications
 	// (pre-feature behavior).
-	var webhookNotifyJobs *webhooknotify.Jobs
-	if cfg.OutboundSMTP.FromDomain != "" {
-		webhookNotifyJobs = webhooknotify.NewJobs(store).WithMetrics(metrics).WithGate(sendingGate, pool)
+	webhookNotifyJobs := notification.webhook
+	if webhookNotifyJobs != nil {
 		registrars = append(registrars, webhookNotifyJobs)
 	}
 
@@ -837,7 +843,7 @@ func main() {
 	// The outbound accept-tx enqueuer is mandatory: DeliverOutbound always
 	// persists+enqueues and returns accepted before provider submission.
 	api.SetOutboundEnqueuer(outboundJobs)
-	api.SetProviderSubmitter(providerSubmitter, sendingGate)
+	outboundSending.armAPI(api)
 	// Slices 6 + 7: customer-facing events API needs the raw pool to
 	// query webhook_events and write webhook_subscriber_deliveries on
 	// replay. Kept as a separate setter so a future refactor can route

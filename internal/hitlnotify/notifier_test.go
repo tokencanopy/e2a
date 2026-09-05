@@ -312,7 +312,11 @@ func TestNotifierDeliver(t *testing.T) {
 
 	// Deliver is what the River NotifyWorker calls: it composes + sends once and
 	// classifies the result. A healthy send returns a zero-value outcome.
-	out := n.Deliver(context.Background(), &identity.PendingNotify{Message: msg, Agent: agent}, tokenFor(t, store, msg.ID))
+	env, out := n.Compose(context.Background(), &identity.PendingNotify{Message: msg, Agent: agent})
+	if out.Err != nil {
+		t.Fatalf("Compose: unexpected err = %v", out.Err)
+	}
+	out = n.Submit(context.Background(), env, tokenFor(t, store, msg.ID))
 	if out.Err != nil {
 		t.Fatalf("Deliver: unexpected err = %v", out.Err)
 	}

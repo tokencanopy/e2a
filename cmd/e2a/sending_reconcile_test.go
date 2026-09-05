@@ -12,6 +12,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
+	"github.com/tokencanopy/e2a/internal/webhooknotify"
 )
 
 // insertLegacyJob enqueues a River job the way a pre-floor slot did: the
@@ -52,7 +53,7 @@ func legacyJobState(t *testing.T, pool *pgxpool.Pool, id int64) (state, opID str
 	return state, opID
 }
 
-func seedReconcileSource(t *testing.T, store *identity.Store, slug string) (*identity.Message, *identity.Webhook) {
+func seedReconcileSource(t *testing.T, pool *pgxpool.Pool, store *identity.Store, slug string) (*identity.Message, *identity.Webhook) {
 	t.Helper()
 	ctx := context.Background()
 	user, err := store.CreateOrGetUser(ctx, "owner-"+slug+"@reviewer.test", "Owner", "google-reconcile-"+slug)
@@ -80,6 +81,15 @@ func seedReconcileSource(t *testing.T, store *identity.Store, slug string) (*ide
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The sweep stamps the warning episode before it enqueues the notice;
+	// a legacy warning job's operation is keyed by that stamp.
+	if _, err := pool.Exec(ctx, `UPDATE webhooks SET warn_notified_at = now() WHERE id = $1`, wh.ID); err != nil {
+		t.Fatal(err)
+	}
+	wh, err = store.GetWebhookByIDInternal(ctx, wh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return msg, wh
 }
 
@@ -93,7 +103,7 @@ func TestReconcileLegacySendingJobs(t *testing.T) {
 	resetRiverJobs(t, pool)
 	store := identity.NewStore(pool)
 	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
-	msg, wh := seedReconcileSource(t, store, "reconcile")
+	msg, wh := seedReconcileSource(t, pool, store, "reconcile")
 
 	sendLive := insertLegacyJob(t, pool, "outbound_send", `{"message_id":"`+msg.ID+`"}`)
 	sendGone := insertLegacyJob(t, pool, "outbound_send", `{"message_id":"msg_does_not_exist"}`)
@@ -119,11 +129,11 @@ func TestReconcileLegacySendingJobs(t *testing.T) {
 	if state, op := legacyJobState(t, pool, sendLive); state != "available" || op != msg.ID {
 		t.Errorf("live send job: state=%s op=%q, want available with the message id", state, op)
 	}
-	if state, op := legacyJobState(t, pool, hitlLive); state != "available" || !strings.HasPrefix(op, "op_") {
-		t.Errorf("live hitl job: state=%s op=%q, want available with a notification operation", state, op)
+	if state, op := legacyJobState(t, pool, hitlLive); state != "available" || op != sendingpolicy.HITLNotificationOperationID(msg.ID) {
+		t.Errorf("live hitl job: state=%s op=%q, want available with the message's notification operation", state, op)
 	}
-	if state, op := legacyJobState(t, pool, whLive); state != "available" || !strings.HasPrefix(op, "op_") {
-		t.Errorf("live webhook job: state=%s op=%q, want available with a notification operation", state, op)
+	if state, op := legacyJobState(t, pool, whLive); state != "available" || op != webhooknotify.ExpectedOperationID(wh, webhooknotify.KindWarning) {
+		t.Errorf("live webhook job: state=%s op=%q, want available with the warning episode's operation", state, op)
 	}
 	for name, id := range map[string]int64{"send": sendGone, "webhook": whGone} {
 		if state, op := legacyJobState(t, pool, id); state != "cancelled" || op != "" {
@@ -179,5 +189,71 @@ func TestReconcileLegacySendingJobsReportsUndecided(t *testing.T) {
 	}
 	if state, op := legacyJobState(t, pool, broken); state != "available" || op != "" {
 		t.Errorf("undecided job touched: state=%s op=%q", state, op)
+	}
+}
+
+// TestReconcileLegacySendingJobsLeavesClaimedJobsToTheirWorker: a job that
+// left the reconcilable states (a worker claimed it) or was stamped by its
+// worker between the scan and its own transaction is skipped untouched — no
+// second operation, no cancel under a running worker.
+func TestReconcileLegacySendingJobsLeavesClaimedJobsToTheirWorker(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	resetRiverJobs(t, pool)
+	store := identity.NewStore(pool)
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	msg, _ := seedReconcileSource(t, pool, store, "claimed")
+
+	running := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`"}`)
+	if _, err := pool.Exec(ctx, `UPDATE river_job SET state = 'running', attempted_at = now() WHERE id = $1`, running); err != nil {
+		t.Fatal(err)
+	}
+	orphanRunning := insertLegacyJob(t, pool, "outbound_send", `{"message_id":"msg_gone"}`)
+	if _, err := pool.Exec(ctx, `UPDATE river_job SET state = 'running', attempted_at = now() WHERE id = $1`, orphanRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	var ops int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sending_provider_operations`).Scan(&ops); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReconcileLegacySendingJobs(ctx, pool, gate, &out); err != nil {
+		t.Fatalf("reconcile: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "scanned:   0") {
+		t.Fatalf("running jobs must not be scanned:\n%s", out.String())
+	}
+	for name, id := range map[string]int64{"running": running, "orphan running": orphanRunning} {
+		if state, op := legacyJobState(t, pool, id); state != "running" || op != "" {
+			t.Errorf("%s job touched: state=%s op=%q", name, state, op)
+		}
+	}
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sending_provider_operations`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != ops {
+		t.Errorf("operations minted for jobs the command did not own: %d → %d", ops, after)
+	}
+
+	// The per-job transaction re-checks under lock: simulate a worker that
+	// claimed the job after the scan by driving the per-job step directly.
+	claimed := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`"}`)
+	if _, err := pool.Exec(ctx, `UPDATE river_job SET state = 'running', attempted_at = now() WHERE id = $1`, claimed); err != nil {
+		t.Fatal(err)
+	}
+	client, err := jobs.New(pool, jobs.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := reconcileLegacySendingJob(ctx, pool, client, gate, claimed, "hitl_notify", []byte(`{"message_id":"`+msg.ID+`"}`))
+	if err != nil || outcome != legacyOutcomeSkipped {
+		t.Fatalf("claimed job: outcome=%v err=%v, want skipped", outcome, err)
+	}
+	stampedByWorker := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1,"id":"op_hitl_`+msg.ID+`"}}`)
+	outcome, err = reconcileLegacySendingJob(ctx, pool, client, gate, stampedByWorker, "hitl_notify", []byte(`{"message_id":"`+msg.ID+`"}`))
+	if err != nil || outcome != legacyOutcomeSkipped {
+		t.Fatalf("already stamped job: outcome=%v err=%v, want skipped", outcome, err)
 	}
 }

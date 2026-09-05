@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,6 +47,7 @@ type legacyReconcileCounts struct {
 	Stamped   int
 	Cancelled int
 	Paused    int
+	Skipped   int // moved on by a worker between the scan and the job's own transaction
 	Failed    int
 }
 
@@ -111,15 +113,18 @@ func runReconcileLegacySendingJobs(ctx context.Context, pool *pgxpool.Pool, gate
 			counts.Cancelled++
 		case legacyOutcomePaused:
 			counts.Paused++
+		case legacyOutcomeSkipped:
+			counts.Skipped++
 		}
 	}
 
 	fmt.Fprintf(stdout, "scanned:   %d\n", counts.Scanned)
 	fmt.Fprintf(stdout, "stamped:   %d\n", counts.Stamped)
 	fmt.Fprintf(stdout, "cancelled: %d\n", counts.Cancelled)
-	fmt.Fprintf(stdout, "paused:    %d\n", counts.Paused)
+	fmt.Fprintf(stdout, "paused:    %d (left unstamped for the worker's hold path; rerun after the account resumes)\n", counts.Paused)
+	fmt.Fprintf(stdout, "skipped:   %d (picked up by a worker meanwhile; the worker resolves them)\n", counts.Skipped)
 	fmt.Fprintf(stdout, "failed:    %d\n", counts.Failed)
-	fmt.Fprintf(stdout, "remaining: %d\n", counts.remaining())
+	fmt.Fprintf(stdout, "remaining: %d (undecided; nonzero exit)\n", counts.remaining())
 	if counts.remaining() != 0 {
 		return fmt.Errorf("%d legacy sending job(s) could not be reconciled", counts.remaining())
 	}
@@ -132,6 +137,7 @@ const (
 	legacyOutcomeStamped legacyOutcome = iota + 1
 	legacyOutcomeCancelled
 	legacyOutcomePaused
+	legacyOutcomeSkipped
 )
 
 // reconcileLegacySendingJob decides one job inside one transaction: the
@@ -144,6 +150,27 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 		return 0, fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Re-read the job under its row lock: the scan ran outside this
+	// transaction, and a worker may have claimed the job (or resolved and
+	// stamped it itself) since. Deciding a job a worker now owns would
+	// prepare beside it and could cancel it mid-flight, so anything that
+	// left the reconcilable states is skipped and left to that worker. The
+	// lock also serializes against the worker's own stamp.
+	var state string
+	var stamped bool
+	err = tx.QueryRow(ctx,
+		`SELECT state, (args ? 'operation_ref') FROM river_job WHERE id = $1 FOR UPDATE`, jobID,
+	).Scan(&state, &stamped)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return legacyOutcomeSkipped, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("lock job: %w", err)
+	}
+	if stamped || !slices.Contains(legacyReconcileStates, state) {
+		return legacyOutcomeSkipped, nil
+	}
 
 	var ref sendingpolicy.OperationRef
 	var cancelReason string
@@ -186,7 +213,7 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return 0, fmt.Errorf("decode args: %w", err)
 		}
-		ref, cancelReason, err = prepareLegacyNotification(ctx, tx, gate, sendingpolicy.NewWebhookHealthNotificationRef(args.WebhookID))
+		ref, cancelReason, err = prepareLegacyNotification(ctx, tx, gate, sendingpolicy.NewWebhookHealthNotificationRef(args.WebhookID, args.NotifyKind))
 		if err != nil {
 			return 0, err
 		}

@@ -22,6 +22,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
@@ -67,11 +68,22 @@ type DeliverOutcome struct {
 	Outage    bool // relay unreachable — snooze without spending an attempt
 }
 
-// Deliverer composes and sends the approval email for one held message. Implemented
-// by *Notifier (compose + SMTPRelay.SendOnce + classify).
+// Deliverer is the two-phase send of one approval email. Compose does every
+// fallible, provider-free step (owner lookup, token signing, MIME, DKIM) and
+// returns the envelope; Submit hands that envelope and a freshly consumed
+// authorization to the provider seam. The split exists so the worker can
+// ConsumeAttempt immediately before the socket opens: a compose failure then
+// costs nothing, instead of a charged ordinal that never reached the
+// provider. Implemented by *Notifier.
 type Deliverer interface {
-	Deliver(ctx context.Context, pn *identity.PendingNotify, auth sendingpolicy.ProviderAuthorization) DeliverOutcome
+	Compose(ctx context.Context, pn *identity.PendingNotify) (outbound.Envelope, DeliverOutcome)
+	Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome
 }
+
+// errOperationMismatch marks a job whose operation reference names another
+// held message's operation. Authorizing it would charge that operation's
+// account, so the job is cancelled, never retried.
+var errOperationMismatch = errors.New("hitl notify: job operation reference does not name this message")
 
 // OperationResolver recovers the durable operation for a job that carries no
 // reference, through the same Prepare path an enqueue runs.
@@ -171,18 +183,30 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[HITLNotifyArgs])
 		return nil // agent opted out of approval notifications
 	}
 
+	// Compose first: owner lookup, magic-link signing, MIME and DKIM are all
+	// fallible and none of them touches the provider, so they run before any
+	// attempt is charged. A failure here is classified exactly like a send
+	// failure but costs no ordinal.
+	env, out := w.deliverer.Compose(ctx, pn)
+	if out.Err != nil {
+		return w.verdict(job, msg.ID, "compose", out)
+	}
+
 	// Every provider call is authorized: Reserve the durable attempt, hold
-	// without I/O when the gate says so, ConsumeAttempt as the last decision,
-	// then hand the token to the deliverer, whose submitter redeems it before
-	// the socket opens. Notifications carry no durable hold class of their
-	// own — the approval TTL guard above already bounds how long one can
-	// wait, and a hold past it becomes the no-op the guard returns.
+	// without I/O when the gate says so, ConsumeAttempt as the LAST decision
+	// before Submit, whose submitter redeems the token immediately before the
+	// socket opens. Notifications carry no durable hold class of their own —
+	// the approval TTL guard above already bounds how long one can wait, and
+	// a hold past it becomes the no-op the guard returns.
 	auth := sendingpolicy.ProviderAuthorization{}
 	if w.gate != nil {
 		ref, err := w.operationFor(ctx, job)
 		if err != nil {
 			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
 				return nil // the hold is gone — nothing to notify
+			}
+			if errors.Is(err, errOperationMismatch) {
+				return river.JobCancel(err)
 			}
 			return err
 		}
@@ -209,8 +233,9 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[HITLNotifyArgs])
 		auth = *token
 	}
 
-	out := w.deliverer.Deliver(ctx, pn, auth)
+	out = w.deliverer.Submit(ctx, env, auth)
 	if out.Err == nil {
+		log.Printf("[hitl-notify] sent approval email: msg=%s", msg.ID)
 		if merr := w.store.MarkMessageNotified(ctx, msg.ID); merr != nil {
 			// The email is already out; only the dedup marker failed to persist. Do
 			// NOT return an error — a retry would re-send. Completing the job leaves
@@ -219,27 +244,37 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[HITLNotifyArgs])
 		}
 		return nil
 	}
+	return w.verdict(job, msg.ID, "send", out)
+}
+
+// verdict turns a classified failure into River's answer: a permanent one
+// cancels (the hold still finalizes on its TTL), an outage snoozes without
+// spending a River attempt, everything else retries per NextRetry until
+// MaxNotifyAttempts.
+func (w *NotifyWorker) verdict(job *river.Job[HITLNotifyArgs], messageID, phase string, out DeliverOutcome) error {
 	if out.Permanent {
-		// e.g. the owner address is rejected 5xx. Unavoidable — the hold still
-		// finalizes on its TTL. Cancel (no retry) rather than churn the tail.
-		log.Printf("[hitl-notify] permanent send failure for %s (no retry): %v", msg.ID, out.Err)
+		log.Printf("[hitl-notify] permanent %s failure for %s (no retry): %v", phase, messageID, out.Err)
 		return river.JobCancel(out.Err)
 	}
 	if out.Outage {
-		// Relay unreachable. Snooze without burning an attempt. If the hold has
-		// since passed its TTL, the next attempt's expiry guard above short-circuits
-		// to a no-op — no need to special-case it here.
+		// Relay unreachable. If the hold has since passed its TTL, the next
+		// attempt's expiry guard short-circuits to a no-op.
 		return river.JobSnooze(notifyOutageSnooze)
 	}
-	// Transient (relay throttle, owner lookup blip, compose error): let River
-	// reschedule per NextRetry until MaxNotifyAttempts, then discard.
-	return fmt.Errorf("hitl notify attempt %d failed: %w", job.Attempt, out.Err)
+	return fmt.Errorf("hitl notify attempt %d %s failed: %w", job.Attempt, phase, out.Err)
 }
 
 // operationFor returns the job's durable operation, resolving and stamping a
 // legacy job through the accept path.
 func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[HITLNotifyArgs]) (sendingpolicy.OperationRef, error) {
+	// The approval request's operation IS derived from the message id, so a
+	// reference naming any other operation would charge another account: the
+	// same binding the message worker enforces, checked before Reserve.
+	want := sendingpolicy.HITLNotificationOperationID(job.Args.MessageID)
 	if job.Args.OperationRef != nil && !job.Args.OperationRef.IsZero() {
+		if job.Args.OperationRef.ID() != want {
+			return sendingpolicy.OperationRef{}, errOperationMismatch
+		}
 		return *job.Args.OperationRef, nil
 	}
 	if w.resolve == nil {
@@ -248,6 +283,9 @@ func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[HITLNoti
 	ref, err := w.resolve(ctx, job.Args.MessageID)
 	if err != nil {
 		return sendingpolicy.OperationRef{}, err
+	}
+	if ref.ID() != want {
+		return sendingpolicy.OperationRef{}, errOperationMismatch
 	}
 	if w.stamp != nil {
 		if err := w.stamp(ctx, job.ID, ref); err != nil {
@@ -273,3 +311,7 @@ func holdVerdict(d sendingpolicy.Decision) error {
 	}
 	return river.JobSnooze(delay)
 }
+
+// Gate exposes the wired gate (nil when gateless), for the composition
+// root's wiring test.
+func (w *NotifyWorker) Gate() sendingpolicy.Gate { return w.gate }

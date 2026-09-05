@@ -348,6 +348,41 @@ const (
 type NotificationRef struct {
 	source NotificationSource
 	id     string
+	// kind is the webhook health episode kind (WebhookHealthKindWarning or
+	// WebhookHealthKindDisabled); empty for every other source.
+	kind string
+}
+
+// Source exposes the notification source, for tests and logging.
+func (r NotificationRef) Source() NotificationSource { return r.source }
+
+// SourceID exposes the source row id.
+func (r NotificationRef) SourceID() string { return r.id }
+
+// Kind exposes the webhook health episode kind; empty for other sources.
+func (r NotificationRef) Kind() string { return r.kind }
+
+// Webhook health episode kinds. They mirror the notification job's own
+// vocabulary; the notify package asserts the two agree.
+const (
+	WebhookHealthKindWarning  = "warning"
+	WebhookHealthKindDisabled = "disabled"
+)
+
+// HITLNotificationOperationID is the operation id of the approval request
+// for one held message. Deriving it from the message makes
+// PrepareNotificationTx idempotent per hold and lets the worker bind a
+// job's reference to its source the way the message worker does.
+func HITLNotificationOperationID(messageID string) string {
+	return "op_hitl_" + messageID
+}
+
+// WebhookHealthOperationID is the operation id of one webhook health
+// episode: the kind plus the timestamp the sweep stamped when it flipped
+// the state (warn_notified_at or auto_disabled_at). A webhook that recovers
+// and fails again is a new episode with a new operation.
+func WebhookHealthOperationID(webhookID, kind string, episode time.Time) string {
+	return fmt.Sprintf("op_wh_%s_%s_%d", kind, webhookID, episode.UTC().Unix())
 }
 
 // NewHITLNotificationRef references a pending outbound message whose approval
@@ -358,10 +393,13 @@ func NewHITLNotificationRef(messageID string) NotificationRef {
 	return NotificationRef{source: NotificationHITLMessage, id: messageID}
 }
 
-// NewWebhookHealthNotificationRef references a webhook whose health episode is
-// being reported to its owner.
-func NewWebhookHealthNotificationRef(webhookID string) NotificationRef {
-	return NotificationRef{source: NotificationWebhookHealth, id: webhookID}
+// NewWebhookHealthNotificationRef references a webhook whose health episode
+// of the given kind (WebhookHealthKindWarning / WebhookHealthKindDisabled) is
+// being reported to its owner. PrepareNotificationTx reads the episode's
+// timestamp from the locked webhook row; an unknown kind or an episode the
+// sweep never stamped is ErrSourceUnavailable.
+func NewWebhookHealthNotificationRef(webhookID, kind string) NotificationRef {
+	return NotificationRef{source: NotificationWebhookHealth, id: webhookID, kind: kind}
 }
 
 // ProtectionNoticeRef names one already-committed notice event and audience.

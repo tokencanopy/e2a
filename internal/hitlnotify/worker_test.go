@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
@@ -36,15 +38,34 @@ func (f *fakeStore) StampNotifyJobIDTx(_ context.Context, _ pgx.Tx, _ string, _ 
 }
 
 type fakeDeliverer struct {
-	out    hitlnotify.DeliverOutcome
-	called int
-	auths  []sendingpolicy.ProviderAuthorization
+	out        hitlnotify.DeliverOutcome // Submit's outcome
+	composeOut hitlnotify.DeliverOutcome // Compose's outcome
+	called     int                       // Submit calls
+	composed   int
+	auths      []sendingpolicy.ProviderAuthorization
+	trace      *[]string // shared with fakeGate to pin ordering
 }
 
-func (f *fakeDeliverer) Deliver(_ context.Context, _ *identity.PendingNotify, auth sendingpolicy.ProviderAuthorization) hitlnotify.DeliverOutcome {
+func (f *fakeDeliverer) Compose(_ context.Context, _ *identity.PendingNotify) (outbound.Envelope, hitlnotify.DeliverOutcome) {
+	f.composed++
+	f.record("compose")
+	if f.composeOut.Err != nil {
+		return outbound.Envelope{}, f.composeOut
+	}
+	return outbound.Envelope{From: "e2a@notify.test", Recipients: []string{"owner@reviewer.test"}, Message: []byte("Subject: x\r\n\r\nbody")}, hitlnotify.DeliverOutcome{}
+}
+
+func (f *fakeDeliverer) Submit(_ context.Context, _ outbound.Envelope, auth sendingpolicy.ProviderAuthorization) hitlnotify.DeliverOutcome {
 	f.called++
+	f.record("submit")
 	f.auths = append(f.auths, auth)
 	return f.out
+}
+
+func (f *fakeDeliverer) record(step string) {
+	if f.trace != nil {
+		*f.trace = append(*f.trace, step)
+	}
 }
 
 func job(id string, attempt int) *river.Job[hitlnotify.HITLNotifyArgs] {
@@ -219,6 +240,7 @@ func TestNotifyWorker_NextRetryMatchesEnvelope(t *testing.T) {
 
 // fakeGate is a scriptable sendingpolicy.Gate for the worker-order tests.
 type fakeGate struct {
+	trace      *[]string
 	reserve    sendingpolicy.Decision
 	consume    sendingpolicy.Decision
 	reserves   int
@@ -244,10 +266,12 @@ func (g *fakeGate) PreparePublicFeedback(context.Context, sendingpolicy.PublicFe
 }
 func (g *fakeGate) Reserve(context.Context, sendingpolicy.OperationRef) (sendingpolicy.Decision, sendingpolicy.AttemptRef, error) {
 	g.reserves++
+	g.record("reserve")
 	return g.reserve, sendingpolicy.AttemptRef{}, g.reserveErr
 }
 func (g *fakeGate) ConsumeAttempt(context.Context, sendingpolicy.AttemptRef) (sendingpolicy.Decision, *sendingpolicy.ProviderAuthorization, error) {
 	g.consumes++
+	g.record("consume")
 	if !g.consume.Allow {
 		return g.consume, nil, nil
 	}
@@ -278,7 +302,7 @@ func refFor(id string) sendingpolicy.OperationRef {
 
 func gatedJob(id string, attempt int) *river.Job[hitlnotify.HITLNotifyArgs] {
 	j := job(id, attempt)
-	ref := refFor("op_" + id)
+	ref := refFor(sendingpolicy.HITLNotificationOperationID(id))
 	j.Args.OperationRef = &ref
 	return j
 }
@@ -336,7 +360,7 @@ func TestNotifyWorker_LegacyJobResolvesAndStampsOnce(t *testing.T) {
 	w := hitlnotify.NewNotifyWorker(st, dl).WithGate(allowAll()).
 		WithOperationResolver(func(_ context.Context, id string) (sendingpolicy.OperationRef, error) {
 			resolved++
-			return refFor("op_" + id), nil
+			return refFor(sendingpolicy.HITLNotificationOperationID(id)), nil
 		}).
 		WithArgStamper(func(_ context.Context, _ int64, _ sendingpolicy.OperationRef) error { stamped++; return nil })
 	if err := w.Work(context.Background(), job("msg_legacy", 1)); err != nil {
@@ -352,5 +376,91 @@ func TestNotifyWorker_LegacyJobResolvesAndStampsOnce(t *testing.T) {
 		})
 	if err := w.Work(context.Background(), job("msg_gone", 1)); err != nil || dl.called != 1 {
 		t.Fatalf("orphan legacy: err=%v delivers=%d, want nil and no new delivery", err, dl.called)
+	}
+}
+
+func (g *fakeGate) record(step string) {
+	if g.trace != nil {
+		*g.trace = append(*g.trace, step)
+	}
+}
+
+// TestNotifyWorker_ComposeRunsBeforeAnyChargeAndConsumeIsLast pins the order
+// the seam depends on: compose (every fallible, provider-free step) precedes
+// Reserve, and ConsumeAttempt is the last call before Submit.
+func TestNotifyWorker_ComposeRunsBeforeAnyChargeAndConsumeIsLast(t *testing.T) {
+	var trace []string
+	fd := &fakeDeliverer{trace: &trace}
+	g := allowAll()
+	g.trace = &trace
+	st := &fakeStore{pn: pending("msg_1")}
+	w := hitlnotify.NewNotifyWorker(st, fd).WithGate(g)
+	if err := w.Work(context.Background(), gatedJob("msg_1", 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if got := strings.Join(trace, ","); got != "compose,reserve,consume,submit" {
+		t.Fatalf("order = %s, want compose,reserve,consume,submit", got)
+	}
+}
+
+// TestNotifyWorker_ComposeFailureChargesNothing: a compose failure (owner
+// lookup, signing, MIME) happens before Reserve, so it burns no ordinal; it
+// is classified exactly like a send failure.
+func TestNotifyWorker_ComposeFailureChargesNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		out       hitlnotify.DeliverOutcome
+		wantErr   func(error) bool
+		wantMsgID bool
+	}{
+		"transient": {out: hitlnotify.DeliverOutcome{Err: errors.New("owner lookup blip")}, wantErr: func(err error) bool { return err != nil && !isCancel(err) && !isSnooze(err) }},
+		"permanent": {out: hitlnotify.DeliverOutcome{Err: errors.New("no owner email"), Permanent: true}, wantErr: isCancel},
+		"outage":    {out: hitlnotify.DeliverOutcome{Err: errors.New("dkim store down"), Outage: true}, wantErr: isSnooze},
+	} {
+		fd := &fakeDeliverer{composeOut: tc.out}
+		g := allowAll()
+		st := &fakeStore{pn: pending("msg_1")}
+		w := hitlnotify.NewNotifyWorker(st, fd).WithGate(g)
+		err := w.Work(context.Background(), gatedJob("msg_1", 1))
+		if !tc.wantErr(err) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+		if g.reserves != 0 || g.consumes != 0 || fd.called != 0 {
+			t.Fatalf("%s: reserves=%d consumes=%d submits=%d, want 0/0/0", name, g.reserves, g.consumes, fd.called)
+		}
+		if len(st.notified) != 0 {
+			t.Fatalf("%s: marked notified without a send", name)
+		}
+	}
+}
+
+// TestNotifyWorker_ForeignOperationReferenceIsCancelled: a job whose
+// reference names another message's operation would charge that operation's
+// account; it is cancelled before Reserve, never retried.
+func TestNotifyWorker_ForeignOperationReferenceIsCancelled(t *testing.T) {
+	fd := &fakeDeliverer{}
+	g := allowAll()
+	st := &fakeStore{pn: pending("msg_1")}
+	w := hitlnotify.NewNotifyWorker(st, fd).WithGate(g)
+	j := job("msg_1", 1)
+	ref := refFor(sendingpolicy.HITLNotificationOperationID("msg_other"))
+	j.Args.OperationRef = &ref
+	if err := w.Work(context.Background(), j); !isCancel(err) {
+		t.Fatalf("err = %v, want cancel", err)
+	}
+	if g.reserves != 0 || fd.called != 0 {
+		t.Fatalf("reserves=%d submits=%d, want 0/0", g.reserves, fd.called)
+	}
+
+	// The same binding applies to a legacy resolve that returns a foreign id.
+	fd, g = &fakeDeliverer{}, allowAll()
+	w = hitlnotify.NewNotifyWorker(&fakeStore{pn: pending("msg_1")}, fd).WithGate(g).
+		WithOperationResolver(func(context.Context, string) (sendingpolicy.OperationRef, error) {
+			return refFor(sendingpolicy.HITLNotificationOperationID("msg_other")), nil
+		})
+	if err := w.Work(context.Background(), job("msg_1", 1)); !isCancel(err) {
+		t.Fatalf("legacy: err = %v, want cancel", err)
+	}
+	if g.reserves != 0 || fd.called != 0 {
+		t.Fatalf("legacy: reserves=%d submits=%d, want 0/0", g.reserves, fd.called)
 	}
 }

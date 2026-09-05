@@ -4,9 +4,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/hitlnotify"
+	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
+	"github.com/tokencanopy/e2a/internal/webhooknotify"
 )
 
 // outboundSendingDeps is everything the outbound composition root needs. It
@@ -48,4 +51,46 @@ func newOutboundSending(d outboundSendingDeps) outboundSending {
 		WithMetrics(d.metrics).
 		WithRateGate(d.rate)
 	return outboundSending{gate: gate, submitter: submitter, jobs: jobs}
+}
+
+// notificationDeps is what the notification composition needs: the same gate
+// and pool the customer path uses, plus the two config gates main applies.
+type notificationDeps struct {
+	store          *identity.Store
+	pool           *pgxpool.Pool
+	gate           sendingpolicy.Gate
+	metrics        webhooknotify.Metrics
+	hitlEnabled    bool // outbound_smtp.from_domain and http.public_url set
+	webhookEnabled bool // outbound_smtp.from_domain set
+}
+
+// notificationJobs are the two notification job bundles, nil when their
+// feature is unconfigured (no worker registers, the sweep/hold take the
+// plain path).
+type notificationJobs struct {
+	hitl    *hitlnotify.Jobs
+	webhook *webhooknotify.Jobs
+}
+
+// newNotificationJobs composes the notification bundles over the ONE gate.
+// Every enqueue prepares a customer_notification operation in the source
+// transaction and every worker execution authorizes through the gate; a
+// bundle built any other way would fail closed at runtime (empty token) with
+// an error that says nothing about wiring, which is why the composition is
+// factored here and pinned by the wiring test.
+func newNotificationJobs(d notificationDeps) notificationJobs {
+	var n notificationJobs
+	if d.hitlEnabled {
+		n.hitl = hitlnotify.NewJobs(d.store).WithGate(d.gate, d.pool)
+	}
+	if d.webhookEnabled {
+		n.webhook = webhooknotify.NewJobs(d.store).WithMetrics(d.metrics).WithGate(d.gate, d.pool)
+	}
+	return n
+}
+
+// armAPI hands the API the authorized seam for the platform mail it sends
+// itself (public feedback).
+func (s outboundSending) armAPI(api *agent.API) {
+	api.SetProviderSubmitter(s.submitter, s.gate)
 }

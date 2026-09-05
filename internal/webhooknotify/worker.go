@@ -22,6 +22,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
@@ -77,15 +78,32 @@ type DeliverOutcome struct {
 	Outage    bool // relay unreachable — snooze without spending an attempt
 }
 
-// Deliverer composes and sends one health email. Implemented by *Notifier
-// (compose + SMTPRelay.SendOnce + classify).
+// Deliverer is the two-phase send of one health email. Compose does every
+// fallible, provider-free step (owner lookup, failure stats, MIME, DKIM) and
+// returns the envelope; Submit hands that envelope and a freshly consumed
+// authorization to the provider seam. The split lets the worker
+// ConsumeAttempt immediately before the socket opens, so a compose failure
+// costs no charged ordinal. Implemented by *Notifier.
 type Deliverer interface {
-	Deliver(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) DeliverOutcome
+	Compose(ctx context.Context, wh *identity.Webhook, kind string) (outbound.Envelope, DeliverOutcome)
+	Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome
 }
 
 // OperationResolver recovers the durable operation for a job that carries no
-// reference, through the same Prepare path an enqueue runs.
-type OperationResolver func(ctx context.Context, webhookID string) (sendingpolicy.OperationRef, error)
+// reference, through the same Prepare path the sweep's enqueue runs. The kind
+// selects the episode (warning or disable) the operation is keyed by.
+type OperationResolver func(ctx context.Context, webhookID, kind string) (sendingpolicy.OperationRef, error)
+
+// errOperationMismatch marks a job whose operation reference names another
+// episode's (or another webhook's) operation: authorizing it would charge the
+// wrong operation, and a reference for a superseded episode is stale anyway.
+var errOperationMismatch = errors.New("webhook notify: job operation reference does not name this episode")
+
+// maxNotifyAge bounds how long a health notice may wait behind a gate hold.
+// A pause has no clock of its own, and a disabled webhook never self-clears,
+// so without this a held notice would snooze forever; a week-old health
+// notice is stale by any reading.
+const maxNotifyAge = 7 * 24 * time.Hour
 
 // ArgStamper persists a resolved reference into the job's args.
 type ArgStamper func(ctx context.Context, jobID int64, ref sendingpolicy.OperationRef) error
@@ -223,19 +241,43 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[WebhookNotifyArg
 		w.emitNotify(kind, outcomeSkipped)
 		return nil
 	}
+	if kind == KindDisabled && wh.AutoDisabledAt == nil {
+		// Guard 5: disabled by hand, not by the breaker — there is no
+		// auto-disable episode to report.
+		w.emitNotify(kind, outcomeSkipped)
+		return nil
+	}
+	if !job.CreatedAt.IsZero() && time.Since(job.CreatedAt) > maxNotifyAge {
+		// Guard 6: a notice that waited a week behind a hold is stale; drop
+		// it rather than snooze forever behind a paused account.
+		log.Printf("[webhook-notify] dropping %s notice for %s: older than %s", kind, wh.ID, maxNotifyAge)
+		w.emitNotify(kind, outcomeSkipped)
+		return nil
+	}
+
+	// Compose first: the owner lookup, failure stats, MIME and DKIM are
+	// fallible and provider-free, so they run before any attempt is charged.
+	env, out := w.deliverer.Compose(ctx, wh, kind)
+	if out.Err != nil {
+		return w.verdict(job, wh.ID, kind, "compose", out)
+	}
 
 	// Every provider call is authorized: Reserve, hold without I/O, then
-	// ConsumeAttempt as the last decision before the deliverer's submitter
-	// redeems the token. A health notice has no durable hold class; the
-	// guards above re-run on every execution and drop a notice that went
-	// stale while it waited.
+	// ConsumeAttempt as the LAST decision before Submit, whose submitter
+	// redeems the token immediately before the socket opens. A health notice
+	// has no durable hold class; the guards above re-run on every execution
+	// and drop a notice that went stale while it waited.
 	auth := sendingpolicy.ProviderAuthorization{}
 	if w.gate != nil {
-		ref, err := w.operationFor(ctx, job)
+		ref, err := w.operationFor(ctx, job, wh)
 		if err != nil {
 			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
 				w.emitNotify(kind, outcomeSkipped)
 				return nil
+			}
+			if errors.Is(err, errOperationMismatch) {
+				w.emitNotify(kind, outcomeSkipped)
+				return river.JobCancel(err)
 			}
 			w.emitNotify(kind, outcomeRetryable)
 			return err
@@ -267,42 +309,60 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[WebhookNotifyArg
 		auth = *token
 	}
 
-	out := w.deliverer.Deliver(ctx, wh, kind, auth)
+	out = w.deliverer.Submit(ctx, env, auth)
 	if out.Err == nil {
+		log.Printf("[webhook-notify] sent %s email: webhook=%s", kind, wh.ID)
 		w.emitNotify(kind, outcomeSent)
 		return nil
 	}
+	return w.verdict(job, wh.ID, kind, "send", out)
+}
+
+// verdict turns a classified failure into River's answer.
+func (w *NotifyWorker) verdict(job *river.Job[WebhookNotifyArgs], webhookID, kind, phase string, out DeliverOutcome) error {
 	if out.Permanent {
 		// e.g. the owner address is rejected 5xx, or there is no owner email
 		// on record. Cancel (no retry) rather than churn the tail.
-		log.Printf("[webhook-notify] permanent send failure for %s (%s, no retry): %v", wh.ID, kind, out.Err)
+		log.Printf("[webhook-notify] permanent %s failure for %s (%s, no retry): %v", phase, webhookID, kind, out.Err)
 		w.emitNotify(kind, outcomePermanent)
 		return river.JobCancel(out.Err)
 	}
 	if out.Outage {
 		// Relay unreachable — snooze without burning an attempt. The guards
-		// above re-run on the next attempt, so a notification that goes
-		// stale during the outage still drops correctly.
+		// re-run on the next attempt, so a notification that goes stale
+		// during the outage still drops correctly.
 		w.emitNotify(kind, outcomeOutage)
 		return river.JobSnooze(notifyOutageSnooze)
 	}
 	// Transient: let River reschedule per NextRetry until MaxNotifyAttempts.
 	w.emitNotify(kind, outcomeRetryable)
-	return fmt.Errorf("webhook notify attempt %d failed: %w", job.Attempt, out.Err)
+	return fmt.Errorf("webhook notify attempt %d %s failed: %w", job.Attempt, phase, out.Err)
 }
 
 // operationFor returns the job's durable operation, resolving and stamping a
 // legacy job through the sweep's Prepare path.
-func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[WebhookNotifyArgs]) (sendingpolicy.OperationRef, error) {
+func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[WebhookNotifyArgs], wh *identity.Webhook) (sendingpolicy.OperationRef, error) {
+	// The episode's operation is derived from the webhook, the kind and the
+	// timestamp the sweep stamped, so a reference naming any other operation
+	// is either another account's (never authorize it) or a superseded
+	// episode's (nothing left to say): the binding the message worker
+	// enforces, checked before Reserve.
+	want := ExpectedOperationID(wh, job.Args.NotifyKind)
 	if job.Args.OperationRef != nil && !job.Args.OperationRef.IsZero() {
+		if job.Args.OperationRef.ID() != want {
+			return sendingpolicy.OperationRef{}, errOperationMismatch
+		}
 		return *job.Args.OperationRef, nil
 	}
 	if w.resolve == nil {
 		return sendingpolicy.OperationRef{}, fmt.Errorf("webhook notify: legacy job %d carries no operation and no resolver is wired", job.ID)
 	}
-	ref, err := w.resolve(ctx, job.Args.WebhookID)
+	ref, err := w.resolve(ctx, job.Args.WebhookID, job.Args.NotifyKind)
 	if err != nil {
 		return sendingpolicy.OperationRef{}, err
+	}
+	if ref.ID() != want {
+		return sendingpolicy.OperationRef{}, errOperationMismatch
 	}
 	if w.stamp != nil {
 		if err := w.stamp(ctx, job.ID, ref); err != nil {
@@ -328,3 +388,27 @@ func (w *NotifyWorker) holdVerdict(kind string, d sendingpolicy.Decision) error 
 	}
 	return river.JobSnooze(delay)
 }
+
+// ExpectedOperationID is the operation a notice of the given kind for this
+// webhook's current episode must carry: the same derivation the gate's
+// PrepareNotificationTx uses. Empty when the episode was never stamped.
+func ExpectedOperationID(wh *identity.Webhook, kind string) string {
+	if wh == nil {
+		return ""
+	}
+	var episode *time.Time
+	switch kind {
+	case KindWarning:
+		episode = wh.WarnNotifiedAt
+	case KindDisabled:
+		episode = wh.AutoDisabledAt
+	}
+	if episode == nil {
+		return ""
+	}
+	return sendingpolicy.WebhookHealthOperationID(wh.ID, kind, *episode)
+}
+
+// Gate exposes the wired gate (nil when gateless), for the composition
+// root's wiring test.
+func (w *NotifyWorker) Gate() sendingpolicy.Gate { return w.gate }

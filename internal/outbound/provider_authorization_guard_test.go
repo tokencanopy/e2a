@@ -34,10 +34,23 @@ func TestEveryProviderCallRequiresAuthorization(t *testing.T) {
 		"internal/outbound/smtp_relay.go": "the provider relay itself",
 		"internal/selftest/scenarios.go":  "local inbound self-test client, not provider-bound",
 	}
-	// Files that may call the relay's socket-opening core.
+	// The ONE function that may reference the relay's socket-opening core:
+	// the authorized adapter's SubmitOnce. The exception is a symbol, not a
+	// file, so a second function added beside it is not exempt.
 	socketCallAllowed := map[string]string{
-		"internal/outbound/provider_submit.go": "the one authorized adapter",
+		"internal/outbound/provider_submit.go:SubmitOnce": "the one authorized adapter method",
 	}
+	// Provider SDKs that can send mail without SMTP, and the one package
+	// that may import each: sender-identity provisioning uses SES v2 for
+	// identities and tags, never SendEmail. A send through an HTTP provider
+	// API is invisible to the socket check, so the import is fenced instead.
+	providerSDKAllowed := map[string]map[string]string{
+		"github.com/aws/aws-sdk-go-v2/service/sesv2": {
+			"internal/senderidentity/ses.go":  "SES identity provisioning",
+			"internal/senderidentity/tags.go": "SES identity tagging",
+		},
+	}
+	allowedSocketCalls := 0
 
 	fset := token.NewFileSet()
 	for _, rel := range files {
@@ -50,9 +63,15 @@ func TestEveryProviderCallRequiresAuthorization(t *testing.T) {
 			t.Fatalf("parse %s: %v", rel, err)
 		}
 		for _, imp := range f.Imports {
-			if strings.Trim(imp.Path.Value, `"`) == "net/smtp" {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if path == "net/smtp" {
 				if _, ok := smtpImportAllowed[rel]; !ok {
 					t.Errorf("%s imports net/smtp: provider I/O must go through outbound.ProviderSubmitter (or be named in the guard's exception list with its reason)", rel)
+				}
+			}
+			if files, fenced := providerSDKAllowed[path]; fenced {
+				if _, ok := files[rel]; !ok {
+					t.Errorf("%s imports %s: a provider SDK may only be used where the guard names it, and never to send", rel, path)
 				}
 			}
 		}
@@ -60,22 +79,38 @@ func TestEveryProviderCallRequiresAuthorization(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", rel, err)
 		}
-		ast.Inspect(full, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+		// Any reference to the socket core counts, not only a direct call:
+		// a method value (`f := r.sendOnceContext`) or a method expression
+		// (`(*SMTPRelay).sendOnceContext`) is a SelectorExpr too, and either
+		// would otherwise let a caller open the socket one hop away from the
+		// name this guard looks for.
+		for _, decl := range full.Decls {
+			fn, isFunc := decl.(*ast.FuncDecl)
+			var enclosing string
+			if isFunc {
+				enclosing = rel + ":" + fn.Name.Name
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			if sel.Sel.Name == "sendOnceContext" {
-				if _, ok := socketCallAllowed[rel]; !ok {
-					t.Errorf("%s:%s calls the relay's socket-opening core outside the authorized adapter", rel, fset.Position(call.Pos()))
+			ast.Inspect(decl, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "sendOnceContext" {
+					return true
 				}
-			}
-			return true
-		})
+				if rel == "internal/outbound/smtp_relay.go" && isFunc && fn.Name.Name == "sendOnceContext" {
+					return true // the definition's own receiver method is not a reference
+				}
+				if _, ok := socketCallAllowed[enclosing]; ok {
+					allowedSocketCalls++
+					return true
+				}
+				t.Errorf("%s:%s references the relay's socket-opening core outside ProviderSubmitter.SubmitOnce", rel, fset.Position(sel.Pos()))
+				return true
+			})
+		}
+	}
+	// The sentinel must be real: renaming the socket core would otherwise
+	// turn the whole reference check into a no-op that still passes.
+	if allowedSocketCalls == 0 {
+		t.Fatal("ProviderSubmitter.SubmitOnce no longer references sendOnceContext: the guard's sentinel is stale, update both together")
 	}
 
 	// The relay's exported surface may not open a socket: Configured is a
@@ -107,34 +142,66 @@ func TestEveryProviderCallRequiresAuthorization(t *testing.T) {
 	}
 }
 
+// moduleRoot walks up from the package directory to the module's go.mod.
+// It needs no git: a guard that skipped itself wherever git was absent (a
+// source tarball, a container without the binary, a prebuilt test binary)
+// would report green exactly where nobody was looking.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	dir, err := os.Getwd()
 	if err != nil {
-		t.Skipf("not in a git checkout: %v", err)
+		t.Fatal(err)
 	}
-	return strings.TrimSpace(string(out))
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above the package directory")
+		}
+		dir = parent
+	}
 }
 
-// trackedGoFiles lists tracked, non-test Go files under internal/ and cmd/
-// — production code only, by git's own account of what ships.
+// trackedGoFiles lists the production (non-test) Go files under internal/
+// and cmd/. Git's index is the authority when available — it is what ships —
+// and a filesystem walk is the fallback so the guard never skips.
 func trackedGoFiles(t *testing.T, root string) []string {
 	t.Helper()
+	var files []string
 	cmd := exec.Command("git", "ls-files", "--", "internal/*.go", "internal/**/*.go", "cmd/*.go", "cmd/**/*.go")
 	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git ls-files: %v", err)
-	}
-	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" || strings.HasSuffix(line, "_test.go") {
-			continue
+	if out, err := cmd.Output(); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if line == "" || strings.HasSuffix(line, "_test.go") {
+				continue
+			}
+			files = append(files, line)
 		}
-		files = append(files, line)
+	} else {
+		for _, top := range []string{"internal", "cmd"} {
+			err := filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+					return nil
+				}
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				files = append(files, filepath.ToSlash(rel))
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("walk %s: %v", top, err)
+			}
+		}
 	}
 	if len(files) < 50 {
-		t.Fatalf("only %d tracked production files found; the guard is scanning the wrong tree", len(files))
+		t.Fatalf("only %d production files found; the guard is scanning the wrong tree", len(files))
 	}
 	return files
 }

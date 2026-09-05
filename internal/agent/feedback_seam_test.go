@@ -30,6 +30,7 @@ type scriptedSMTP struct {
 
 	mu       sync.Mutex
 	messages []string
+	rcpts    [][]string // RCPT TO per connection, in wire order
 	conns    int
 }
 
@@ -63,6 +64,7 @@ func (s *scriptedSMTP) serve(conn net.Conn, reply string) {
 	reader := bufio.NewReader(conn)
 	fmt.Fprint(conn, "220 scripted ready\r\n")
 	var data []string
+	var rcpts []string
 	inData := false
 	for {
 		line, err := reader.ReadString('\n')
@@ -77,6 +79,7 @@ func (s *scriptedSMTP) serve(conn net.Conn, reply string) {
 			}
 			s.mu.Lock()
 			s.messages = append(s.messages, strings.Join(data, "\n"))
+			s.rcpts = append(s.rcpts, rcpts)
 			s.mu.Unlock()
 			if reply == "drop" {
 				return
@@ -86,6 +89,9 @@ func (s *scriptedSMTP) serve(conn net.Conn, reply string) {
 			continue
 		}
 		switch {
+		case len(line) > 8 && strings.EqualFold(line[:8], "RCPT TO:"):
+			rcpts = append(rcpts, strings.Trim(strings.TrimSpace(line[8:]), "<>"))
+			fmt.Fprint(conn, "250 OK\r\n")
 		case strings.EqualFold(line, "DATA"):
 			inData = true
 			fmt.Fprint(conn, "354 Go ahead\r\n")
@@ -102,6 +108,12 @@ func (s *scriptedSMTP) received() ([]string, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.messages...), s.conns
+}
+
+func (s *scriptedSMTP) recipients() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]string(nil), s.rcpts...)
 }
 
 func attemptHeader(wire string) string {
@@ -244,5 +256,27 @@ func TestFeedbackSeam_EnvelopeIsConfigurationNotRequest(t *testing.T) {
 	}
 	if attemptHeader(msgs[0]) == "" {
 		t.Errorf("feedback mail left without the provider attempt header: it did not cross the authorized seam")
+	}
+	got := s.recipients()
+	if len(got) != 1 || strings.Join(got[0], ",") != "feedback@example.test,ops@example.test" {
+		t.Errorf("RCPT TO = %v, want exactly the configured notify set", got)
+	}
+}
+
+// TestFeedbackSeam_OverlappingNotifyConfigStillSends: TO and CC naming the
+// same mailbox (in any case) is a legal configuration that used to send one
+// copy; the seam's canonical recipient set keeps it that way instead of
+// refusing every attempt.
+func TestFeedbackSeam_OverlappingNotifyConfigStillSends(t *testing.T) {
+	s := startScriptedSMTP(t, "250")
+	api, _ := newFeedbackSeamAPI(t, s)
+
+	err := api.sendFeedbackEmail(context.Background(), "t", "bug", "m", "", "", []string{"ops@example.test"}, []string{"Ops@example.test"})
+	if err != nil {
+		t.Fatalf("sendFeedbackEmail: %v", err)
+	}
+	got := s.recipients()
+	if len(got) != 1 || len(got[0]) != 1 || !strings.EqualFold(got[0][0], "ops@example.test") {
+		t.Fatalf("RCPT TO = %v, want the one mailbox once", got)
 	}
 }

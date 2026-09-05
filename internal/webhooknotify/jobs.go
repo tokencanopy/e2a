@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
+	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
@@ -68,19 +69,37 @@ func (j *Jobs) SetDeliverer(d Deliverer) {
 	j.mu.Unlock()
 }
 
-// Deliver makes Jobs itself the worker's Deliverer, delegating to the
-// concrete one set via SetDeliverer. Until that is wired (the brief
-// startup window before the notifier is built) it returns a retryable
-// outcome, so a pending job simply retries rather than dropping.
-func (j *Jobs) Deliver(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
-	j.mu.RLock()
-	d := j.deliverer
-	j.mu.RUnlock()
+// Compose makes Jobs itself the worker's Deliverer, delegating to the
+// concrete one set via SetDeliverer. Until that is wired (the brief startup
+// window before the notifier is built) it returns a retryable outcome — and
+// because Compose runs before any attempt is charged, that window costs
+// nothing.
+func (j *Jobs) Compose(ctx context.Context, wh *identity.Webhook, kind string) (outbound.Envelope, DeliverOutcome) {
+	d := j.currentDeliverer()
+	if d == nil {
+		return outbound.Envelope{}, DeliverOutcome{Err: errors.New("webhook notifier not wired yet — retrying")}
+	}
+	return d.Compose(ctx, wh, kind)
+}
+
+// Submit delegates the authorized submission to the concrete Deliverer.
+func (j *Jobs) Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	d := j.currentDeliverer()
 	if d == nil {
 		return DeliverOutcome{Err: errors.New("webhook notifier not wired yet — retrying")}
 	}
-	return d.Deliver(ctx, wh, kind, auth)
+	return d.Submit(ctx, env, auth)
 }
+
+func (j *Jobs) currentDeliverer() Deliverer {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.deliverer
+}
+
+// Gate exposes the wired sending-protection gate (nil when gateless), so the
+// composition root's wiring test can prove the production bundle is armed.
+func (j *Jobs) Gate() sendingpolicy.Gate { return j.gate }
 
 // WithMetrics wires the observability backend the NotifyWorker emits the
 // notification-outcome counter on. Nil-safe; call before RegisterJobs.
@@ -111,7 +130,7 @@ func (j *Jobs) NotifyWorker() *NotifyWorker {
 // ResolveLegacyOperation prepares the notification operation for a job that
 // carries no reference, in its own committed transaction, through the same
 // PrepareNotificationTx the sweep's enqueue runs.
-func (j *Jobs) ResolveLegacyOperation(ctx context.Context, webhookID string) (sendingpolicy.OperationRef, error) {
+func (j *Jobs) ResolveLegacyOperation(ctx context.Context, webhookID, kind string) (sendingpolicy.OperationRef, error) {
 	if j.gate == nil || j.pool == nil {
 		return sendingpolicy.OperationRef{}, fmt.Errorf("webhook notify: legacy operation resolver is not wired")
 	}
@@ -120,7 +139,7 @@ func (j *Jobs) ResolveLegacyOperation(ctx context.Context, webhookID string) (se
 		return sendingpolicy.OperationRef{}, fmt.Errorf("begin legacy resolve: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(webhookID))
+	ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(webhookID, kind))
 	if err != nil {
 		return sendingpolicy.OperationRef{}, err
 	}
@@ -140,7 +159,7 @@ func (j *Jobs) ResolveLegacyOperation(ctx context.Context, webhookID string) (se
 func (j *Jobs) EnqueueWebhookNotifyTx(ctx context.Context, tx pgx.Tx, webhookID, kind string) (int64, error) {
 	args := WebhookNotifyArgs{WebhookID: webhookID, NotifyKind: kind}
 	if j.gate != nil {
-		ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(webhookID))
+		ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(webhookID, kind))
 		if err != nil {
 			return 0, fmt.Errorf("prepare notification operation: %w", err)
 		}

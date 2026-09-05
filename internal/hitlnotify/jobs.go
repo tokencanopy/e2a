@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
+	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
@@ -61,19 +62,37 @@ func (j *Jobs) SetDeliverer(d Deliverer) {
 	j.mu.Unlock()
 }
 
-// Deliver makes Jobs itself the worker's Deliverer, delegating to the concrete one
-// set via SetDeliverer. Until that is wired (the brief startup window before the
-// notifier is built) it returns a retryable outcome, so a pending job simply
-// retries rather than dropping on a nil deliverer.
-func (j *Jobs) Deliver(ctx context.Context, pn *identity.PendingNotify, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
-	j.mu.RLock()
-	d := j.deliverer
-	j.mu.RUnlock()
+// Compose makes Jobs itself the worker's Deliverer, delegating to the
+// concrete one set via SetDeliverer. Until that is wired (the brief startup
+// window before the notifier is built) it returns a retryable outcome — and
+// because Compose runs before any attempt is charged, that window costs
+// nothing.
+func (j *Jobs) Compose(ctx context.Context, pn *identity.PendingNotify) (outbound.Envelope, DeliverOutcome) {
+	d := j.currentDeliverer()
+	if d == nil {
+		return outbound.Envelope{}, DeliverOutcome{Err: errors.New("hitl notifier not wired yet — retrying")}
+	}
+	return d.Compose(ctx, pn)
+}
+
+// Submit delegates the authorized submission to the concrete Deliverer.
+func (j *Jobs) Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	d := j.currentDeliverer()
 	if d == nil {
 		return DeliverOutcome{Err: errors.New("hitl notifier not wired yet — retrying")}
 	}
-	return d.Deliver(ctx, pn, auth)
+	return d.Submit(ctx, env, auth)
 }
+
+func (j *Jobs) currentDeliverer() Deliverer {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.deliverer
+}
+
+// Gate exposes the wired sending-protection gate (nil when gateless), so the
+// composition root's wiring test can prove the production bundle is armed.
+func (j *Jobs) Gate() sendingpolicy.Gate { return j.gate }
 
 // RegisterJobs adds the NotifyWorker (with Jobs as the late-binding Deliverer).
 // No periodics — the reconciler is a one-shot startup cutover. Implements
