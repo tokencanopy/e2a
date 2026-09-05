@@ -196,6 +196,43 @@ test("concurrency: parallel DELETE of the same agent is idempotent under content
   }
 });
 
+test("concurrency: 8 parallel sends from a normal agent — all accepted (no 5xx, no duplicates)", async () => {
+  // The accept transaction inserts the message and then prepares its sending
+  // operation under the gate; v1.9.0 deadlocked those two steps against each
+  // other (SQLSTATE 40P01 → 500) for parallel sends from one agent. The HITL
+  // case below caught it on the hold path; this covers the direct path, which
+  // has the same shape and carries almost all production traffic.
+  const slug = uniqueSlug("sendconc");
+  const c = await client.post<{ email: string }>("/v1/agents", {
+    body: { email: `${slug}@${client.env.sharedDomain}`, name: "send-conc" },
+  });
+  assert.equal(c.status, 201);
+  const email = c.body!.email;
+  track("agent", email);
+
+  const N = 8;
+  const sends = await Promise.all(
+    Array.from({ length: N }, (_, i) =>
+      burst.post<{ message_id: string; status: string }>(`/v1/agents/${encodeURIComponent(email)}/messages`, {
+        body: {
+          to: [SINK_EMAIL],
+          subject: `parallel direct ${i}`,
+          text: `parallel direct send #${i}`,
+        },
+      }),
+    ),
+  );
+
+  const ids = new Set<string>();
+  for (const r of sends) {
+    assert.ok(r.status === 202 || r.status === 200, `parallel direct send: status ${r.status}, body: ${r.raw.slice(0, 200)}`);
+    assert.ok(r.body?.message_id?.startsWith("msg_"), `message_id present and prefixed`);
+    ids.add(r.body!.message_id);
+  }
+  assert.equal(ids.size, N, `expected ${N} distinct message_ids, got ${ids.size}`);
+  info(SUITE, "parallel-direct-sends", `${N} parallel direct sends accepted with ${ids.size} distinct ids`);
+});
+
 test("concurrency: 8 parallel sends from HITL agent — all queue (no dropped/duplicated)", async () => {
   const slug = uniqueSlug("hitlconc");
   const c = await client.post<{ email: string }>("/v1/agents", {

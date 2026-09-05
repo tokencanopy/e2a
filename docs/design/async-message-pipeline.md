@@ -345,6 +345,22 @@ a paused account's message job is also left unstamped for the worker's hold
 path. The workers resolve legacy jobs themselves, so the command is a
 convenience for a clean cutover, not a prerequisite.
 
+**Lock order of the accept transaction.** Every lock the accept path takes,
+in order, so the next change can check itself against it: the message
+insert takes `FOR KEY SHARE` on the agent row (foreign key) and an
+exclusive lock on the account's `account_usage` row (storage trigger); the
+gate's Prepare then takes `FOR NO KEY UPDATE` on the agent, `FOR UPDATE` on
+the message, and the `account_sending_controls` upsert (which holds `KEY
+SHARE` on the user); then the operation insert, the River job insert, and
+the message's own stamp. The gate's agent lock is `NO KEY UPDATE` and must
+stay that way: `FOR UPDATE` conflicts with the key share every concurrent
+insert for the same agent already holds, and v1.9.0 deadlocked two parallel
+sends exactly there. The rule generalizes: a `FOR UPDATE` taken after an
+`INSERT` that references the locked row by foreign key, in the same
+transaction, deadlocks under concurrency. An approval and a reply hold a
+message row before the gate runs, so "agent before message" is a property
+of Prepare itself, not of every caller.
+
 Two consequences worth knowing. Notification and feedback mail now cross the
 same submitter as customer mail, so it carries `X-SES-CONFIGURATION-SET`
 and SES publishes delivery feedback for it; none of it correlates to a
