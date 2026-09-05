@@ -126,9 +126,22 @@ func NewOutboundRampGate(store *sendramp.Store, schedule sendramp.Schedule, enab
 
 func (g *outboundRampGate) Reserve(ctx context.Context, req outboundsend.RampRequest) (outboundsend.RampDecision, error) {
 	if !g.enabled {
-		if err := g.store.Exempt(ctx, req.UserID, req.Domain); err != nil {
-			return outboundsend.RampDecision{}, err
-		}
+		// Disabled is pass-through: reserve nothing, count nothing, stamp
+		// nothing. The domain stays 'inactive'.
+		//
+		// An earlier revision stamped the domain 'exempt' here, reasoning that
+		// a sender allowed to send unthrottled must not be re-throttled if the
+		// ramp is later enabled. That turned every eligible send into a silent,
+		// unmarked grandfathering decision, and 'exempt' has since grown
+		// meaning beyond "skip the ramp": an exempt domain reads as an
+		// established sender, so it also stops consuming the shared probation
+		// pool that bounds Sybil abuse. Widening that set from the send path,
+		// once per send, is not a decision this gate gets to make.
+		//
+		// Grandfathering belongs to the audited one-shot that already exists
+		// for it: sendingpolicy's ActivationRequest.GrandfatherCurrentSendingDomains,
+		// which writes a replay marker, locks the domains table against
+		// concurrent sender transitions, and can never widen its set twice.
 		return outboundsend.RampDecision{Allowed: true}, nil
 	}
 	d, err := g.store.Reserve(ctx, sendramp.ReserveRequest{
@@ -142,6 +155,10 @@ func (g *outboundRampGate) Reserve(ctx context.Context, req outboundsend.RampReq
 	return outboundsend.RampDecision{Allowed: d.Allowed, RetryAt: d.RetryAt}, err
 }
 
+// Confirm, Release and Resolve delegate unconditionally, including while the
+// ramp is disabled: a reservation taken before an operator turned the ramp off
+// still has to settle. With the ramp disabled no reservation is ever created,
+// so on that path the store methods find no row and write nothing.
 func (g *outboundRampGate) Confirm(ctx context.Context, messageID string) error {
 	return g.store.Confirm(ctx, messageID)
 }
