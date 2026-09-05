@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/outboundsend"
 )
 
 // fakeEnq records EnqueueSendTx / EnqueueScheduledSendTx calls (the outbound_send
@@ -16,10 +17,14 @@ import (
 type fakeEnq struct {
 	calls          []string
 	scheduledCalls map[string]time.Time
+	err            error
 }
 
 func (f *fakeEnq) EnqueueSendTx(_ context.Context, _ pgx.Tx, messageID string) (int64, error) {
 	f.calls = append(f.calls, messageID)
+	if f.err != nil {
+		return 0, f.err
+	}
 	return 7777, nil
 }
 
@@ -153,5 +158,48 @@ func TestWorkerAutoApproveAsync_SelfSendStaysLoopback(t *testing.T) {
 	}
 	if status != identity.MessageStatusReviewExpiredApproved {
 		t.Errorf("self-send status = %q, want %q (resolved via loopback)", status, identity.MessageStatusReviewExpiredApproved)
+	}
+}
+
+// TestWorkerAutoApprovePausedAccountDefersWithoutBlocking: a TTL-expired hold on
+// an account paused for sending stays pending — held, as the pause promises —
+// but its TTL is pushed forward so it does not sit at the head of the sweep and
+// starve every other expired review, and it is not retried every cycle.
+func TestWorkerAutoApprovePausedAccountDefersWithoutBlocking(t *testing.T) {
+	w, store, pool, smtpDone := setupWorker(t)
+	ctx := context.Background()
+	agent := prepareAgent(t, store, "approve-paused", identity.HITLExpirationApprove)
+	enq := &fakeEnq{err: outboundsend.ErrSendingPaused}
+	w.SetOutboundEnqueuer(enq)
+	msg, err := store.CreatePendingOutboundMessage(ctx, agent.ID,
+		[]string{"alice@external.test"}, nil, nil,
+		"Held", "body", "<p>html</p>", nil, "send", "", "", "", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backdateExpiry(t, pool, msg.ID)
+
+	w.RunOnce(ctx)
+	if msgs := smtpDone(); len(msgs) != 0 {
+		t.Fatalf("paused account must not send inline, got %d SMTP messages", len(msgs))
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueue attempts = %v, want exactly one", enq.calls)
+	}
+	var status string
+	var expiresAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT status, approval_expires_at FROM messages WHERE id=$1`, msg.ID).Scan(&status, &expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != identity.MessageStatusPendingReview {
+		t.Fatalf("status = %q, want pending_review (held, not rejected)", status)
+	}
+	if expiresAt.Before(time.Now().Add(50 * time.Minute)) {
+		t.Fatalf("approval_expires_at = %v, want deferred about an hour ahead", expiresAt)
+	}
+	// Deferred out of the window: the next sweep leaves it alone.
+	w.RunOnce(ctx)
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueue attempts after deferral = %v, want still one", enq.calls)
 	}
 }

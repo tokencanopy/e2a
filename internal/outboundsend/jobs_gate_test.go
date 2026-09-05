@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -282,5 +283,56 @@ func TestJobs_ReconcilerSettlesTheDialedAttemptFromEvidence(t *testing.T) {
 	}
 	if dl.calls != 1 {
 		t.Fatalf("provider calls = %d, want the original one only", dl.calls)
+	}
+}
+
+func TestJobs_RateDeferralReleasesTheRealReservation(t *testing.T) {
+	f := newGateFixture(t)
+	messageID, jobID, err := f.accept(f.gated, "rate")
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	gate := &fakeRateGate{decision: outboundsend.RateDecision{Allowed: false, RetryAt: time.Now().Add(30 * time.Second)}, window: time.Minute}
+	dl := &fakeDeliverer{}
+	w := outboundsend.NewSendWorker(f.adapter, dl).WithGate(f.gate).WithRateGate(gate)
+	ref := refFor(messageID)
+	rj := &river.Job[outboundsend.OutboundSendArgs]{
+		JobRow: &rivertype.JobRow{ID: jobID, Attempt: 1, MaxAttempts: outboundsend.MaxSendAttempts, Kind: outboundsend.OutboundSendArgs{}.Kind()},
+		Args:   outboundsend.OutboundSendArgs{MessageID: messageID, OperationRef: &ref},
+	}
+	if err := w.Work(f.ctx, rj); !isSnooze(err) || dl.calls != 0 {
+		t.Fatalf("err=%v delivers=%d, want snooze with no I/O", err, dl.calls)
+	}
+	var state string
+	if err := f.pool.QueryRow(f.ctx, `SELECT state FROM sending_budget_reservations WHERE operation_id = $1 AND submission_attempt = 1`, messageID).Scan(&state); err != nil {
+		t.Fatalf("read reservation: %v", err)
+	}
+	if state != "released" {
+		t.Fatalf("reservation state = %s, want released — the deferral must give the budget back", state)
+	}
+}
+
+// zeroRefGate accepts but prepares nothing — the shape only an exact
+// self-send produces, which never enqueues.
+type zeroRefGate struct{ *fakeGate }
+
+func (zeroRefGate) PrepareExternalTx(context.Context, pgx.Tx, string) (sendingpolicy.AcceptanceDecision, sendingpolicy.OperationRef, error) {
+	return sendingpolicy.AcceptanceAccept, sendingpolicy.OperationRef{}, nil
+}
+
+func TestJobs_EnqueueRefusesAnAcceptWithoutAnOperation(t *testing.T) {
+	f := newGateFixture(t)
+	bundle := outboundsend.NewJobs(f.adapter, &fakeDeliverer{}, f.pool).WithGate(zeroRefGate{allowAll()})
+	bundle.SetEnqueuer(f.client)
+	messageID, _, err := f.accept(bundle, "zero-ref")
+	if err == nil {
+		t.Fatal("an accept that prepared no operation was enqueued as a legacy-looking job")
+	}
+	var rows int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM messages WHERE id = $1`, messageID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatal("the refused accept left a message row behind")
 	}
 }

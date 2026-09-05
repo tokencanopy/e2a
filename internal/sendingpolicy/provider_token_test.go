@@ -338,3 +338,47 @@ func TestProviderTokenLookupOperationResolvesOnlyDurableOperations(t *testing.T)
 		t.Fatalf("lookup of an empty id err = %v, want ErrSourceUnavailable", err)
 	}
 }
+
+// TestProviderTokenSettleOperationPrefersTheOldestUnboundDialedAttempt: two
+// attempts dialed and both lost their 250. Evidence arriving in send order
+// binds attempt one first, then attempt two — neither steals the other's id.
+func TestProviderTokenSettleOperationPrefersTheOldestUnboundDialedAttempt(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	ref, attempt := f.prepareAndReserve(g, agent, 1)
+	for i := 1; i <= 2; i++ {
+		if i == 2 {
+			var err error
+			if _, attempt, err = g.Reserve(f.ctx, ref); err != nil || attempt.Attempt() != 2 {
+				t.Fatalf("reserve ordinal two: attempt=%v err=%v", attempt, err)
+			}
+		}
+		_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+		if err != nil || auth == nil {
+			t.Fatalf("authorize %d: auth=%v err=%v", i, auth, err)
+		}
+		if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+			t.Fatalf("redeem %d: %v", i, err)
+		}
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-first"); err != nil {
+		t.Fatalf("settle first evidence: %v", err)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-second"); err != nil {
+		t.Fatalf("settle second evidence: %v", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 1); got == nil || *got != "ses-first" {
+		t.Fatalf("attempt one bound = %v, want ses-first", got)
+	}
+	if got := f.providerMessageID(ref.ID(), 2); got == nil || *got != "ses-second" {
+		t.Fatalf("attempt two bound = %v, want ses-second", got)
+	}
+	// Everything bound: a replay of either id is idempotent, a third id is a conflict.
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-second"); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-third"); !errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+		t.Fatalf("third id err = %v, want ErrProviderMessageIDConflict", err)
+	}
+}

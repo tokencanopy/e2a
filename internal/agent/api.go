@@ -1735,6 +1735,9 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 		accepted = msg
 		return nil
 	}); txErr != nil {
+		if errors.Is(txErr, outboundsend.ErrSendingPaused) {
+			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
+		}
 		log.Printf("[api] platform accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}

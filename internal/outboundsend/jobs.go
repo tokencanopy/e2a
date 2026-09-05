@@ -46,6 +46,18 @@ func (j *Jobs) WithGate(g sendingpolicy.Gate) *Jobs {
 	return j
 }
 
+// SendWorker builds the fully armed send worker RegisterJobs registers: the
+// gate, the legacy resolver, the rate gate, and metrics. It is the one place
+// those are wired, and the composition root's test inspects its result.
+func (j *Jobs) SendWorker() *SendWorker {
+	return NewSendWorker(j.store, j.deliverer).WithMetrics(j.metrics).WithRateGate(j.rate).WithGate(j.gate).WithOperationResolver(j.ResolveLegacyOperation)
+}
+
+// TerminalReconcileWorker builds the reconciler RegisterJobs registers.
+func (j *Jobs) TerminalReconcileWorker() *TerminalReconcileWorker {
+	return NewTerminalReconcileWorker(j.pool, j.store).WithMetrics(j.metrics).WithGate(j.gate)
+}
+
 // Gate exposes the wired sending-protection gate, for the composition root's
 // wiring test. nil when none is wired.
 func (j *Jobs) Gate() sendingpolicy.Gate { return j.gate }
@@ -79,8 +91,8 @@ func (j *Jobs) WithRateGate(g RateGate) *Jobs {
 // RegisterJobs adds the SendWorker and terminal-state safety net to the shared
 // client's bundle. Implements jobs.Registrar.
 func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
-	river.AddWorker(w, NewSendWorker(j.store, j.deliverer).WithMetrics(j.metrics).WithRateGate(j.rate).WithGate(j.gate).WithOperationResolver(j.ResolveLegacyOperation))
-	river.AddWorker(w, NewTerminalReconcileWorker(j.pool, j.store).WithMetrics(j.metrics).WithGate(j.gate))
+	river.AddWorker(w, j.SendWorker())
+	river.AddWorker(w, j.TerminalReconcileWorker())
 	return []*river.PeriodicJob{
 		river.NewPeriodicJob(
 			river.PeriodicInterval(terminalReconcileInterval),
@@ -152,9 +164,14 @@ func (j *Jobs) enqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string, a
 		if decision == sendingpolicy.AcceptanceSendingPaused {
 			return 0, ErrSendingPaused
 		}
-		if !ref.IsZero() {
-			args.OperationRef = &ref
+		if ref.IsZero() {
+			// The only accepted shape without an operation is an exact
+			// self-send, and those never enqueue. Refusing here keeps a
+			// prepared-but-operationless job from masquerading as a legacy
+			// one that the worker would then kill.
+			return 0, fmt.Errorf("prepare sending operation: message %s has no provider operation", messageID)
 		}
+		args.OperationRef = &ref
 	}
 	opts := &river.InsertOpts{
 		Queue:       jobs.QueueOutbound,

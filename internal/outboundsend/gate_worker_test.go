@@ -99,17 +99,24 @@ func TestGatedWorker_PauseHoldIsIndefiniteAndPersistsNothing(t *testing.T) {
 	}
 }
 
-func TestGatedWorker_PauseDoesNotExtendARunningBudgetDeadline(t *testing.T) {
+func TestGatedWorker_PauseNeverEvaluatesADeadlineButNeverExtendsIt(t *testing.T) {
+	// Paused with a budget deadline already eight days gone: the paused job
+	// only waits. Nothing is failed, nothing rewritten.
 	j := acceptedJob("msg_paused_budget")
 	j.LocalHoldClass, j.LocalHoldAnchor = outboundsend.HoldPolicyBudget, time.Now().Add(-8*24*time.Hour)
 	st := &fakeStore{job: j}
 	g := &fakeGate{reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonAccountPaused}}
-	err := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(g).Work(context.Background(), gatedJob("msg_paused_budget", 1))
-	if !isCancel(err) {
-		t.Fatalf("err = %v, want cancel — the seven-day budget deadline governs every later wait", err)
+	if err := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(g).Work(context.Background(), gatedJob("msg_paused_budget", 1)); !isSnooze(err) {
+		t.Fatalf("paused err = %v, want snooze — a paused job evaluates no deadline", err)
 	}
-	if len(st.failed) != 1 || st.failed[0].source != delivery.FailureSourceLocal {
-		t.Fatalf("failed = %+v, want one local failure", st.failed)
+	if len(st.failed) != 0 || len(st.holds) != 0 {
+		t.Fatalf("failed=%+v holds=%+v, want nothing touched while paused", st.failed, st.holds)
+	}
+	// After resume the first hold it meets applies the unextended deadline.
+	g = &fakeGate{reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonGlobalAllBudget, RetryAt: time.Now().Add(time.Hour)}}
+	err := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(g).Work(context.Background(), gatedJob("msg_paused_budget", 2))
+	if !isCancel(err) || len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionPolicyBudgetExpired {
+		t.Fatalf("after resume err=%v failed=%+v, want the budget deadline to fire with its own reason", err, st.failed)
 	}
 }
 
@@ -366,5 +373,133 @@ func TestGatedWorker_AcceptanceUnknownIsRetriedAsANewOrdinalNotSettled(t *testin
 func TestGatedWorker_HoldConstantsMatchThePolicyDefault(t *testing.T) {
 	if got := time.Duration(sendingpolicy.DisabledPolicy().BudgetHoldMaxDays) * 24 * time.Hour; got != outboundsend.PolicyBudgetHoldHorizon {
 		t.Fatalf("PolicyBudgetHoldHorizon = %s, policy budget_hold_max_days default = %s", outboundsend.PolicyBudgetHoldHorizon, got)
+	}
+}
+
+func TestGatedWorker_GateOutageIsBoundedByTheHoldDeadline(t *testing.T) {
+	j := acceptedJob("msg_gate_down_long")
+	j.AcceptedAt = time.Now().Add(-73 * time.Hour)
+	st := &fakeStore{job: j}
+	dl := &fakeDeliverer{}
+	g := &fakeGate{reserveErr: errors.New("policy db down")}
+	err := outboundsend.NewSendWorker(st, dl).WithGate(g).Work(context.Background(), gatedJob("msg_gate_down_long", 1))
+	if !isCancel(err) || dl.calls != 0 {
+		t.Fatalf("err=%v delivers=%d, want the 72-hour expiry with no I/O", err, dl.calls)
+	}
+	if len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionLocalRetriesExhausted {
+		t.Fatalf("failed = %+v, want local_retries_exhausted", st.failed)
+	}
+	// Inside the horizon it holds as rate/ramp/provider and snoozes.
+	j = acceptedJob("msg_gate_down_short")
+	j.AcceptedAt = time.Now().Add(-time.Hour)
+	st = &fakeStore{job: j}
+	if err := outboundsend.NewSendWorker(st, dl).WithGate(g).Work(context.Background(), gatedJob("msg_gate_down_short", 1)); !isSnooze(err) {
+		t.Fatalf("err = %v, want snooze", err)
+	}
+	if len(st.holds) != 1 || st.holds[0].class != outboundsend.HoldRateRampOrProvider {
+		t.Fatalf("holds = %+v, want a rate/ramp/provider hold", st.holds)
+	}
+}
+
+func TestGatedWorker_ReadinessLossDoesNotReplaceARateClass(t *testing.T) {
+	anchor := time.Now().Add(-time.Hour)
+	j := acceptedJob("msg_keep_rate")
+	j.LocalHoldClass, j.LocalHoldAnchor = outboundsend.HoldRateRampOrProvider, anchor
+	st := &fakeStore{job: j}
+	g := &fakeGate{reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonTenantNotReady}}
+	if err := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(g).Work(context.Background(), gatedJob("msg_keep_rate", 1)); !isSnooze(err) {
+		t.Fatalf("err = %v, want snooze", err)
+	}
+	if len(st.holds) != 0 {
+		t.Fatalf("holds = %+v, want the persisted rate class left alone", st.holds)
+	}
+}
+
+func TestGatedWorker_ProviderOutagePersistsTheHoldAndHonorsTheBudgetClock(t *testing.T) {
+	// First outage: enters the rate/ramp/provider class anchored at accept.
+	j := acceptedJob("msg_outage")
+	j.AcceptedAt = time.Now().Add(-time.Hour)
+	st := &fakeStore{job: j}
+	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("connection refused"), Outage: true}}
+	if err := outboundsend.NewSendWorker(st, dl).WithGate(allowAll()).Work(context.Background(), gatedJob("msg_outage", 1)); !isSnooze(err) {
+		t.Fatalf("err = %v, want snooze", err)
+	}
+	if len(st.holds) != 1 || st.holds[0].class != outboundsend.HoldRateRampOrProvider || !st.holds[0].anchor.Equal(j.AcceptedAt) {
+		t.Fatalf("holds = %+v, want rate/ramp/provider anchored at accept", st.holds)
+	}
+	// Under a policy_budget hold four days old, an outage keeps waiting on
+	// the seven-day clock instead of the 72-hour one.
+	j = acceptedJob("msg_outage_budget")
+	j.AcceptedAt = time.Now().Add(-5 * 24 * time.Hour)
+	j.LocalHoldClass, j.LocalHoldAnchor = outboundsend.HoldPolicyBudget, time.Now().Add(-4*24*time.Hour)
+	st = &fakeStore{job: j}
+	if err := outboundsend.NewSendWorker(st, dl).WithGate(allowAll()).Work(context.Background(), gatedJob("msg_outage_budget", 1)); !isSnooze(err) {
+		t.Fatalf("budget-held outage err = %v, want snooze on the seven-day clock", err)
+	}
+	if len(st.holds) != 0 || len(st.failed) != 0 {
+		t.Fatalf("holds=%+v failed=%+v, want the budget class untouched", st.holds, st.failed)
+	}
+	// An outage that expires a tenant_setup class never emits the setup
+	// reason: setup was not what blocked the send at the end.
+	j = acceptedJob("msg_outage_setup")
+	j.LocalHoldClass, j.LocalHoldAnchor = outboundsend.HoldTenantSetup, time.Now().Add(-73*time.Hour)
+	st = &fakeStore{job: j}
+	err := outboundsend.NewSendWorker(st, dl).WithGate(allowAll()).Work(context.Background(), gatedJob("msg_outage_setup", 1))
+	if err == nil || len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionLocalRetriesExhausted {
+		t.Fatalf("err=%v failed=%+v, want local_retries_exhausted, never sending_setup_expired", err, st.failed)
+	}
+}
+
+func TestGatedWorker_EvidenceSettleUnderATerminalWriteSettlesTheOperation(t *testing.T) {
+	// A suppression arrives for a message whose earlier attempt dialed and
+	// whose provider evidence has since landed: the guarded terminal write
+	// settles the row as SENT, and the dialed attempt must be settled too.
+	st := &fakeStore{job: acceptedJob("msg_late_evidence"), suppressed: []string{"b@y.com"}, settleStatus: delivery.StatusSent}
+	g := allowAll()
+	if err := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(g).Work(context.Background(), gatedJob("msg_late_evidence", 2)); !isCancel(err) {
+		t.Fatalf("err = %v, want cancel", err)
+	}
+	if g.lookupCalls != 1 || len(g.settled) != 1 || g.settled[0] != sendingpolicy.SettlementProviderAccepted {
+		t.Fatalf("lookups=%d settled=%v, want the operation settled as accepted from the evidence", g.lookupCalls, g.settled)
+	}
+}
+
+func TestHoldClassForNamesEveryReasonExplicitly(t *testing.T) {
+	// Every hold reason the gate can emit decides a horizon; the mapping is
+	// by name, and an unknown name takes the shorter clock.
+	cases := map[string]outboundsend.HoldClass{
+		sendingpolicy.ReasonAccountPaused:             "",
+		sendingpolicy.ReasonAccountDailyBudget:        outboundsend.HoldPolicyBudget,
+		sendingpolicy.ReasonAccountSharedBudget:       outboundsend.HoldPolicyBudget,
+		sendingpolicy.ReasonGlobalAllBudget:           outboundsend.HoldPolicyBudget,
+		sendingpolicy.ReasonGlobalProbation:           outboundsend.HoldPolicyBudget,
+		sendingpolicy.ReasonGlobalCritical:            outboundsend.HoldPolicyBudget,
+		sendingpolicy.ReasonGlobalViolation:           outboundsend.HoldPolicyBudget,
+		sendingpolicy.ReasonTenantNotReady:            outboundsend.HoldTenantSetup,
+		sendingpolicy.ReasonTenantUnnamed:             outboundsend.HoldTenantSetup,
+		sendingpolicy.ReasonRampCapacity:              outboundsend.HoldRateRampOrProvider,
+		sendingpolicy.ReasonSendingIdentityUnverified: outboundsend.HoldRateRampOrProvider,
+		"some_future_budget_exhausted":                outboundsend.HoldRateRampOrProvider,
+	}
+	for reason, want := range cases {
+		if got := outboundsend.HoldClassFor(reason); got != want {
+			t.Errorf("HoldClassFor(%q) = %q, want %q", reason, got, want)
+		}
+	}
+}
+
+func TestGatedWorker_OperationReferenceMustNameThisMessage(t *testing.T) {
+	st := &fakeStore{job: acceptedJob("msg_a")}
+	dl := &fakeDeliverer{}
+	g := allowAll()
+	rj := job("msg_a", 1)
+	other := refFor("msg_b")
+	rj.Args.OperationRef = &other
+	err := outboundsend.NewSendWorker(st, dl).WithGate(g).Work(context.Background(), rj)
+	if !isCancel(err) || dl.calls != 0 || g.reserves != 0 {
+		t.Fatalf("err=%v delivers=%d reserves=%d, want cancel before any ledger call", err, dl.calls, g.reserves)
+	}
+	if len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionCancelled {
+		t.Fatalf("failed = %+v, want one local cancellation", st.failed)
 	}
 }

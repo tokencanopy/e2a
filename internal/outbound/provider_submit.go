@@ -139,6 +139,10 @@ func NewProviderSubmitter(relay *SMTPRelay, gate sendingpolicy.Gate) *ProviderSu
 // tagged with. Empty means no header (dev/self-host without SES).
 func (s *ProviderSubmitter) SetSESConfigurationSet(name string) { s.sesConfigSet = name }
 
+// SESConfigurationSet reports the configured configuration set, for wiring
+// tests that must prove delivery feedback stayed switched on.
+func (s *ProviderSubmitter) SESConfigurationSet() string { return s.sesConfigSet }
+
 // SubmitOnce makes exactly one provider call for one authorized attempt.
 //
 // The sequence is fixed and every early exit is I/O-free: prove the envelope is

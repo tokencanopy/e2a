@@ -240,6 +240,10 @@ func (w *TerminalReconcileWorker) settleFromEvidence(ctx context.Context, messag
 		return
 	}
 	if err := w.gate.SettleOperation(ctx, ref, sendingpolicy.SettlementProviderAccepted, providerMessageID); err != nil && !errors.Is(err, sendingpolicy.ErrAttemptStale) {
+		if errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+			log.Printf("[outbound-terminal-reconcile] CRITICAL: provider id conflict settling %s from evidence: %v", messageID, err)
+			return
+		}
 		log.Printf("[outbound-terminal-reconcile] settle %s from provider evidence: %v", messageID, err)
 	}
 }

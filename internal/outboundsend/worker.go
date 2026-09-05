@@ -402,6 +402,15 @@ func (w *SendWorker) WithClock(now func() time.Time) *SendWorker {
 	return w
 }
 
+// Gate exposes the wired sending-protection gate (nil when none), for the
+// composition root's wiring test.
+func (w *SendWorker) Gate() sendingpolicy.Gate { return w.gate }
+
+// HasOperationResolver reports whether a legacy-argument resolver is wired.
+// Without one every job from a pre-floor slot fails closed, so the wiring
+// test insists on it.
+func (w *SendWorker) HasOperationResolver() bool { return w.resolve != nil }
+
 // NextRetry overrides River's default backoff with the decided send envelope.
 func (w *SendWorker) NextRetry(job *river.Job[OutboundSendArgs]) time.Time {
 	i := job.Attempt
@@ -460,7 +469,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		// Terminal 'sent', but NOT an attempt — the submit happened on an
 		// earlier attempt; only the settle lands here.
 		emitTerminal(w.metrics, terminalSent, j.submissionAnchor(), observedAt)
-		w.settleFromEvidence(ctx, job, j.ProviderMessageID)
+		w.settleFromEvidence(ctx, j.MessageID, j.ProviderMessageID)
 		return nil
 	}
 
@@ -598,9 +607,10 @@ func (w *SendWorker) submit(ctx context.Context, job *river.Job[OutboundSendArgs
 		emitTerminal(w.metrics, terminalSent, j.submissionAnchor(), observedAt)
 		if out.SettlementErr != nil {
 			// The provider has the message; only the local settlement (ramp
-			// progress, provider-id binding) is behind. Never a resend. The
-			// delayed feedback path settles the same attempt idempotently.
-			log.Printf("[outbound-send] WARNING: %s accepted by provider but not settled: %v", j.MessageID, out.SettlementErr)
+			// progress, provider-id binding) is behind. Never a resend: retry
+			// the settlement itself, idempotently, and leave the delayed
+			// feedback path to finish it if that fails too.
+			w.resettle(ctx, j.MessageID, out.ProviderMessageID, out.SettlementErr)
 		}
 		return nil
 	}
@@ -625,9 +635,10 @@ func (w *SendWorker) submit(ctx context.Context, job *river.Job[OutboundSendArgs
 			if err := w.store.RecordHold(ctx, j.MessageID, class, anchor); err != nil {
 				return fmt.Errorf("record outbound hold: %w", err)
 			}
+			j.LocalHoldClass, j.LocalHoldAnchor = class, anchor
 		}
 		if !observedAt.Before(anchor.Add(class.horizon())) {
-			if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, out.Err.Error(), delivery.FailureSourceLocal, class.expiryReason(), nil); err != nil {
+			if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, out.Err.Error(), delivery.FailureSourceLocal, expiryReasonFor(class, true), nil); err != nil {
 				return err
 			}
 			return fmt.Errorf("outbound send failed (provider outage past %s horizon): %w", class.horizon(), out.Err)
@@ -663,10 +674,18 @@ func (w *SendWorker) submit(ctx context.Context, job *river.Job[OutboundSendArgs
 // through the accept path. It returns a River verdict (snooze/cancel) as its
 // error when the message cannot proceed.
 func (w *SendWorker) operationFor(ctx context.Context, job *river.Job[OutboundSendArgs], j *SendJob) (sendingpolicy.OperationRef, error) {
+	observedAt := w.now().UTC()
 	if job.Args.OperationRef != nil && !job.Args.OperationRef.IsZero() {
+		// A customer message's operation IS its message id. A job whose
+		// reference names another operation would charge that operation's
+		// account and route this message's feedback to that message; the
+		// gate cannot tell, because every reference reloads its row. This is
+		// the one place the two ids meet, so this is where they must agree.
+		if job.Args.OperationRef.ID() != j.MessageID {
+			return sendingpolicy.OperationRef{}, w.cancelTerminally(ctx, job, j, sendingpolicy.AttemptRef{}, observedAt, "sending_policy: job operation reference does not name this message")
+		}
 		return *job.Args.OperationRef, nil
 	}
-	observedAt := w.now().UTC()
 	if w.resolve == nil {
 		return sendingpolicy.OperationRef{}, w.cancelTerminally(ctx, job, j, sendingpolicy.AttemptRef{}, observedAt, "sending_policy: legacy job carries no operation and no resolver is wired")
 	}
@@ -695,7 +714,7 @@ func (w *SendWorker) hold(ctx context.Context, job *river.Job[OutboundSendArgs],
 	if d.Terminal {
 		return w.cancelTerminally(ctx, job, j, attempt, observedAt, "sending_policy: "+d.Reason)
 	}
-	class := holdClassFor(d.Reason)
+	class := HoldClassFor(d.Reason)
 	delay := indefiniteHoldSnooze
 	if !d.RetryAt.IsZero() {
 		delay = time.Until(d.RetryAt)
@@ -704,15 +723,15 @@ func (w *SendWorker) hold(ctx context.Context, job *river.Job[OutboundSendArgs],
 		}
 	}
 	if class == "" {
-		// An account pause has no clock of its own. It does not start a finite
-		// hold, but a deadline already running keeps running.
-		if j.LocalHoldClass == "" {
-			if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
-				return fmt.Errorf("release outbound send claim during account pause: %w", err)
-			}
-			return river.JobSnooze(delay)
+		// An account pause has no clock of its own. It starts no finite hold
+		// and evaluates none: a paused job only waits. A deadline persisted
+		// before the pause is not extended either — after resume the job
+		// either continues within its remaining time or expires with its
+		// class's own reason on the next hold it meets.
+		if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
+			return fmt.Errorf("release outbound send claim during account pause: %w", err)
 		}
-		class = j.LocalHoldClass
+		return river.JobSnooze(delay)
 	}
 	return w.holdFinite(ctx, job, j, attempt, class, "sending_policy_hold: "+d.Reason, delay, observedAt)
 }
@@ -728,7 +747,7 @@ func (w *SendWorker) holdFinite(ctx context.Context, job *river.Job[OutboundSend
 		j.LocalHoldClass, j.LocalHoldAnchor = class, anchor
 	}
 	if !observedAt.Before(anchor.Add(class.horizon())) {
-		if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, detail, delivery.FailureSourceLocal, class.expiryReason(), nil); err != nil {
+		if err := w.markFailed(ctx, j.MessageID, job.ID, job.Attempt, j.submissionAnchor(), observedAt, detail, delivery.FailureSourceLocal, expiryReasonFor(class, false), nil); err != nil {
 			return err
 		}
 		w.cancelAttempt(ctx, attempt, "hold expiry")
@@ -795,17 +814,35 @@ func (w *SendWorker) applyTenantReadiness(ctx context.Context, j *SendJob) error
 	return nil
 }
 
-// holdClassFor maps a gate hold reason to its finite-hold class; "" means the
+// expiryReasonFor picks the lifecycle reason for a hold that expired. The
+// persisted class decides, with the one exception the design names: a later
+// provider outage cannot emit the setup reason, because the provider — not
+// setup — is what blocked the send at the end. A rate or ramp wait met by a
+// setup-class message still expires as setup: missing or late readiness is
+// the story of that message.
+func expiryReasonFor(class HoldClass, providerOutage bool) messagelifecycle.ReasonCode {
+	if class == HoldTenantSetup && providerOutage {
+		return HoldRateRampOrProvider.expiryReason()
+	}
+	return class.expiryReason()
+}
+
+// HoldClassFor maps a gate hold reason to its finite-hold class; "" means the
 // hold has no clock (an account pause).
-func holdClassFor(reason string) HoldClass {
-	switch {
-	case reason == sendingpolicy.ReasonAccountPaused:
+func HoldClassFor(reason string) HoldClass {
+	switch reason {
+	case sendingpolicy.ReasonAccountPaused:
 		return ""
-	case strings.HasSuffix(reason, "_budget_exhausted"):
+	case sendingpolicy.ReasonAccountDailyBudget, sendingpolicy.ReasonAccountSharedBudget,
+		sendingpolicy.ReasonGlobalAllBudget, sendingpolicy.ReasonGlobalProbation,
+		sendingpolicy.ReasonGlobalCritical, sendingpolicy.ReasonGlobalViolation:
 		return HoldPolicyBudget
-	case reason == sendingpolicy.ReasonTenantNotReady, reason == sendingpolicy.ReasonTenantUnnamed:
+	case sendingpolicy.ReasonTenantNotReady, sendingpolicy.ReasonTenantUnnamed:
 		return HoldTenantSetup
 	}
+	// Ramp capacity, an unverified sending identity, and any hold reason this
+	// worker does not know by name all wait on the 72-hour clock: unknown is
+	// the shorter horizon, never the longer one.
 	return HoldRateRampOrProvider
 }
 
@@ -822,12 +859,13 @@ func (w *SendWorker) cancelTerminally(ctx context.Context, job *river.Job[Outbou
 // snoozeOnGateError releases the claim and snoozes when the gate itself is
 // unavailable: fail toward retry, never toward an unauthorized submit, and
 // never burn a River attempt on infrastructure.
+//
+// It is a bounded wait like every other one: the message enters (or stays
+// in) the rate/ramp/provider class and expires at that class's deadline, so a
+// gate that is down for days does not park mail forever.
 func (w *SendWorker) snoozeOnGateError(ctx context.Context, job *river.Job[OutboundSendArgs], j *SendJob, step string, gerr error) error {
-	if err := w.store.ReleaseSend(ctx, j.MessageID, job.ID); err != nil {
-		return fmt.Errorf("release outbound send claim after gate %s failure: %w", step, errors.Join(gerr, err))
-	}
 	log.Printf("[outbound-send] sending policy %s failed for %s (snoozing): %v", step, j.MessageID, gerr)
-	return river.JobSnooze(gateErrorSnoozeInterval)
+	return w.holdFinite(ctx, job, j, sendingpolicy.AttemptRef{}, HoldRateRampOrProvider, "sending_policy_unavailable: "+step+": "+gerr.Error(), gateErrorSnoozeInterval, w.now().UTC())
 }
 
 // deferAttempt gives the budget back for a rate deferral; a stale or already
@@ -858,22 +896,59 @@ func (w *SendWorker) cancelAttempt(ctx context.Context, attempt sendingpolicy.At
 	}
 }
 
-// settleFromEvidence applies provider-accept evidence to the operation's
-// latest dialed attempt. Best effort: the row is already settled as sent, and
-// an attempt that predates the gate has nothing to settle.
-func (w *SendWorker) settleFromEvidence(ctx context.Context, job *river.Job[OutboundSendArgs], providerMessageID string) {
+// resettle retries a settlement that failed after the provider accepted the
+// message. It mirrors markFailed's bounded retry: a transient database error
+// should not cost a domain its ramp progress for the day.
+func (w *SendWorker) resettle(ctx context.Context, messageID, providerMessageID string, first error) {
 	if w.gate == nil {
 		return
 	}
-	ref, err := w.gate.LookupOperation(ctx, job.Args.MessageID)
+	err := first
+	for i := 0; i < terminalWriteRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(i+1) * terminalWriteBackoff):
+		}
+		ref, lerr := w.gate.LookupOperation(ctx, messageID)
+		if lerr != nil {
+			err = lerr
+			continue
+		}
+		err = w.gate.SettleOperation(ctx, ref, sendingpolicy.SettlementProviderAccepted, providerMessageID)
+		if err == nil || errors.Is(err, sendingpolicy.ErrAttemptStale) {
+			return
+		}
+		if errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+			break
+		}
+	}
+	log.Printf("[outbound-send] CRITICAL: %s accepted by provider but not settled after retries: %v", messageID, err)
+}
+
+// settleFromEvidence applies provider-accept evidence to the operation's
+// latest dialed attempt. Best effort: the row is already settled as sent, and
+// an attempt that predates the gate has nothing to settle.
+func (w *SendWorker) settleFromEvidence(ctx context.Context, messageID, providerMessageID string) {
+	if w.gate == nil {
+		return
+	}
+	ref, err := w.gate.LookupOperation(ctx, messageID)
 	if err != nil {
 		if !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
-			log.Printf("[outbound-send] lookup operation for evidence settle of %s: %v", job.Args.MessageID, err)
+			log.Printf("[outbound-send] lookup operation for evidence settle of %s: %v", messageID, err)
 		}
 		return
 	}
 	if err := w.gate.SettleOperation(ctx, ref, sendingpolicy.SettlementProviderAccepted, providerMessageID); err != nil && !errors.Is(err, sendingpolicy.ErrAttemptStale) {
-		log.Printf("[outbound-send] settle %s from provider evidence: %v", job.Args.MessageID, err)
+		if errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+			// Two physical sends for one charged attempt, or evidence
+			// attributed to the wrong attempt: an invariant violation, never
+			// a transient. Surface it as such.
+			log.Printf("[outbound-send] CRITICAL: provider id conflict settling %s from evidence: %v", messageID, err)
+			return
+		}
+		log.Printf("[outbound-send] settle %s from provider evidence: %v", messageID, err)
 	}
 }
 
@@ -959,6 +1034,11 @@ func (w *SendWorker) markFailed(ctx context.Context, messageID string, jobID int
 				emitTerminal(w.metrics, terminalOutcome(source, reason, blockedRecipients), anchorAt, settledAt)
 			case delivery.StatusSent:
 				emitTerminal(w.metrics, terminalSent, anchorAt, settledAt)
+				// Provider evidence settled the row under a terminal write that
+				// expected to fail it. The attempt that dialed still needs
+				// settling — ramp progress and the correlation binding — and
+				// only the operation, not this call's attempt, names it.
+				w.settleFromEvidence(ctx, messageID, "")
 			}
 			return nil
 		}

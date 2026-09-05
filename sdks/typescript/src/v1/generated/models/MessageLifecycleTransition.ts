@@ -157,6 +157,8 @@ export enum MessageLifecycleTransitionReasonCodeEnum {
     SubmissionProviderRejected = 'submission.provider_rejected',
     SubmissionLocalRetriesExhausted = 'submission.local_retries_exhausted',
     SubmissionCancelled = 'submission.cancelled',
+    SubmissionPolicyBudgetExpired = 'submission.policy_budget_expired',
+    SubmissionSendingSetupExpired = 'submission.sending_setup_expired',
     DeliveryRecipientServerAccepted = 'delivery.recipient_server_accepted',
     DeliveryTemporaryDelay = 'delivery.temporary_delay',
     DeliveryPermanentBounce = 'delivery.permanent_bounce',

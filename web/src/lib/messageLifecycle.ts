@@ -19,6 +19,7 @@ export const MESSAGE_LIFECYCLE_REASON_CODES = [
   "submission.upstream_accepted", "submission.local_loopback_accepted",
   "submission.temporary_failure", "submission.provider_rejected",
   "submission.local_retries_exhausted", "submission.cancelled",
+  "submission.policy_budget_expired", "submission.sending_setup_expired",
   "delivery.recipient_server_accepted", "delivery.temporary_delay",
   "delivery.permanent_bounce", "delivery.transient_bounce",
   "delivery.undetermined_bounce", "complaint.recipient_reported",

@@ -39,8 +39,24 @@ func TestSendingPolicyWiring(t *testing.T) {
 	if composed.submitter == nil {
 		t.Fatal("no authorized submitter composed")
 	}
+	if got := composed.submitter.SESConfigurationSet(); got != "e2a-delivery-test" {
+		t.Fatalf("submitter configuration set = %q, want the deployment's — delivery feedback must stay on", got)
+	}
 	if composed.jobs.Gate() != composed.gate {
 		t.Fatal("the jobs bundle does not hold the composed gate")
+	}
+	// The worker RegisterJobs registers is what runs in production; it, not
+	// the bundle, must carry the gate and the legacy resolver. Without the
+	// resolver every job in flight at cutover would fail closed.
+	worker := composed.jobs.SendWorker()
+	if worker.Gate() != composed.gate {
+		t.Fatal("the registered send worker does not hold the composed gate")
+	}
+	if !worker.HasOperationResolver() {
+		t.Fatal("the registered send worker has no legacy operation resolver")
+	}
+	if composed.jobs.TerminalReconcileWorker() == nil {
+		t.Fatal("no terminal reconciler composed")
 	}
 	if got := fmt.Sprintf("%T", composed.jobs.Deliverer()); !strings.HasSuffix(got, "agent.outboundDeliverer") {
 		t.Fatalf("worker deliverer is %s, want the ProviderSubmitter-backed agent.outboundDeliverer", got)

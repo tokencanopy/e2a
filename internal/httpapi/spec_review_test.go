@@ -263,6 +263,8 @@ func assertMessageLifecycleContractSchema(t *testing.T, doc map[string]any) {
 			"suppression.recipient_blocked", "suppression.hard_bounce_applied", "suppression.complaint_applied",
 			"queue.inbound_processing", "queue.outbound_submission",
 			"submission.upstream_accepted", "submission.local_loopback_accepted", "submission.temporary_failure", "submission.provider_rejected", "submission.local_retries_exhausted", "submission.cancelled",
+			"submission.policy_budget_expired",
+			"submission.sending_setup_expired",
 			"delivery.recipient_server_accepted", "delivery.temporary_delay", "delivery.permanent_bounce", "delivery.transient_bounce", "delivery.undetermined_bounce",
 			"complaint.recipient_reported",
 		},
