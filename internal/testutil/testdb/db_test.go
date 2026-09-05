@@ -1,4 +1,4 @@
-package testutil
+package testdb
 
 import (
 	"context"
@@ -352,8 +352,8 @@ func TestTestDBURLIsUniquePerWorkspaceAndPackage(t *testing.T) {
 	if !strings.Contains(name, "_ws") {
 		t.Errorf("dbname = %q, want a _ws<hash> workspace component", name)
 	}
-	if !strings.HasSuffix(name, "_pkg_testutil") {
-		t.Errorf("dbname = %q, want the _pkg_testutil suffix retained", name)
+	if !strings.HasSuffix(name, "_pkg_testdb") {
+		t.Errorf("dbname = %q, want the _pkg_testdb suffix retained", name)
 	}
 	if ws := workspaceSuffix(moduleRootDir()); ws == "" || !strings.Contains(name, ws) {
 		t.Errorf("dbname = %q, want it to contain this checkout's suffix %q", name, ws)
@@ -396,14 +396,14 @@ func TestTestDBURLDerivesPerPackageDatabase(t *testing.T) {
 	// appends a per-package suffix to the base database name so packages
 	// running in parallel (-p N) cannot truncate each other's rows — the
 	// harness truncates between tests, which made a shared DB the
-	// documented cross-package flake source. This binary is testutil.test,
-	// so the derived name is <base>_pkg_testutil.
+	// documented cross-package flake source. This binary is testdb.test,
+	// so the derived name is <base>_pkg_testdb.
 	u, err := url.Parse(TestDBURL())
 	if err != nil {
 		t.Fatalf("parse TestDBURL: %v", err)
 	}
-	if got := strings.TrimPrefix(u.Path, "/"); !strings.HasSuffix(got, "_pkg_testutil") {
-		t.Errorf("TestDBURL dbname = %q, want *_pkg_testutil suffix", got)
+	if got := strings.TrimPrefix(u.Path, "/"); !strings.HasSuffix(got, "_pkg_testdb") {
+		t.Errorf("TestDBURL dbname = %q, want *_pkg_testdb suffix", got)
 	}
 
 	// E2A_TEST_DB_SHARED=1 restores the verbatim single-DB behavior (escape
@@ -469,7 +469,7 @@ func TestTestDBURLDerivationIsIdempotentAndURLOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if got := strings.TrimPrefix(u.Path, "/"); strings.Contains(got, "_pkg_testutil_pkg_") {
+	if got := strings.TrimPrefix(u.Path, "/"); strings.Contains(got, "_pkg_testdb_pkg_") {
 		t.Errorf("double-derived dbname %q", got)
 	}
 

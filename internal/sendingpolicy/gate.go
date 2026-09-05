@@ -720,8 +720,12 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	}
 	// A required header with no name to put in it is not a header. The adapter
 	// would have to either omit it or send an empty value, and both defeat the
-	// isolation the header exists for, so the send waits for a real tenant.
-	if st.tenantMode == TenantModeRequired && strings.TrimSpace(st.tenantName) == "" {
+	// isolation the header exists for, so the send waits for a real tenant. A
+	// name that cannot be a header VALUE — control characters, whitespace — is
+	// refused here for the same reason: the adapter would fail closed on it
+	// anyway, but silently and unretryably, whereas a hold with this reason is
+	// something an operator can see and repair.
+	if st.tenantMode == TenantModeRequired && !validTenantName(st.tenantName) {
 		return st, holdDecision(ReasonTenantUnnamed, time.Time{}), nil
 	}
 
@@ -791,6 +795,20 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		return st, Decision{}, err
 	}
 	return st, allowDecision(), nil
+}
+
+// validTenantName reports whether a tenant name can travel as an SMTP header
+// value: non-empty, printable ASCII, no whitespace.
+func validTenantName(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, r := range name {
+		if r <= ' ' || r > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 // tenantModeFor resolves the tenant-header mode for one account.
@@ -1506,6 +1524,34 @@ func (m *Module) RedeemProviderCall(ctx context.Context, auth ProviderAuthorizat
 		return m.invalidate(ctx, tx, auth.attempt)
 	}
 
+	// Re-prove the abuse pause. ConsumeAttempt linearized it under the
+	// account-control lock, but that transaction has committed and a pause
+	// can land in the gap before the socket opens; a pause is the one control
+	// whose whole point is "stop now". The read is deliberately UNLOCKED: the
+	// account-control key precedes the operation key in the normative order
+	// and this transaction already holds the operation, so locking it here
+	// would invert the order. A committed pause is visible to a plain read
+	// because the transaction runs READ COMMITTED (each statement sees a
+	// fresh snapshot; under REPEATABLE READ this re-check would silently
+	// read the snapshot taken at effectivePolicy and prove nothing), and the
+	// check can only refuse, never widen. The window that remains runs from
+	// this read to the dial — the reservation update, commit, and return.
+	//
+	// Protection notices are exempt: the notice telling an account it was
+	// paused is SOURCED from that paused account, and it must go out.
+	if op.Purpose.isCustomer() && op.SourceAccountRef != nil {
+		var state string
+		err := tx.QueryRow(ctx,
+			`SELECT state FROM account_sending_controls WHERE user_id = $1`, *op.SourceAccountRef,
+		).Scan(&state)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("sendingpolicy: read account control: %w", err)
+		}
+		if state == "paused" {
+			return m.invalidate(ctx, tx, auth.attempt)
+		}
+	}
+
 	stored, err := lockReservation(ctx, tx, auth.attempt.operationID, auth.attempt.attempt)
 	if err != nil {
 		return err
@@ -1788,14 +1834,74 @@ func (m *Module) SettleProvider(ctx context.Context, settlement ProviderSettleme
 	// attempt that was authorized to reach the provider. Accepting a reserved
 	// or released attempt would advance ramp progress for a send that never
 	// happened.
-	if stored.State != "confirmed" {
+	if stored.State != "confirmed" || stored.CallState != "started" {
+		// `confirmed` says capacity was charged; `started` says the token was
+		// redeemed and the socket opened. Only the second proves the provider
+		// could have seen the message, and a provider id bound to an attempt
+		// that never dialed is a ledger claim about a send that did not
+		// happen.
 		return ErrAttemptStale
 	}
 
+	if err := bindProviderMessageID(ctx, tx, settlement); err != nil {
+		return err
+	}
+	// Ramp keys come last in the normative order, after the correlation row,
+	// which is keyed by this operation and already held under its lock.
 	if op.Purpose == PurposeCustomerMessage {
 		if err := m.rampSettle(ctx, tx, op.OperationID, settlement.Outcome); err != nil {
 			return err
 		}
 	}
 	return m.commit(ctx, tx, "settle")
+}
+
+// bindProviderMessageID records the provider's id on the attempt's feedback
+// correlation, exactly once.
+//
+// It runs after the operation and reservation locks, which is the only place
+// the correlation row is ever written after its insert, so no additional key
+// joins the normative order. Replaying the same id is a no-op — the
+// synchronous success branch and the delayed feedback finalizer both settle
+// the same attempt — while a different id is refused outright. A correlation
+// that has already aged out of retention is left alone: there is nothing to
+// attribute feedback to any more, and failing a late settlement over it would
+// only make the caller retry forever.
+func bindProviderMessageID(ctx context.Context, tx pgx.Tx, settlement ProviderSettlement) error {
+	id := NormalizeProviderMessageID(settlement.ProviderMessageID)
+	if id == "" {
+		return nil
+	}
+	if settlement.Outcome != SettlementProviderAccepted {
+		return fmt.Errorf("sendingpolicy: a %q settlement cannot carry a provider message id", settlement.Outcome)
+	}
+	var bound *string
+	err := tx.QueryRow(ctx, `
+		SELECT provider_message_id
+		  FROM sending_feedback_correlations
+		 WHERE operation_id = $1 AND submission_attempt = $2
+		   FOR UPDATE`,
+		settlement.Attempt.operationID, settlement.Attempt.attempt,
+	).Scan(&bound)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sendingpolicy: lock correlation: %w", err)
+	}
+	if bound != nil {
+		if NormalizeProviderMessageID(*bound) == id {
+			return nil
+		}
+		return ErrProviderMessageIDConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE sending_feedback_correlations
+		   SET provider_message_id = $3
+		 WHERE operation_id = $1 AND submission_attempt = $2`,
+		settlement.Attempt.operationID, settlement.Attempt.attempt, id,
+	); err != nil {
+		return fmt.Errorf("sendingpolicy: bind provider message id: %w", err)
+	}
+	return nil
 }

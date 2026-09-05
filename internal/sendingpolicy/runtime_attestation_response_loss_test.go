@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/tokencanopy/e2a/internal/testutil"
+	"github.com/tokencanopy/e2a/internal/testutil/testdb"
 )
 
 var errSyntheticCommitResponseLoss = errors.New("synthetic commit response loss")
@@ -19,7 +19,7 @@ func responseLossDigest(hexDigit string) string {
 
 func TestRuntimeAttestationCommitResponseLossRereadsExactSuccess(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.TestDB(t)
+	pool := testdb.TestDB(t)
 	m := NewModule(pool, Secrets{})
 	current, err := m.InspectAttestation(ctx)
 	if err != nil {
@@ -58,7 +58,7 @@ func TestRuntimeAttestationCommitResponseLossRereadsExactSuccess(t *testing.T) {
 func TestRuntimeAttestationCommitResponseLossRereadsAfterCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	pool := testutil.TestDB(t)
+	pool := testdb.TestDB(t)
 	m := NewModule(pool, Secrets{})
 	current, err := m.InspectAttestation(ctx)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestRuntimeAttestationCommitResponseLossRereadsAfterCallerCancellation(t *t
 
 func TestRuntimeAttestationCommitFailureClassifiesUnchangedState(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.TestDB(t)
+	pool := testdb.TestDB(t)
 	m := NewModule(pool, Secrets{})
 	current, err := m.InspectAttestation(ctx)
 	if err != nil {
@@ -139,7 +139,7 @@ func TestRuntimeAttestationCommitFailureClassifiesUnchangedState(t *testing.T) {
 
 func TestRuntimeAttestationCommitResponseLossClassifiesHigherRevisionStale(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.TestDB(t)
+	pool := testdb.TestDB(t)
 	m := NewModule(pool, Secrets{})
 	other := NewModule(pool, Secrets{})
 	current, err := m.InspectAttestation(ctx)
@@ -199,7 +199,7 @@ func TestRuntimeAttestationConcurrentAbortFenceBothLockOrders(t *testing.T) {
 
 	runRace := func(t *testing.T, firstIsFence bool) {
 		t.Helper()
-		pool := testutil.TestDB(t)
+		pool := testdb.TestDB(t)
 		first := NewModule(pool, Secrets{})
 		second := NewModule(pool, Secrets{})
 		prior, err := first.InspectAttestation(ctx)

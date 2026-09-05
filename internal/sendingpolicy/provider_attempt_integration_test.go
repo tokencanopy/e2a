@@ -899,8 +899,14 @@ func TestSettleProviderValidatesAndIsIdempotent(t *testing.T) {
 	user := f.user("standard")
 	agent := f.agent(user)
 	_, attempt := f.prepareAndReserve(g, agent, 2)
-	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
+	_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || auth == nil {
 		t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+	// Settlement reports what the provider did, so the attempt must have
+	// reached the provider: redeem, as the adapter does before it dials.
+	if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+		t.Fatalf("redeem: %v", err)
 	}
 
 	for i := 0; i < 2; i++ {
@@ -1527,8 +1533,13 @@ func TestSettlementRejectsAnAttemptThatWasNeverAuthorized(t *testing.T) {
 	}
 
 	// Authorized: now it settles.
-	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
+	_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || auth == nil {
 		t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+	// Authorized is not enough: settlement needs the socket to have opened.
+	if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+		t.Fatalf("redeem: %v", err)
 	}
 	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
 		Attempt: attempt, Outcome: sendingpolicy.SettlementProviderAccepted,

@@ -19,6 +19,15 @@ import (
 
 var smtpRetryBackoffs = []time.Duration{1 * time.Second, 5 * time.Second, 15 * time.Second}
 
+// ErrProviderAcceptanceUnknown marks a failure that happened AFTER the whole
+// message body was handed to the provider: the terminating dot was written and
+// the 250 never arrived. The provider may have accepted the message. No
+// classifier can call this permanent or transient, and a caller that retries
+// it as if nothing was sent will deliver the message twice. The sending
+// protection seam leaves such an attempt unsettled; delivery feedback carrying
+// the attempt header is the only authoritative answer.
+var ErrProviderAcceptanceUnknown = errors.New("outbound smtp: message body delivered, provider acceptance unknown")
+
 type SMTPRelay struct {
 	cfg *config.OutboundSMTPConfig
 }
@@ -178,16 +187,26 @@ func (r *SMTPRelay) sendOnceContext(ctx context.Context, envelopeFrom string, re
 		if err == nil {
 			return
 		}
-		if ctx.Err() != nil {
+		// Whether the body had already been handed over must survive the
+		// remaps below: a cancellation or deadline is the LIKELIEST way to
+		// lose the 250, and the caller's contract for that shape is "maybe
+		// sent", not "not sent".
+		unknown := errors.Is(err, ErrProviderAcceptanceUnknown)
+		switch {
+		case ctx.Err() != nil:
 			err = ctx.Err()
-			return
+		default:
+			// The conn deadline is set to the ctx deadline below, so the net
+			// poller's timer races the context's own timer to the same
+			// instant. When the poller wins, the I/O error surfaces while
+			// ctx.Err() is still nil — map it to the deadline error the
+			// caller contracted for.
+			if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) && errors.Is(err, os.ErrDeadlineExceeded) {
+				err = context.DeadlineExceeded
+			}
 		}
-		// The conn deadline is set to the ctx deadline below, so the net
-		// poller's timer races the context's own timer to the same instant.
-		// When the poller wins, the I/O error surfaces while ctx.Err() is
-		// still nil — map it to the deadline error the caller contracted for.
-		if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) && errors.Is(err, os.ErrDeadlineExceeded) {
-			err = context.DeadlineExceeded
+		if unknown && !errors.Is(err, ErrProviderAcceptanceUnknown) {
+			err = errors.Join(ErrProviderAcceptanceUnknown, err)
 		}
 	}()
 
@@ -289,6 +308,13 @@ func (r *SMTPRelay) sendOnceContext(ctx context.Context, envelopeFrom string, re
 	// 250 response is waiting in the buffer. Read it directly.
 	_, msg, err := text.ReadResponse(250)
 	if err != nil {
+		// A coded reply here is the provider's definite answer to the whole
+		// message (SES's post-DATA content rejection is an ordinary 554) and
+		// classifies like any other. Only a reply that never came is
+		// ambiguous, and only that carries the marker.
+		if _, coded := smtpCode(err); !coded {
+			err = errors.Join(ErrProviderAcceptanceUnknown, err)
+		}
 		return "", fmt.Errorf("data final: %w", err)
 	}
 
