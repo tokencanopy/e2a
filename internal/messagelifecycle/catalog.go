@@ -73,13 +73,13 @@ const (
 	// ReasonSubmissionSendingSetupExpired means the account's provider-side
 	// sending setup (SES tenant readiness) did not complete within the
 	// 72-hour setup deadline.
-	ReasonSubmissionSendingSetupExpired ReasonCode = "submission.sending_setup_expired"
-	ReasonDeliveryRecipientServerAccepted   ReasonCode = "delivery.recipient_server_accepted"
-	ReasonDeliveryTemporaryDelay            ReasonCode = "delivery.temporary_delay"
-	ReasonDeliveryPermanentBounce           ReasonCode = "delivery.permanent_bounce"
-	ReasonDeliveryTransientBounce           ReasonCode = "delivery.transient_bounce"
-	ReasonDeliveryUndeterminedBounce        ReasonCode = "delivery.undetermined_bounce"
-	ReasonComplaintRecipientReported        ReasonCode = "complaint.recipient_reported"
+	ReasonSubmissionSendingSetupExpired   ReasonCode = "submission.sending_setup_expired"
+	ReasonDeliveryRecipientServerAccepted ReasonCode = "delivery.recipient_server_accepted"
+	ReasonDeliveryTemporaryDelay          ReasonCode = "delivery.temporary_delay"
+	ReasonDeliveryPermanentBounce         ReasonCode = "delivery.permanent_bounce"
+	ReasonDeliveryTransientBounce         ReasonCode = "delivery.transient_bounce"
+	ReasonDeliveryUndeterminedBounce      ReasonCode = "delivery.undetermined_bounce"
+	ReasonComplaintRecipientReported      ReasonCode = "complaint.recipient_reported"
 )
 
 // Definition is the fixed meaning of a reason code.
