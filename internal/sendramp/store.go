@@ -43,6 +43,14 @@ type Decision struct {
 	DailyLimit int
 	UsedToday  int
 	RetryAt    time.Time
+	// IdentityUnverified reports the one refusal that is not about volume: the
+	// domain has no verified SENDING identity, so there is no proven scope for
+	// the ramp to charge and no daily allowance the caller could wait out. It
+	// rides the decision rather than an error because it is an ordinary answer
+	// about this send, and because the retry advice it deserves differs from a
+	// capacity hold's: what clears it is the customer finishing verification,
+	// not the next UTC midnight.
+	IdentityUnverified bool
 }
 
 type Snapshot struct {
@@ -119,20 +127,34 @@ func (s *Store) Snapshot(ctx context.Context, userID, domain string, now time.Ti
 	return snap, err
 }
 
+// Reserve is the pool-owning wrapper. The logic lives in ReserveTx so the
+// sending-protection gate can compose the ramp into its own transaction
+// without a second implementation drifting from this one.
 func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, error) {
-	if req.MessageID == "" || req.UserID == "" || req.Domain == "" || req.Units < 1 {
-		return Decision{}, permanentf("sendramp: invalid reservation request")
-	}
-	day := utcDay(req.Day)
-	schedule := NewSchedule(req.Schedule.StartDaily, req.Schedule.TargetDaily, req.Schedule.RampDays)
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return Decision{}, err
 	}
 	defer tx.Rollback(ctx)
+	d, err := ReserveTx(ctx, tx, req)
+	if err != nil {
+		return Decision{}, err
+	}
+	return commitDecision(ctx, tx, d)
+}
+
+// ReserveTx acquires ramp capacity for one message inside a caller's
+// transaction, in the normative suborder: domain identity, registrable-domain
+// scope, message reservation, UTC day counter.
+func ReserveTx(ctx context.Context, tx pgx.Tx, req ReserveRequest) (Decision, error) {
+	if req.MessageID == "" || req.UserID == "" || req.Domain == "" || req.Units < 1 {
+		return Decision{}, permanentf("sendramp: invalid reservation request")
+	}
+	day := utcDay(req.Day)
+	schedule := NewSchedule(req.Schedule.StartDaily, req.Schedule.TargetDaily, req.Schedule.RampDays)
 
 	var owner, sendingStatus, domainStatus string
-	err = tx.QueryRow(ctx, `SELECT COALESCE(user_id,''), sending_status, sending_ramp_status FROM domains WHERE domain=$1 FOR UPDATE`, req.Domain).Scan(&owner, &sendingStatus, &domainStatus)
+	err := tx.QueryRow(ctx, `SELECT COALESCE(user_id,''), sending_status, sending_ramp_status FROM domains WHERE domain=$1 FOR UPDATE`, req.Domain).Scan(&owner, &sendingStatus, &domainStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Decision{}, permanentf("sendramp: domain not found")
 	}
@@ -142,8 +164,31 @@ func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, erro
 	if owner != req.UserID {
 		return Decision{}, permanentf("sendramp: domain owner mismatch")
 	}
-	if domainStatus == StatusExempt || domainStatus == StatusComplete || sendingStatus != "verified" {
-		return commitDecision(ctx, tx, Decision{Allowed: true, Status: domainStatus})
+	// The two legacy states mean "this domain already earned its volume", and
+	// they say so about the DOMAIN rather than about today's SES verification
+	// record — a grandfathered or completed sender is not re-throttled because
+	// its identity is being re-verified.
+	if domainStatus == StatusExempt || domainStatus == StatusComplete {
+		return decisionOnly(Decision{Allowed: true, Status: domainStatus})
+	}
+	// Everything else with an unverified sending identity is REFUSED, not
+	// passed through.
+	//
+	// Pass-through looks harmless — no verified identity, no custom-domain
+	// sending, nothing to ramp — but the two facts it joins are read at
+	// different times. A message's composed From and its reputation class are
+	// frozen when it is accepted; the agent's registered domain is not.
+	// Verifying a child subdomain rebinds an account's agents onto it, that
+	// child's SES identity stays unverified while its DKIM records are never
+	// published, and the ramp resolves the registered domain live. An accepted
+	// backlog then goes out under the frozen custom-domain identity with no
+	// daily cap at all, and the same unverified state makes the scope look
+	// established, so it does not even draw on the probation pool on the way
+	// out. Holding is the only answer that is safe in both readings: if the
+	// identity is genuinely gone the mail should not claim it, and if it is
+	// merely mid-verification the customer finishing DNS clears the hold.
+	if sendingStatus != "verified" {
+		return decisionOnly(Decision{Allowed: false, Status: domainStatus, IdentityUnverified: true})
 	}
 
 	scope := registrableDomain(req.Domain)
@@ -169,7 +214,7 @@ func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, erro
 		if _, err := tx.Exec(ctx, `UPDATE domains SET sending_ramp_status='complete' WHERE domain=$1`, req.Domain); err != nil {
 			return Decision{}, err
 		}
-		return commitDecision(ctx, tx, Decision{Allowed: true, Status: StatusComplete})
+		return decisionOnly(Decision{Allowed: true, Status: StatusComplete})
 	}
 	if activeDays >= schedule.RampDays && lastQualifiedDay != nil && utcDay(*lastQualifiedDay).Before(day) {
 		if _, err := tx.Exec(ctx, `UPDATE sending_ramp_scopes SET status='complete',completed_at=now() WHERE user_id=$1 AND domain=$2`, req.UserID, scope); err != nil {
@@ -178,7 +223,7 @@ func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, erro
 		if _, err := tx.Exec(ctx, `UPDATE domains SET sending_ramp_status='complete' WHERE user_id=$1 AND domain=$2`, req.UserID, req.Domain); err != nil {
 			return Decision{}, err
 		}
-		return commitDecision(ctx, tx, Decision{Allowed: true, Status: StatusComplete})
+		return decisionOnly(Decision{Allowed: true, Status: StatusComplete})
 	}
 
 	var priorDay time.Time
@@ -187,7 +232,7 @@ func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, erro
 	err = tx.QueryRow(ctx, `SELECT day,units,state FROM sending_ramp_reservations WHERE message_id=$1 FOR UPDATE`, req.MessageID).Scan(&priorDay, &priorUnits, &priorState)
 	if err == nil {
 		if priorState == "confirmed" {
-			return commitDecision(ctx, tx, Decision{Allowed: true, Status: StatusRamping})
+			return decisionOnly(Decision{Allowed: true, Status: StatusRamping})
 		}
 		if priorState == "released" {
 			return Decision{}, permanentf("sendramp: reservation already released")
@@ -200,7 +245,7 @@ func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, erro
 			if err := tx.QueryRow(ctx, `SELECT reserved_count,daily_limit FROM domain_send_counters WHERE user_id=$1 AND domain=$2 AND day=$3`, req.UserID, scope, day).Scan(&used, &limit); err != nil {
 				return Decision{}, err
 			}
-			return commitDecision(ctx, tx, Decision{Allowed: true, Status: StatusRamping, DailyLimit: limit, UsedToday: used})
+			return decisionOnly(Decision{Allowed: true, Status: StatusRamping, DailyLimit: limit, UsedToday: used})
 		}
 		if _, err := tx.Exec(ctx, `UPDATE domain_send_counters SET reserved_count=reserved_count-$4 WHERE user_id=$1 AND domain=$2 AND day=$3 AND reserved_count >= $4`, req.UserID, scope, utcDay(priorDay), priorUnits); err != nil {
 			return Decision{}, err
@@ -227,7 +272,7 @@ func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, erro
 		} else if err != nil {
 			return Decision{}, err
 		}
-		return commitDecision(ctx, tx, Decision{Allowed: false, Status: StatusRamping, DailyLimit: appliedLimit, UsedToday: used, RetryAt: day.Add(24 * time.Hour)})
+		return decisionOnly(Decision{Allowed: false, Status: StatusRamping, DailyLimit: appliedLimit, UsedToday: used, RetryAt: day.Add(24 * time.Hour)})
 	}
 	if err != nil {
 		return Decision{}, err
@@ -235,92 +280,25 @@ func (s *Store) Reserve(ctx context.Context, req ReserveRequest) (Decision, erro
 	if _, err := tx.Exec(ctx, `INSERT INTO sending_ramp_reservations (message_id,day,user_id,domain,units) VALUES ($1,$2,$3,$4,$5)`, req.MessageID, day, req.UserID, scope, req.Units); err != nil {
 		return Decision{}, err
 	}
-	return commitDecision(ctx, tx, Decision{Allowed: true, Status: StatusRamping, DailyLimit: appliedLimit, UsedToday: used})
+	return decisionOnly(Decision{Allowed: true, Status: StatusRamping, DailyLimit: appliedLimit, UsedToday: used})
 }
 
 func (s *Store) Confirm(ctx context.Context, messageID string) error {
-	if messageID == "" {
-		return permanentf("sendramp: empty message id")
-	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	var day time.Time
-	var userID, domain, state string
-	var units int
-	err = tx.QueryRow(ctx, `SELECT day,user_id,domain,units,state FROM sending_ramp_reservations WHERE message_id=$1 FOR UPDATE`, messageID).Scan(&day, &userID, &domain, &units, &state)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return tx.Commit(ctx)
-	}
-	if err != nil {
-		return err
-	}
-	if state == "confirmed" {
-		return tx.Commit(ctx)
-	}
-	var confirmed, limit int
-	var query string
-	switch state {
-	case "reserved":
-		query = `UPDATE domain_send_counters
-		            SET confirmed_count=confirmed_count+$4
-		          WHERE user_id=$1 AND domain=$2 AND day=$3
-		      RETURNING confirmed_count,daily_limit`
-	case "released":
-		// A locally inferred failure can be corrected by later authoritative
-		// provider feedback. Release returned its units to the daily counter, so
-		// confirming that real send must restore consumed as well as accepted
-		// volume. The reservation row lock makes this transition idempotent.
-		query = `UPDATE domain_send_counters
-		            SET reserved_count=reserved_count+$4,
-		                confirmed_count=confirmed_count+$4
-		          WHERE user_id=$1 AND domain=$2 AND day=$3
-		      RETURNING confirmed_count,daily_limit`
-	default:
-		return permanentf("sendramp: invalid reservation state %q", state)
-	}
-	if err := tx.QueryRow(ctx, query, userID, domain, utcDay(day), units).Scan(&confirmed, &limit); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE sending_ramp_reservations SET state='confirmed',updated_at=now() WHERE message_id=$1`, messageID); err != nil {
-		return err
-	}
-	if Qualifies(confirmed, limit) {
-		if _, err := tx.Exec(ctx, `UPDATE sending_ramp_scopes SET active_days=active_days+1,last_qualified_day=$3 WHERE user_id=$1 AND domain=$2 AND (last_qualified_day IS NULL OR last_qualified_day < $3)`, userID, domain, utcDay(day)); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
+	return s.inTx(ctx, func(tx pgx.Tx) error { return ConfirmTx(ctx, tx, messageID) })
 }
 
 func (s *Store) Release(ctx context.Context, messageID string) error {
-	if messageID == "" {
-		return permanentf("sendramp: empty message id")
-	}
+	return s.inTx(ctx, func(tx pgx.Tx) error { return ReleaseTx(ctx, tx, messageID) })
+}
+
+// inTx runs one of the tx-aware helpers in its own transaction.
+func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var day time.Time
-	var userID, domain, state string
-	var units int
-	err = tx.QueryRow(ctx, `SELECT day,user_id,domain,units,state FROM sending_ramp_reservations WHERE message_id=$1 FOR UPDATE`, messageID).Scan(&day, &userID, &domain, &units, &state)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return tx.Commit(ctx)
-	}
-	if err != nil {
-		return err
-	}
-	if state != "reserved" {
-		return tx.Commit(ctx)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE domain_send_counters SET reserved_count=reserved_count-$4 WHERE user_id=$1 AND domain=$2 AND day=$3 AND reserved_count >= $4`, userID, domain, utcDay(day), units); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE sending_ramp_reservations SET state='released',updated_at=now() WHERE message_id=$1`, messageID); err != nil {
+	if err := fn(tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -353,6 +331,10 @@ func commitDecision(ctx context.Context, tx pgx.Tx, d Decision) (Decision, error
 	}
 	return d, nil
 }
+
+// decisionOnly is the in-transaction counterpart of commitDecision: the caller
+// owns the transaction, so returning is all there is to do.
+func decisionOnly(d Decision) (Decision, error) { return d, nil }
 
 func utcDay(t time.Time) time.Time {
 	if t.IsZero() {
