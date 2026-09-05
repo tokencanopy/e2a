@@ -366,7 +366,9 @@ func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[WebhookN
 			return *job.Args.OperationRef, nil
 		}
 		if sendingpolicy.IsWebhookHealthOperationID(stored) {
-			// A derived id for another webhook or a superseded episode.
+			// A derived id for another webhook or a superseded episode. (Any
+			// other shape is re-derived from this job's own source below, so no
+			// stored id can redirect attribution.)
 			return sendingpolicy.OperationRef{}, errOperationMismatch
 		}
 		// A pre-derivation reference (migration 113's op_<md5>, or the first

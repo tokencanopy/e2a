@@ -272,14 +272,20 @@ func TestReconcileLegacySendingJobsReKeysPreDerivationReferences(t *testing.T) {
 	md5Hitl := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1,"id":"op_0123456789abcdef0123456789abcdef"}}`)
 	md5Wh := insertLegacyJob(t, pool, "webhook_notify", `{"webhook_id":"`+wh.ID+`","kind":"warning","operation_ref":{"v":1,"id":"op_fedcba9876543210fedcba9876543210"}}`)
 	conforming := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1,"id":"`+sendingpolicy.HITLNotificationOperationID(msg.ID)+`"}}`)
+	// A malformed reference (no id) must be scanned and re-keyed, not hidden
+	// by three-valued logic in the scan predicate.
+	noID := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1}}`)
 	send := insertLegacyJob(t, pool, "outbound_send", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1,"id":"`+msg.ID+`"}}`)
 
 	var out bytes.Buffer
 	if err := runReconcileLegacySendingJobs(ctx, pool, gate, &out); err != nil {
 		t.Fatalf("reconcile: %v\n%s", err, out.String())
 	}
-	if !strings.Contains(out.String(), "scanned:   2") || !strings.Contains(out.String(), "stamped:   2") {
-		t.Fatalf("want the two md5-keyed jobs scanned and re-keyed:\n%s", out.String())
+	if !strings.Contains(out.String(), "scanned:   3") || !strings.Contains(out.String(), "stamped:   3") {
+		t.Fatalf("want the two md5-keyed jobs and the id-less one scanned and re-keyed:\n%s", out.String())
+	}
+	if _, op := legacyJobState(t, pool, noID); op != sendingpolicy.HITLNotificationOperationID(msg.ID) {
+		t.Errorf("id-less hitl job op = %q, want the derived id", op)
 	}
 	if _, op := legacyJobState(t, pool, md5Hitl); op != sendingpolicy.HITLNotificationOperationID(msg.ID) {
 		t.Errorf("hitl job op = %q, want the derived id", op)

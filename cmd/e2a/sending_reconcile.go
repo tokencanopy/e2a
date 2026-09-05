@@ -44,13 +44,15 @@ var legacyReconcileStates = []string{
 // conformingReferenceSQL is true for a river_job row whose operation_ref
 // already has the shape its worker derives: the message id for a send, the
 // op_hitl_ / op_wh_ derivations for the two notice kinds.
-const conformingReferenceSQL = `(
+//
+// COALESCE keeps the predicate two-valued: a reference with no id (or a JSON
+// null) would otherwise make the LIKE NULL and drop the row from a NOT scan.
+const conformingReferenceSQL = `COALESCE(
 	(args ? 'operation_ref') AND (
 		(kind = 'outbound_send')
 		OR (kind = 'hitl_notify' AND args->'operation_ref'->>'id' LIKE 'op\_hitl\_%')
 		OR (kind = 'webhook_notify' AND args->'operation_ref'->>'id' LIKE 'op\_wh\_%')
-	)
-)`
+	), false)`
 
 // legacyReconcileCounts is the operator-facing summary of one reconcile pass.
 type legacyReconcileCounts struct {
@@ -190,7 +192,11 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 	var cancelReason string
 	switch kind {
 	case outboundsend.OutboundSendArgs{}.Kind():
-		var args outboundsend.OutboundSendArgs
+		// Decode only the source fields: a malformed stored reference is
+		// exactly what this command replaces, so it must not fail decoding.
+		var args struct {
+			MessageID string `json:"message_id"`
+		}
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return 0, fmt.Errorf("decode args: %w", err)
 		}
@@ -214,7 +220,9 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 			ref = prepared
 		}
 	case hitlnotify.HITLNotifyArgs{}.Kind():
-		var args hitlnotify.HITLNotifyArgs
+		var args struct {
+			MessageID string `json:"message_id"`
+		}
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return 0, fmt.Errorf("decode args: %w", err)
 		}
@@ -223,7 +231,10 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 			return 0, err
 		}
 	case webhooknotify.WebhookNotifyArgs{}.Kind():
-		var args webhooknotify.WebhookNotifyArgs
+		var args struct {
+			WebhookID  string `json:"webhook_id"`
+			NotifyKind string `json:"kind"`
+		}
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return 0, fmt.Errorf("decode args: %w", err)
 		}

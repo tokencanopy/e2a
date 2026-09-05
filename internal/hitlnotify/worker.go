@@ -301,6 +301,9 @@ func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[HITLNoti
 		}
 		if sendingpolicy.IsHITLNotificationOperationID(stored) {
 			// A derived id for a different message: foreign, never authorize.
+			// (Any other shape, a wrong-kind derivation included, is re-derived
+			// from this job's own source below, so no stored id can redirect
+			// attribution.)
 			return sendingpolicy.OperationRef{}, errOperationMismatch
 		}
 		// A pre-derivation reference — migration 113 stamped adopted jobs
