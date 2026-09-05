@@ -104,6 +104,15 @@ export const posts: Post[] = [
     author: "e2a",
     readingMinutes: 3,
   },
+  {
+    slug: "inbox-is-transport",
+    title: "Your agent's inbox is storage, not transport",
+    description:
+      "An agent that polls its inbox every 30 minutes is checking a PO box. Inbound mail should push to the agent wherever it runs - signed webhooks, WebSocket with no public URL, REST polling, and MCP - without a deployment project first.",
+    date: "2026-09-05",
+    author: "e2a",
+    readingMinutes: 3,
+  },
 ];
 
 export function getPost(slug: string): Post | undefined {
