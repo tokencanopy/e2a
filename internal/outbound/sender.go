@@ -299,54 +299,6 @@ type ComposeResult struct {
 	To, CC, BCC  []string
 }
 
-// Send normalizes recipients, composes, and sends an email via SMTP relay
-// (the historical retrying submit). Returns a ValidationError for caller errors
-// (bad addresses, no visible recipients) and a plain error for transport failures.
-func (s *Sender) Send(agent *identity.AgentIdentity, req SendRequest) (*SendResult, error) {
-	c, err := s.compose(agent, req)
-	if err != nil {
-		return nil, err
-	}
-	sesMessageID, err := s.smtpRelay.Send(c.envelopeFrom, c.envelope, c.wire)
-	if err != nil {
-		return nil, fmt.Errorf("smtp relay: %w", err)
-	}
-	return &SendResult{
-		MessageID: sesMessageID,
-		Method:    "smtp",
-		SentAs:    c.sentAs,
-		To:        c.to,
-		CC:        c.cc,
-		BCC:       c.bcc,
-		Raw:       c.sentBody,
-	}, nil
-}
-
-// SendOnce is Send with a SINGLE SMTP submit and no internal retry loop — the
-// entry point for a caller that owns its own retry envelope. Behaviorally
-// identical to Send except it calls smtpRelay.SendOnce. (The async pipeline does
-// NOT use this — it persists ComposeForAccept's bytes and the River worker
-// submits them via SubmitOnce — but it is the direct single-attempt analogue.)
-func (s *Sender) SendOnce(agent *identity.AgentIdentity, req SendRequest) (*SendResult, error) {
-	c, err := s.compose(agent, req)
-	if err != nil {
-		return nil, err
-	}
-	sesMessageID, err := s.smtpRelay.SendOnce(c.envelopeFrom, c.envelope, c.wire)
-	if err != nil {
-		return nil, fmt.Errorf("smtp relay: %w", err)
-	}
-	return &SendResult{
-		MessageID: sesMessageID,
-		Method:    "smtp",
-		SentAs:    c.sentAs,
-		To:        c.to,
-		CC:        c.cc,
-		BCC:       c.bcc,
-		Raw:       c.sentBody,
-	}, nil
-}
-
 // ComposeForAccept composes an outbound message for the async accept path WITHOUT
 // submitting it. The accept-tx persists the returned bytes + envelope so the River
 // worker owns the actual SMTP submit; it reuses Send's exact compose stage (same
@@ -366,35 +318,6 @@ func (s *Sender) ComposeForAccept(agent *identity.AgentIdentity, req SendRequest
 		CC:           c.cc,
 		BCC:          c.bcc,
 	}, nil
-}
-
-// SubmitOnce submits the persisted Sent-folder bytes in a SINGLE SMTP attempt
-// (River owns retries) and returns the provider Message-ID. It attaches two
-// wire-time headers post-DKIM (never in the signed header set):
-//
-//   - X-E2A-Message-ID (delivery.MessageIDHeader) — the stable e2a correlation
-//     marker (async-send-contract §3.1). SES overrides supplied Message-ID/Date
-//     headers, but echoes original headers back in its notifications
-//     (mail.headers, when "include original headers" is enabled on the
-//     configuration set), so this is the value that correlates feedback for
-//     the SMTP-accept↔mark-sent crash window. Unlike the config-set header SES
-//     does NOT strip it — recipients see it too; it is deliberately a stable
-//     public marker. Stamped at submit time (not compose time) so messages
-//     accepted before this header existed still carry it on re-drive.
-//
-//   - X-SES-CONFIGURATION-SET — re-attached because raw_message is stored
-//     WITHOUT it (SES strips it before delivery; the recipient/Sent-folder
-//     copy must not carry it).
-//
-// Keeping the header logic here (not in the worker) means Send and the async
-// path share one source of truth for what SES actually receives.
-func (s *Sender) SubmitOnce(messageID, envelopeFrom string, recipients []string, sentBody []byte) (string, error) {
-	return s.SubmitOnceContext(context.Background(), messageID, envelopeFrom, recipients, sentBody)
-}
-
-// SubmitOnceContext is SubmitOnce with caller cancellation propagated to SMTP.
-func (s *Sender) SubmitOnceContext(ctx context.Context, messageID, envelopeFrom string, recipients []string, sentBody []byte) (string, error) {
-	return s.smtpRelay.SendOnceContext(ctx, envelopeFrom, recipients, s.applySESConfigSet(applyCorrelationHeader(sentBody, messageID)))
 }
 
 // applyCorrelationHeader prepends the X-E2A-Message-ID marker. The id is

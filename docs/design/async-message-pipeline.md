@@ -292,3 +292,37 @@ respectively. An account pause has no clock and starts no hold, but a deadline
 already running keeps running. Terminal reconciliation is settlement-only: an
 evidence-settled row also settles the attempt that dialed
 (`Gate.SettleOperation`).
+
+## Addendum (2026-09-05): every provider call is an authorized attempt (B7)
+
+Slice B7 closed the seam B5 opened. `outbound.SMTPRelay` no longer exports a
+send method: the only way to open a socket to the provider is
+`ProviderSubmitter.SubmitOnce` with a `sendingpolicy.ProviderAuthorization`,
+and `internal/outbound`'s tracked-closure test parses every production file
+to keep it that way (no `net/smtp` import and no call to the relay's socket
+core outside the named exceptions). The paths that used to bypass the gate now
+cross it:
+
+- **HITL approval notifications** (`internal/hitlnotify`) and **webhook health
+  notices** (`internal/webhooknotify`): the enqueue prepares a
+  `customer_notification` operation in the same transaction as the source
+  row (`PrepareNotificationTx`, charged to the triggering account, shared
+  reputation class) and stamps it on the job; the worker runs the same
+  Reserve → early hold → ConsumeAttempt → authorized submit order as the
+  message worker, snoozing on a hold without provider I/O. A job from a
+  pre-floor slot resolves its operation at fire time and stamps it once
+  (`jobs.StampJobArg`), so the derivation never repeats.
+- **Public feedback mail** (`POST /api/feedback`): the operation is keyed by
+  a server-minted submission id and its envelope is the configured notify
+  set, never the request, so the form cannot become a relay. No queue owns
+  this path, so its bounded in-request retry loop is the whole envelope and
+  every physical attempt is its own charged ordinal; a definite rejection and
+  a lost acceptance both stop the loop.
+
+Operators cutting over a slot with a queued backlog run
+`e2a -reconcile-legacy-sending-jobs`: it stamps an operation onto every
+pending `outbound_send` / `hitl_notify` / `webhook_notify` job that has none,
+through exactly the Prepare path its enqueue would have used, cancels the
+ones whose source row is gone, and exits nonzero unless every scanned job was
+decided. The workers resolve legacy jobs themselves, so the command is a
+convenience for a clean cutover, not a prerequisite.

@@ -3,6 +3,7 @@ package hitlnotify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/jackc/pgx/v5"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // Jobs is the HITL-notification integration on the shared River client: a
@@ -23,6 +25,8 @@ import (
 type Jobs struct {
 	store Store
 	enq   jobs.Enqueuer
+	gate  sendingpolicy.Gate
+	pool  *pgxpool.Pool
 
 	mu        sync.RWMutex
 	deliverer Deliverer
@@ -30,6 +34,20 @@ type Jobs struct {
 
 // NewJobs builds the integration with just its store (no client, no deliverer yet).
 func NewJobs(store Store) *Jobs { return &Jobs{store: store} }
+
+// WithGate injects the sending-protection gate and the pool its legacy
+// resolver and arg stamp use. Every enqueue then prepares a notification
+// operation in the hold's transaction and every worker execution authorizes
+// through the gate. Chainable; nil keeps the gateless default (tests only).
+func (j *Jobs) WithGate(g sendingpolicy.Gate, pool *pgxpool.Pool) *Jobs {
+	if g != nil {
+		j.gate = g
+	}
+	if pool != nil {
+		j.pool = pool
+	}
+	return j
+}
 
 // SetEnqueuer injects the shared client so EnqueueNotifyTx can insert jobs.
 func (j *Jobs) SetEnqueuer(e jobs.Enqueuer) { j.enq = e }
@@ -47,29 +65,74 @@ func (j *Jobs) SetDeliverer(d Deliverer) {
 // set via SetDeliverer. Until that is wired (the brief startup window before the
 // notifier is built) it returns a retryable outcome, so a pending job simply
 // retries rather than dropping on a nil deliverer.
-func (j *Jobs) Deliver(ctx context.Context, pn *identity.PendingNotify) DeliverOutcome {
+func (j *Jobs) Deliver(ctx context.Context, pn *identity.PendingNotify, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
 	j.mu.RLock()
 	d := j.deliverer
 	j.mu.RUnlock()
 	if d == nil {
 		return DeliverOutcome{Err: errors.New("hitl notifier not wired yet — retrying")}
 	}
-	return d.Deliver(ctx, pn)
+	return d.Deliver(ctx, pn, auth)
 }
 
 // RegisterJobs adds the NotifyWorker (with Jobs as the late-binding Deliverer).
 // No periodics — the reconciler is a one-shot startup cutover. Implements
 // jobs.Registrar.
 func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
-	river.AddWorker(w, NewNotifyWorker(j.store, j))
+	river.AddWorker(w, j.NotifyWorker())
 	return nil
+}
+
+// NotifyWorker builds the fully armed worker RegisterJobs registers.
+func (j *Jobs) NotifyWorker() *NotifyWorker {
+	w := NewNotifyWorker(j.store, j).WithGate(j.gate).WithOperationResolver(j.ResolveLegacyOperation)
+	if j.pool != nil {
+		w = w.WithArgStamper(func(ctx context.Context, jobID int64, ref sendingpolicy.OperationRef) error {
+			return jobs.StampJobArg(ctx, j.pool, jobID, "operation_ref", ref)
+		})
+	}
+	return w
+}
+
+// ResolveLegacyOperation prepares the notification operation for a job that
+// carries no reference, in its own committed transaction, through the same
+// PrepareNotificationTx an enqueue runs.
+func (j *Jobs) ResolveLegacyOperation(ctx context.Context, messageID string) (sendingpolicy.OperationRef, error) {
+	if j.gate == nil || j.pool == nil {
+		return sendingpolicy.OperationRef{}, fmt.Errorf("hitl notify: legacy operation resolver is not wired")
+	}
+	tx, err := j.pool.Begin(ctx)
+	if err != nil {
+		return sendingpolicy.OperationRef{}, fmt.Errorf("begin legacy resolve: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewHITLNotificationRef(messageID))
+	if err != nil {
+		return sendingpolicy.OperationRef{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sendingpolicy.OperationRef{}, fmt.Errorf("commit legacy resolve: %w", err)
+	}
+	return ref, nil
 }
 
 // EnqueueNotifyTx inserts the hitl_notify job in the caller's hold accept-tx (the
 // same tx as the pending_review insert), returning the River job id to stamp on the
 // message so a committed pending_review row always has its notification job.
+//
+// With a gate wired the notification's operation is prepared here, in the
+// same transaction, against the locked source row: the triggering account is
+// charged, never the platform, and the worker never derives attribution.
 func (j *Jobs) EnqueueNotifyTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error) {
-	res, err := j.enq.InsertTx(ctx, tx, HITLNotifyArgs{MessageID: messageID}, &river.InsertOpts{
+	args := HITLNotifyArgs{MessageID: messageID}
+	if j.gate != nil {
+		ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewHITLNotificationRef(messageID))
+		if err != nil {
+			return 0, fmt.Errorf("prepare notification operation: %w", err)
+		}
+		args.OperationRef = &ref
+	}
+	res, err := j.enq.InsertTx(ctx, tx, args, &river.InsertOpts{
 		Queue:       jobs.QueueNotify,
 		MaxAttempts: MaxNotifyAttempts,
 	})

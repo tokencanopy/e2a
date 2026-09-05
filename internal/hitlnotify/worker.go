@@ -13,6 +13,7 @@ package hitlnotify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // notifyRetryBackoffs is the per-attempt delay for a failed notification send.
@@ -47,6 +49,11 @@ const notifyOutageSnooze = 5 * time.Minute
 // so the job row stays tiny and always reflects the current hold state.
 type HITLNotifyArgs struct {
 	MessageID string `json:"message_id"`
+	// OperationRef is the durable sending operation the hold's accept
+	// transaction prepared. A job enqueued by a pre-floor slot carries none
+	// and is resolved at fire time through the same Prepare path, then
+	// stamped so the derivation happens once.
+	OperationRef *sendingpolicy.OperationRef `json:"operation_ref,omitempty"`
 }
 
 func (HITLNotifyArgs) Kind() string { return "hitl_notify" }
@@ -63,8 +70,16 @@ type DeliverOutcome struct {
 // Deliverer composes and sends the approval email for one held message. Implemented
 // by *Notifier (compose + SMTPRelay.SendOnce + classify).
 type Deliverer interface {
-	Deliver(ctx context.Context, pn *identity.PendingNotify) DeliverOutcome
+	Deliver(ctx context.Context, pn *identity.PendingNotify, auth sendingpolicy.ProviderAuthorization) DeliverOutcome
 }
+
+// OperationResolver recovers the durable operation for a job that carries no
+// reference, through the same Prepare path an enqueue runs.
+type OperationResolver func(ctx context.Context, messageID string) (sendingpolicy.OperationRef, error)
+
+// ArgStamper persists a resolved reference into the job's args so a legacy
+// job is resolved once, not once per execution.
+type ArgStamper func(ctx context.Context, jobID int64, ref sendingpolicy.OperationRef) error
 
 // Store is the message surface the worker + reconciler need. Implemented over
 // internal/identity (*identity.Store).
@@ -84,10 +99,41 @@ type NotifyWorker struct {
 	river.WorkerDefaults[HITLNotifyArgs]
 	store     Store
 	deliverer Deliverer
+	gate      sendingpolicy.Gate
+	resolve   OperationResolver
+	stamp     ArgStamper
 }
 
+// NewNotifyWorker builds a worker with no sending-protection gate. Without one
+// the deliverer receives an empty authorization, which the production
+// submitter refuses before it dials; the composition root installs the gate
+// via WithGate.
 func NewNotifyWorker(store Store, deliverer Deliverer) *NotifyWorker {
 	return &NotifyWorker{store: store, deliverer: deliverer}
+}
+
+// WithGate injects the sending-protection gate every notification must pass.
+func (w *NotifyWorker) WithGate(g sendingpolicy.Gate) *NotifyWorker {
+	if g != nil {
+		w.gate = g
+	}
+	return w
+}
+
+// WithOperationResolver injects the legacy-argument resolver.
+func (w *NotifyWorker) WithOperationResolver(r OperationResolver) *NotifyWorker {
+	if r != nil {
+		w.resolve = r
+	}
+	return w
+}
+
+// WithArgStamper injects the job-args stamp used after a legacy resolution.
+func (w *NotifyWorker) WithArgStamper(s ArgStamper) *NotifyWorker {
+	if s != nil {
+		w.stamp = s
+	}
+	return w
 }
 
 // NextRetry overrides River's default backoff with the decided notify envelope.
@@ -125,7 +171,45 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[HITLNotifyArgs])
 		return nil // agent opted out of approval notifications
 	}
 
-	out := w.deliverer.Deliver(ctx, pn)
+	// Every provider call is authorized: Reserve the durable attempt, hold
+	// without I/O when the gate says so, ConsumeAttempt as the last decision,
+	// then hand the token to the deliverer, whose submitter redeems it before
+	// the socket opens. Notifications carry no durable hold class of their
+	// own — the approval TTL guard above already bounds how long one can
+	// wait, and a hold past it becomes the no-op the guard returns.
+	auth := sendingpolicy.ProviderAuthorization{}
+	if w.gate != nil {
+		ref, err := w.operationFor(ctx, job)
+		if err != nil {
+			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+				return nil // the hold is gone — nothing to notify
+			}
+			return err
+		}
+		early, attempt, err := w.gate.Reserve(ctx, ref)
+		if err != nil {
+			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+				return nil
+			}
+			return river.JobSnooze(notifyOutageSnooze)
+		}
+		if !early.Allow {
+			return holdVerdict(early)
+		}
+		decision, token, err := w.gate.ConsumeAttempt(ctx, attempt)
+		if err != nil {
+			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+				return nil
+			}
+			return river.JobSnooze(notifyOutageSnooze)
+		}
+		if !decision.Allow || token == nil {
+			return holdVerdict(decision)
+		}
+		auth = *token
+	}
+
+	out := w.deliverer.Deliver(ctx, pn, auth)
 	if out.Err == nil {
 		if merr := w.store.MarkMessageNotified(ctx, msg.ID); merr != nil {
 			// The email is already out; only the dedup marker failed to persist. Do
@@ -150,4 +234,42 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[HITLNotifyArgs])
 	// Transient (relay throttle, owner lookup blip, compose error): let River
 	// reschedule per NextRetry until MaxNotifyAttempts, then discard.
 	return fmt.Errorf("hitl notify attempt %d failed: %w", job.Attempt, out.Err)
+}
+
+// operationFor returns the job's durable operation, resolving and stamping a
+// legacy job through the accept path.
+func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[HITLNotifyArgs]) (sendingpolicy.OperationRef, error) {
+	if job.Args.OperationRef != nil && !job.Args.OperationRef.IsZero() {
+		return *job.Args.OperationRef, nil
+	}
+	if w.resolve == nil {
+		return sendingpolicy.OperationRef{}, fmt.Errorf("hitl notify: legacy job %d carries no operation and no resolver is wired", job.ID)
+	}
+	ref, err := w.resolve(ctx, job.Args.MessageID)
+	if err != nil {
+		return sendingpolicy.OperationRef{}, err
+	}
+	if w.stamp != nil {
+		if err := w.stamp(ctx, job.ID, ref); err != nil {
+			// Not fatal: the reference is valid for this execution; a retry
+			// resolves again and stamps then.
+			log.Printf("[hitl-notify] stamp operation on legacy job %d: %v", job.ID, err)
+		}
+	}
+	return ref, nil
+}
+
+// holdVerdict turns a gate hold into River's answer: a terminal hold cancels
+// the job, everything else waits for the gate's retry time or the outage pace.
+func holdVerdict(d sendingpolicy.Decision) error {
+	if d.Terminal {
+		return river.JobCancel(fmt.Errorf("hitl notify: sending policy: %s", d.Reason))
+	}
+	delay := notifyOutageSnooze
+	if !d.RetryAt.IsZero() {
+		if until := time.Until(d.RetryAt); until > delay {
+			delay = until
+		}
+	}
+	return river.JobSnooze(delay)
 }

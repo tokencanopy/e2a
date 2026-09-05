@@ -199,7 +199,7 @@ func (s *ProviderSubmitter) SubmitOnce(ctx context.Context, auth sendingpolicy.P
 	// A failure after the body was fully written (ErrProviderAcceptanceUnknown)
 	// is neither accepted nor rejected here: it is returned unsettled, because
 	// the provider may hold the message and only its feedback can say.
-	providerID, sendErr := s.relay.SendOnceContext(ctx, env.From, auth.AuthorizedRecipients(), wire)
+	providerID, sendErr := s.relay.sendOnceContext(ctx, env.From, auth.AuthorizedRecipients(), wire)
 	if sendErr != nil {
 		// IsPermanentSMTPError is the worker's retry classifier: any 5xx,
 		// including one raised before DATA (an AUTH 535, say). Settling such a

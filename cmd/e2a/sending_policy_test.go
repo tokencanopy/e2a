@@ -312,6 +312,17 @@ func TestSendingProtectionCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("reconcile-legacy-sending-jobs dispatches", func(t *testing.T) {
+		resetRiverJobs(t, pool)
+		out, err := run(&sendingProtectionFlags{reconcile: true})
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if !strings.Contains(out, "scanned:   0") || !strings.Contains(out, "remaining: 0") {
+			t.Errorf("reconcile output = %q", out)
+		}
+	})
+
 	t.Run("print-capabilities", func(t *testing.T) {
 		clearEnvForTest(t)
 		out, err := run(&sendingProtectionFlags{capabilities: true})

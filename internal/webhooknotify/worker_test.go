@@ -2,15 +2,18 @@ package webhooknotify_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/webhooknotify"
 )
 
@@ -29,7 +32,7 @@ type fakeDeliverer struct {
 	kinds  []string
 }
 
-func (f *fakeDeliverer) Deliver(_ context.Context, _ *identity.Webhook, kind string) webhooknotify.DeliverOutcome {
+func (f *fakeDeliverer) Deliver(_ context.Context, _ *identity.Webhook, kind string, _ sendingpolicy.ProviderAuthorization) webhooknotify.DeliverOutcome {
 	f.called++
 	f.kinds = append(f.kinds, kind)
 	return f.out
@@ -231,4 +234,119 @@ func TestNotifyWorker_ErrorTriage(t *testing.T) {
 		}
 		fm.only(t, webhooknotify.KindDisabled, "retryable")
 	})
+}
+
+// fakeGate is a scriptable sendingpolicy.Gate for the worker-order tests.
+type fakeGate struct {
+	reserve    sendingpolicy.Decision
+	consume    sendingpolicy.Decision
+	reserveErr error
+	reserves   int
+	consumes   int
+}
+
+func allowAll() *fakeGate {
+	return &fakeGate{reserve: sendingpolicy.Decision{Allow: true}, consume: sendingpolicy.Decision{Allow: true}}
+}
+
+func (g *fakeGate) PrepareExternalTx(context.Context, pgx.Tx, string) (sendingpolicy.AcceptanceDecision, sendingpolicy.OperationRef, error) {
+	return sendingpolicy.AcceptanceAccept, sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) PrepareNotificationTx(context.Context, pgx.Tx, sendingpolicy.NotificationRef) (sendingpolicy.OperationRef, error) {
+	return refFor("op_prepared"), nil
+}
+func (g *fakeGate) PrepareProtectionNoticeTx(context.Context, pgx.Tx, sendingpolicy.ProtectionNoticeRef) (sendingpolicy.OperationRef, error) {
+	return sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) PreparePublicFeedback(context.Context, sendingpolicy.PublicFeedbackRef) (sendingpolicy.OperationRef, error) {
+	return sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) Reserve(context.Context, sendingpolicy.OperationRef) (sendingpolicy.Decision, sendingpolicy.AttemptRef, error) {
+	g.reserves++
+	return g.reserve, sendingpolicy.AttemptRef{}, g.reserveErr
+}
+func (g *fakeGate) ConsumeAttempt(context.Context, sendingpolicy.AttemptRef) (sendingpolicy.Decision, *sendingpolicy.ProviderAuthorization, error) {
+	g.consumes++
+	if !g.consume.Allow {
+		return g.consume, nil, nil
+	}
+	return g.consume, &sendingpolicy.ProviderAuthorization{}, nil
+}
+func (g *fakeGate) RedeemProviderCall(context.Context, sendingpolicy.ProviderAuthorization) error {
+	return nil
+}
+func (g *fakeGate) DeferAttempt(context.Context, sendingpolicy.AttemptRef) error  { return nil }
+func (g *fakeGate) CancelAttempt(context.Context, sendingpolicy.AttemptRef) error { return nil }
+func (g *fakeGate) SettleProvider(context.Context, sendingpolicy.ProviderSettlement) error {
+	return nil
+}
+func (g *fakeGate) SettleOperation(context.Context, sendingpolicy.OperationRef, sendingpolicy.SettlementOutcome, string) error {
+	return nil
+}
+func (g *fakeGate) LookupOperation(_ context.Context, id string) (sendingpolicy.OperationRef, error) {
+	return refFor(id), nil
+}
+
+func refFor(id string) sendingpolicy.OperationRef {
+	var ref sendingpolicy.OperationRef
+	if err := json.Unmarshal([]byte(`{"v":1,"id":"`+id+`"}`), &ref); err != nil {
+		panic(err)
+	}
+	return ref
+}
+
+func gatedJob(webhookID, kind string, attempt int) *river.Job[webhooknotify.WebhookNotifyArgs] {
+	j := job(webhookID, kind, attempt)
+	ref := refFor("op_" + webhookID)
+	j.Args.OperationRef = &ref
+	return j
+}
+
+func isSnooze(err error) bool {
+	var snooze *river.JobSnoozeError
+	return errors.As(err, &snooze)
+}
+
+func TestNotifyWorker_GatedPathAuthorizesThenDelivers(t *testing.T) {
+	fd := &fakeDeliverer{}
+	fm := &fakeMetrics{}
+	g := allowAll()
+	w := webhooknotify.NewNotifyWorker(&fakeStore{wh: hook(false, nil)}, fd).WithMetrics(fm).WithGate(g)
+	if err := w.Work(context.Background(), gatedJob("wh_1", webhooknotify.KindDisabled, 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if g.reserves != 1 || g.consumes != 1 || fd.called != 1 {
+		t.Fatalf("reserves=%d consumes=%d delivers=%d, want 1/1/1", g.reserves, g.consumes, fd.called)
+	}
+}
+
+func TestNotifyWorker_GateHoldSnoozesWithoutDelivery(t *testing.T) {
+	for name, g := range map[string]*fakeGate{
+		"early hold": {reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonAccountPaused}},
+		"late hold":  {reserve: sendingpolicy.Decision{Allow: true}, consume: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonGlobalAllBudget, RetryAt: time.Now().Add(time.Hour)}},
+		"gate error": {reserveErr: errors.New("policy db down")},
+	} {
+		fd := &fakeDeliverer{}
+		w := webhooknotify.NewNotifyWorker(&fakeStore{wh: hook(false, nil)}, fd).WithMetrics(&fakeMetrics{}).WithGate(g)
+		if err := w.Work(context.Background(), gatedJob("wh_1", webhooknotify.KindDisabled, 1)); !isSnooze(err) || fd.called != 0 {
+			t.Fatalf("%s: err=%v delivers=%d, want snooze with no I/O", name, err, fd.called)
+		}
+	}
+}
+
+func TestNotifyWorker_LegacyJobResolvesAndStampsOnce(t *testing.T) {
+	fd := &fakeDeliverer{}
+	resolved, stamped := 0, 0
+	w := webhooknotify.NewNotifyWorker(&fakeStore{wh: hook(false, nil)}, fd).WithMetrics(&fakeMetrics{}).WithGate(allowAll()).
+		WithOperationResolver(func(_ context.Context, id string) (sendingpolicy.OperationRef, error) {
+			resolved++
+			return refFor("op_" + id), nil
+		}).
+		WithArgStamper(func(context.Context, int64, sendingpolicy.OperationRef) error { stamped++; return nil })
+	if err := w.Work(context.Background(), job("wh_legacy", webhooknotify.KindDisabled, 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if resolved != 1 || stamped != 1 || fd.called != 1 {
+		t.Fatalf("resolved=%d stamped=%d delivers=%d, want 1/1/1", resolved, stamped, fd.called)
+	}
 }

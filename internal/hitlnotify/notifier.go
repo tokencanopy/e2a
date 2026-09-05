@@ -26,6 +26,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // notifyLocalPart is the default local-part of the notification sender
@@ -50,9 +51,9 @@ const tokenGraceAfterTTL = 10 * time.Minute
 // call NotifyPendingApproval from the HITL gate right after the pending
 // row is written. Errors are logged, never returned upstream.
 type Notifier struct {
-	store  *identity.Store
-	relay  *outbound.SMTPRelay
-	signer *approvaltoken.Signer
+	store     *identity.Store
+	submitter *outbound.ProviderSubmitter
+	signer    *approvaltoken.Signer
 	// fromAddress is the resolved sender: notifications.from_address when
 	// set, else notifyLocalPart on fromDomain.
 	fromAddress string
@@ -80,7 +81,7 @@ type Notifier struct {
 // distinct and separately filterable. Resolution deliberately mirrors
 // webhooknotify.New line for line; it is a copy rather than a shared helper,
 // so changing one means changing the other.
-func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken.Signer, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
+func New(store *identity.Store, submitter *outbound.ProviderSubmitter, signer *approvaltoken.Signer, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
 	addr := strings.TrimSpace(fromAddress)
 	if addr == "" {
 		addr = fmt.Sprintf("%s@%s", notifyLocalPart, fromDomain)
@@ -91,7 +92,7 @@ func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken
 	}
 	return &Notifier{
 		store:       store,
-		relay:       relay,
+		submitter:   submitter,
 		signer:      signer,
 		fromAddress: addr,
 		fromDomain:  msgIDDomain,
@@ -113,7 +114,7 @@ func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
 // message, submitting once (SendOnce). It is the compose+send core the River
 // NotifyWorker drives via Deliver; the returned error is classified there into
 // retry/permanent/outage.
-func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Message, agent *identity.AgentIdentity) error {
+func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Message, agent *identity.AgentIdentity, auth sendingpolicy.ProviderAuthorization) error {
 	if n == nil {
 		return nil
 	}
@@ -225,10 +226,16 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 		message = signed
 	}
 
-	// SendOnce, not Send: this runs inside a River job, so River (not the relay's
-	// in-process loop) owns retries. The %w keeps the SMTP error classifiable by
-	// Deliver via internal/outbound's IsPermanentSMTPError / IsConnectionError.
-	if _, err := n.relay.SendOnce(fromAddr, []string{owner.Email}, message); err != nil {
+	// One authorized submission: the submitter redeems the token immediately
+	// before the socket opens and settles the provider's answer; River (not
+	// the relay's in-process loop) owns retries, each as a fresh attempt. The
+	// %w keeps the SMTP error classifiable by Deliver via internal/outbound's
+	// IsPermanentSMTPError / IsConnectionError.
+	if _, err := n.submitter.SubmitOnce(ctx, auth, outbound.Envelope{
+		From:       fromAddr,
+		Recipients: []string{owner.Email},
+		Message:    message,
+	}); err != nil {
 		return fmt.Errorf("notify: smtp send: %w", err)
 	}
 
@@ -242,8 +249,8 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 // (no retry), an unreachable relay is an Outage (snooze), everything else retries.
 // Implements hitlnotify.Deliverer. The classifiers key on the SMTP code / net
 // error preserved through NotifyPendingApproval's %w wrapping.
-func (n *Notifier) Deliver(ctx context.Context, pn *identity.PendingNotify) DeliverOutcome {
-	if err := n.NotifyPendingApproval(ctx, pn.Message, pn.Agent); err != nil {
+func (n *Notifier) Deliver(ctx context.Context, pn *identity.PendingNotify, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	if err := n.NotifyPendingApproval(ctx, pn.Message, pn.Agent, auth); err != nil {
 		return DeliverOutcome{
 			Err:       err,
 			Permanent: outbound.IsPermanentSMTPError(err),

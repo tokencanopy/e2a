@@ -2,6 +2,7 @@ package hitlnotify_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 type fakeStore struct {
@@ -36,10 +38,12 @@ func (f *fakeStore) StampNotifyJobIDTx(_ context.Context, _ pgx.Tx, _ string, _ 
 type fakeDeliverer struct {
 	out    hitlnotify.DeliverOutcome
 	called int
+	auths  []sendingpolicy.ProviderAuthorization
 }
 
-func (f *fakeDeliverer) Deliver(_ context.Context, _ *identity.PendingNotify) hitlnotify.DeliverOutcome {
+func (f *fakeDeliverer) Deliver(_ context.Context, _ *identity.PendingNotify, auth sendingpolicy.ProviderAuthorization) hitlnotify.DeliverOutcome {
 	f.called++
+	f.auths = append(f.auths, auth)
 	return f.out
 }
 
@@ -210,5 +214,143 @@ func TestNotifyWorker_NextRetryMatchesEnvelope(t *testing.T) {
 		if diff := got - d; diff < -2*time.Second || diff > 2*time.Second {
 			t.Errorf("attempt %d: next retry in %v, want ~%v", i, got, d)
 		}
+	}
+}
+
+// fakeGate is a scriptable sendingpolicy.Gate for the worker-order tests.
+type fakeGate struct {
+	reserve    sendingpolicy.Decision
+	consume    sendingpolicy.Decision
+	reserves   int
+	consumes   int
+	reserveErr error
+}
+
+func allowAll() *fakeGate {
+	return &fakeGate{reserve: sendingpolicy.Decision{Allow: true}, consume: sendingpolicy.Decision{Allow: true}}
+}
+
+func (g *fakeGate) PrepareExternalTx(context.Context, pgx.Tx, string) (sendingpolicy.AcceptanceDecision, sendingpolicy.OperationRef, error) {
+	return sendingpolicy.AcceptanceAccept, sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) PrepareNotificationTx(context.Context, pgx.Tx, sendingpolicy.NotificationRef) (sendingpolicy.OperationRef, error) {
+	return refFor("op_prepared"), nil
+}
+func (g *fakeGate) PrepareProtectionNoticeTx(context.Context, pgx.Tx, sendingpolicy.ProtectionNoticeRef) (sendingpolicy.OperationRef, error) {
+	return sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) PreparePublicFeedback(context.Context, sendingpolicy.PublicFeedbackRef) (sendingpolicy.OperationRef, error) {
+	return sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) Reserve(context.Context, sendingpolicy.OperationRef) (sendingpolicy.Decision, sendingpolicy.AttemptRef, error) {
+	g.reserves++
+	return g.reserve, sendingpolicy.AttemptRef{}, g.reserveErr
+}
+func (g *fakeGate) ConsumeAttempt(context.Context, sendingpolicy.AttemptRef) (sendingpolicy.Decision, *sendingpolicy.ProviderAuthorization, error) {
+	g.consumes++
+	if !g.consume.Allow {
+		return g.consume, nil, nil
+	}
+	return g.consume, &sendingpolicy.ProviderAuthorization{}, nil
+}
+func (g *fakeGate) RedeemProviderCall(context.Context, sendingpolicy.ProviderAuthorization) error {
+	return nil
+}
+func (g *fakeGate) DeferAttempt(context.Context, sendingpolicy.AttemptRef) error  { return nil }
+func (g *fakeGate) CancelAttempt(context.Context, sendingpolicy.AttemptRef) error { return nil }
+func (g *fakeGate) SettleProvider(context.Context, sendingpolicy.ProviderSettlement) error {
+	return nil
+}
+func (g *fakeGate) SettleOperation(context.Context, sendingpolicy.OperationRef, sendingpolicy.SettlementOutcome, string) error {
+	return nil
+}
+func (g *fakeGate) LookupOperation(_ context.Context, id string) (sendingpolicy.OperationRef, error) {
+	return refFor(id), nil
+}
+
+func refFor(id string) sendingpolicy.OperationRef {
+	var ref sendingpolicy.OperationRef
+	if err := json.Unmarshal([]byte(`{"v":1,"id":"`+id+`"}`), &ref); err != nil {
+		panic(err)
+	}
+	return ref
+}
+
+func gatedJob(id string, attempt int) *river.Job[hitlnotify.HITLNotifyArgs] {
+	j := job(id, attempt)
+	ref := refFor("op_" + id)
+	j.Args.OperationRef = &ref
+	return j
+}
+
+func isSnooze(err error) bool {
+	var snooze *river.JobSnoozeError
+	return errors.As(err, &snooze)
+}
+
+func isCancel(err error) bool {
+	var cancel *river.JobCancelError
+	return errors.As(err, &cancel)
+}
+
+func TestNotifyWorker_GatedPathAuthorizesThenDelivers(t *testing.T) {
+	st := &fakeStore{pn: pending("msg_gated")}
+	dl := &fakeDeliverer{}
+	g := allowAll()
+	if err := hitlnotify.NewNotifyWorker(st, dl).WithGate(g).Work(context.Background(), gatedJob("msg_gated", 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if g.reserves != 1 || g.consumes != 1 || dl.called != 1 || len(st.notified) != 1 {
+		t.Fatalf("reserves=%d consumes=%d delivers=%d notified=%d, want 1/1/1/1", g.reserves, g.consumes, dl.called, len(st.notified))
+	}
+}
+
+func TestNotifyWorker_GateHoldSnoozesWithoutDelivery(t *testing.T) {
+	for name, g := range map[string]*fakeGate{
+		"early hold": {reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonAccountPaused}},
+		"late hold":  {reserve: sendingpolicy.Decision{Allow: true}, consume: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonAccountSharedBudget, RetryAt: time.Now().Add(2 * time.Hour)}},
+		"gate error": {reserveErr: errors.New("policy db down")},
+	} {
+		st := &fakeStore{pn: pending("msg_hold")}
+		dl := &fakeDeliverer{}
+		err := hitlnotify.NewNotifyWorker(st, dl).WithGate(g).Work(context.Background(), gatedJob("msg_hold", 1))
+		if !isSnooze(err) || dl.called != 0 || len(st.notified) != 0 {
+			t.Fatalf("%s: err=%v delivers=%d notified=%d, want snooze with no I/O", name, err, dl.called, len(st.notified))
+		}
+	}
+}
+
+func TestNotifyWorker_TerminalHoldCancels(t *testing.T) {
+	st := &fakeStore{pn: pending("msg_terminal")}
+	dl := &fakeDeliverer{}
+	g := &fakeGate{reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonAccountDeleted, Terminal: true}}
+	if err := hitlnotify.NewNotifyWorker(st, dl).WithGate(g).Work(context.Background(), gatedJob("msg_terminal", 1)); !isCancel(err) || dl.called != 0 {
+		t.Fatalf("err=%v delivers=%d, want cancel with no I/O", err, dl.called)
+	}
+}
+
+func TestNotifyWorker_LegacyJobResolvesAndStampsOnce(t *testing.T) {
+	st := &fakeStore{pn: pending("msg_legacy")}
+	dl := &fakeDeliverer{}
+	resolved, stamped := 0, 0
+	w := hitlnotify.NewNotifyWorker(st, dl).WithGate(allowAll()).
+		WithOperationResolver(func(_ context.Context, id string) (sendingpolicy.OperationRef, error) {
+			resolved++
+			return refFor("op_" + id), nil
+		}).
+		WithArgStamper(func(_ context.Context, _ int64, _ sendingpolicy.OperationRef) error { stamped++; return nil })
+	if err := w.Work(context.Background(), job("msg_legacy", 1)); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if resolved != 1 || stamped != 1 || dl.called != 1 {
+		t.Fatalf("resolved=%d stamped=%d delivers=%d, want 1/1/1", resolved, stamped, dl.called)
+	}
+	// A legacy job whose source is gone is a no-op, never a retry loop.
+	w = hitlnotify.NewNotifyWorker(&fakeStore{pn: pending("msg_gone")}, dl).WithGate(allowAll()).
+		WithOperationResolver(func(context.Context, string) (sendingpolicy.OperationRef, error) {
+			return sendingpolicy.OperationRef{}, sendingpolicy.ErrSourceUnavailable
+		})
+	if err := w.Work(context.Background(), job("msg_gone", 1)); err != nil || dl.called != 1 {
+		t.Fatalf("orphan legacy: err=%v delivers=%d, want nil and no new delivery", err, dl.called)
 	}
 }

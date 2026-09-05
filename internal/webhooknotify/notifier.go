@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // notifyLocalPart is the fallback local-part of the sender address, used
@@ -51,15 +52,15 @@ type NotifierStore interface {
 
 // relay is the narrow send surface (*outbound.SMTPRelay satisfies it).
 // SendOnce, not Send: this runs inside a River job, so River owns retries.
-type relay interface {
-	SendOnce(envelopeFrom string, recipients []string, message []byte) (string, error)
+type submitter interface {
+	SubmitOnce(ctx context.Context, auth sendingpolicy.ProviderAuthorization, env outbound.Envelope) (outbound.ProviderResult, error)
 }
 
 // Notifier composes and sends the two webhook health emails. Construct
 // with New; the NotifyWorker drives Deliver.
 type Notifier struct {
-	store NotifierStore
-	relay relay
+	store     NotifierStore
+	submitter submitter
 	// dkim, when non-nil, signs each email for the From-header domain
 	// before it reaches the relay (see WithDKIM).
 	dkim outbound.DKIMKeyLookup
@@ -89,7 +90,7 @@ type Notifier struct {
 // local part on fromDomain; replyTo is the optional
 // notifications.reply_to config value, empty = no Reply-To header.
 // publicURL builds the dashboard link; empty degrades to generic copy.
-func New(store NotifierStore, r relay, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
+func New(store NotifierStore, s submitter, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
 	addr := strings.TrimSpace(fromAddress)
 	if addr == "" {
 		addr = fmt.Sprintf("%s@%s", notifyLocalPart, fromDomain)
@@ -100,7 +101,7 @@ func New(store NotifierStore, r relay, fromDomain, fromAddress, replyTo, publicU
 	}
 	return &Notifier{
 		store:       store,
-		relay:       r,
+		submitter:   s,
 		fromAddress: addr,
 		fromDomain:  msgIDDomain,
 		replyTo:     strings.TrimSpace(replyTo),
@@ -131,8 +132,8 @@ func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
 
 // Deliver composes and sends one health email, classifying the result for
 // the NotifyWorker. Implements Deliverer.
-func (n *Notifier) Deliver(ctx context.Context, wh *identity.Webhook, kind string) DeliverOutcome {
-	if err := n.send(ctx, wh, kind); err != nil {
+func (n *Notifier) Deliver(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	if err := n.send(ctx, wh, kind, auth); err != nil {
 		return DeliverOutcome{
 			Err:       err,
 			Permanent: outbound.IsPermanentSMTPError(err) || errors.Is(err, errNoOwnerEmail),
@@ -142,7 +143,7 @@ func (n *Notifier) Deliver(ctx context.Context, wh *identity.Webhook, kind strin
 	return DeliverOutcome{}
 }
 
-func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string) error {
+func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) error {
 	if n == nil {
 		return nil
 	}
@@ -235,7 +236,11 @@ func (n *Notifier) send(ctx context.Context, wh *identity.Webhook, kind string) 
 		message = signed
 	}
 
-	if _, err := n.relay.SendOnce(n.fromAddress, []string{owner.Email}, message); err != nil {
+	if _, err := n.submitter.SubmitOnce(ctx, auth, outbound.Envelope{
+		From:       n.fromAddress,
+		Recipients: []string{owner.Email},
+		Message:    message,
+	}); err != nil {
 		return fmt.Errorf("webhook notify: smtp send: %w", err)
 	}
 

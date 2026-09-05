@@ -22,6 +22,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
+	"github.com/tokencanopy/e2a/internal/testutil/testdb"
 	"github.com/tokencanopy/e2a/internal/usage"
 )
 
@@ -132,6 +134,7 @@ func TestFeedbackGitHubTimeoutStillDeliversEmail(t *testing.T) {
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: smtpHost, Port: smtpPort})
 	sender := outbound.NewSender(relay, "test.e2a.dev")
 	api := NewAPI(nil, sender, relay, nil, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	wireFeedbackSubmitter(t, api, relay)
 	router := mux.NewRouter()
 	api.RegisterRoutes(router)
 	server := httptest.NewServer(router)
@@ -188,6 +191,7 @@ func TestFeedbackEmailTimeoutReturnsAfterGitHubDelivery(t *testing.T) {
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: smtpHost, Port: smtpPort})
 	sender := outbound.NewSender(relay, "test.e2a.dev")
 	api := NewAPI(nil, sender, relay, nil, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	wireFeedbackSubmitter(t, api, relay)
 	router := mux.NewRouter()
 	api.RegisterRoutes(router)
 	server := httptest.NewServer(router)
@@ -239,6 +243,7 @@ func TestFeedbackNoRepoConfigured_RefusesToFileRatherThanDefaultingToOperatorRep
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: smtpHost, Port: smtpPort})
 	sender := outbound.NewSender(relay, "test.e2a.dev")
 	api := NewAPI(nil, sender, relay, nil, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	wireFeedbackSubmitter(t, api, relay)
 	router := mux.NewRouter()
 	api.RegisterRoutes(router)
 	server := httptest.NewServer(router)
@@ -401,4 +406,13 @@ func TestFeedbackGitHubClient_Precedence(t *testing.T) {
 	if c, err := feedbackGitHubClient(context.Background()); err == nil || c != nil {
 		t.Errorf("bad app key: got client=%v err=%v, want nil,error", c, err)
 	}
+}
+
+// wireFeedbackSubmitter gives an API the authorized provider seam the feedback
+// path submits through, backed by a disabled-policy gate on the test DB.
+func wireFeedbackSubmitter(t *testing.T, api *API, relay *outbound.SMTPRelay) {
+	t.Helper()
+	pool := testdb.TestDB(t)
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	api.SetProviderSubmitter(outbound.NewProviderSubmitter(relay, gate), gate)
 }

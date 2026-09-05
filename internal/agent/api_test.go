@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/idempotency"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/usage"
 )
@@ -139,6 +141,9 @@ func setupAPIWithSMTP(t *testing.T) (*httptest.Server, *identity.Store, *pgxpool
 	sender := outbound.NewSender(smtpRelay, "test.e2a.dev")
 	noopUsage := usage.NewNoopUsageTracker()
 	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	// Platform mail (public feedback) crosses the authorized provider seam.
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	api.SetProviderSubmitter(outbound.NewProviderSubmitter(smtpRelay, gate), gate)
 	api.SetIdempotencyStore(idempotency.NewStore(pool))
 	router := mux.NewRouter()
 	api.RegisterRoutes(router)
@@ -364,8 +369,12 @@ func TestFeedback_EmailNotification(t *testing.T) {
 	if m.From != "noreply@test.e2a.dev" {
 		t.Errorf("envelope from = %q, want noreply@test.e2a.dev", m.From)
 	}
-	wantRcpts := []string{"feedback-to@example.com", "feedback-cc@example.com"}
-	if strings.Join(m.Recipients, ",") != strings.Join(wantRcpts, ",") {
+	// RCPT TO is issued from the token's canonical (sorted) recipient set,
+	// so compare as a set: the wire order is the seam's, not the form's.
+	gotRcpts := append([]string(nil), m.Recipients...)
+	sort.Strings(gotRcpts)
+	wantRcpts := []string{"feedback-cc@example.com", "feedback-to@example.com"}
+	if strings.Join(gotRcpts, ",") != strings.Join(wantRcpts, ",") {
 		t.Errorf("recipients = %v, want %v", m.Recipients, wantRcpts)
 	}
 	for _, want := range []string{
@@ -413,6 +422,8 @@ func TestFeedback_AllChannelsFail_500(t *testing.T) {
 	deadRelay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: "127.0.0.1", Port: 1})
 	sender := outbound.NewSender(deadRelay, "test.e2a.dev")
 	api := agent.NewAPI(store, sender, deadRelay, nil, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	deadGate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	api.SetProviderSubmitter(outbound.NewProviderSubmitter(deadRelay, deadGate), deadGate)
 	router := mux.NewRouter()
 	api.RegisterRoutes(router)
 	server := httptest.NewServer(router)

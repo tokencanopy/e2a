@@ -22,6 +22,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // Notification kinds. One worker, two templates: the guards and the
@@ -56,6 +57,10 @@ const notifyOutageSnooze = 5 * time.Minute
 // of truth) each attempt, so the guards always see current state.
 type WebhookNotifyArgs struct {
 	WebhookID string `json:"webhook_id"`
+	// OperationRef is the durable sending operation the sweep's transaction
+	// prepared; a job from a pre-floor slot carries none and is resolved at
+	// fire time, then stamped.
+	OperationRef *sendingpolicy.OperationRef `json:"operation_ref,omitempty"`
 	// NotifyKind ∈ {warning, disabled}. (Named NotifyKind because river's
 	// JobArgs interface reserves the Kind() method name.)
 	NotifyKind string `json:"kind"`
@@ -75,8 +80,15 @@ type DeliverOutcome struct {
 // Deliverer composes and sends one health email. Implemented by *Notifier
 // (compose + SMTPRelay.SendOnce + classify).
 type Deliverer interface {
-	Deliver(ctx context.Context, wh *identity.Webhook, kind string) DeliverOutcome
+	Deliver(ctx context.Context, wh *identity.Webhook, kind string, auth sendingpolicy.ProviderAuthorization) DeliverOutcome
 }
+
+// OperationResolver recovers the durable operation for a job that carries no
+// reference, through the same Prepare path an enqueue runs.
+type OperationResolver func(ctx context.Context, webhookID string) (sendingpolicy.OperationRef, error)
+
+// ArgStamper persists a resolved reference into the job's args.
+type ArgStamper func(ctx context.Context, jobID int64, ref sendingpolicy.OperationRef) error
 
 // Store is the read surface the worker needs. *identity.Store satisfies it.
 type Store interface {
@@ -112,6 +124,9 @@ type NotifyWorker struct {
 	river.WorkerDefaults[WebhookNotifyArgs]
 	store     Store
 	deliverer Deliverer
+	gate      sendingpolicy.Gate
+	resolve   OperationResolver
+	stamp     ArgStamper
 	metrics   Metrics // nil ⇒ no emission (nil-safe via emitNotify)
 }
 
@@ -121,6 +136,30 @@ func NewNotifyWorker(store Store, deliverer Deliverer) *NotifyWorker {
 
 // WithMetrics swaps in a metrics backend. Nil-safe: unset (or nil) means no
 // emission, so tests and self-host builds don't have to wire anything.
+// WithGate injects the sending-protection gate every notification must pass.
+func (w *NotifyWorker) WithGate(g sendingpolicy.Gate) *NotifyWorker {
+	if g != nil {
+		w.gate = g
+	}
+	return w
+}
+
+// WithOperationResolver injects the legacy-argument resolver.
+func (w *NotifyWorker) WithOperationResolver(r OperationResolver) *NotifyWorker {
+	if r != nil {
+		w.resolve = r
+	}
+	return w
+}
+
+// WithArgStamper injects the job-args stamp used after a legacy resolution.
+func (w *NotifyWorker) WithArgStamper(s ArgStamper) *NotifyWorker {
+	if s != nil {
+		w.stamp = s
+	}
+	return w
+}
+
 func (w *NotifyWorker) WithMetrics(m Metrics) *NotifyWorker {
 	w.metrics = m
 	return w
@@ -185,7 +224,50 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[WebhookNotifyArg
 		return nil
 	}
 
-	out := w.deliverer.Deliver(ctx, wh, kind)
+	// Every provider call is authorized: Reserve, hold without I/O, then
+	// ConsumeAttempt as the last decision before the deliverer's submitter
+	// redeems the token. A health notice has no durable hold class; the
+	// guards above re-run on every execution and drop a notice that went
+	// stale while it waited.
+	auth := sendingpolicy.ProviderAuthorization{}
+	if w.gate != nil {
+		ref, err := w.operationFor(ctx, job)
+		if err != nil {
+			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+				w.emitNotify(kind, outcomeSkipped)
+				return nil
+			}
+			w.emitNotify(kind, outcomeRetryable)
+			return err
+		}
+		early, attempt, err := w.gate.Reserve(ctx, ref)
+		if err != nil {
+			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+				w.emitNotify(kind, outcomeSkipped)
+				return nil
+			}
+			w.emitNotify(kind, outcomeOutage)
+			return river.JobSnooze(notifyOutageSnooze)
+		}
+		if !early.Allow {
+			return w.holdVerdict(kind, early)
+		}
+		decision, token, err := w.gate.ConsumeAttempt(ctx, attempt)
+		if err != nil {
+			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+				w.emitNotify(kind, outcomeSkipped)
+				return nil
+			}
+			w.emitNotify(kind, outcomeOutage)
+			return river.JobSnooze(notifyOutageSnooze)
+		}
+		if !decision.Allow || token == nil {
+			return w.holdVerdict(kind, decision)
+		}
+		auth = *token
+	}
+
+	out := w.deliverer.Deliver(ctx, wh, kind, auth)
 	if out.Err == nil {
 		w.emitNotify(kind, outcomeSent)
 		return nil
@@ -207,4 +289,42 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[WebhookNotifyArg
 	// Transient: let River reschedule per NextRetry until MaxNotifyAttempts.
 	w.emitNotify(kind, outcomeRetryable)
 	return fmt.Errorf("webhook notify attempt %d failed: %w", job.Attempt, out.Err)
+}
+
+// operationFor returns the job's durable operation, resolving and stamping a
+// legacy job through the sweep's Prepare path.
+func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[WebhookNotifyArgs]) (sendingpolicy.OperationRef, error) {
+	if job.Args.OperationRef != nil && !job.Args.OperationRef.IsZero() {
+		return *job.Args.OperationRef, nil
+	}
+	if w.resolve == nil {
+		return sendingpolicy.OperationRef{}, fmt.Errorf("webhook notify: legacy job %d carries no operation and no resolver is wired", job.ID)
+	}
+	ref, err := w.resolve(ctx, job.Args.WebhookID)
+	if err != nil {
+		return sendingpolicy.OperationRef{}, err
+	}
+	if w.stamp != nil {
+		if err := w.stamp(ctx, job.ID, ref); err != nil {
+			log.Printf("[webhook-notify] stamp operation on legacy job %d: %v", job.ID, err)
+		}
+	}
+	return ref, nil
+}
+
+// holdVerdict turns a gate hold into River's answer: a terminal hold cancels
+// the job; everything else waits for the gate's retry time or the outage pace.
+func (w *NotifyWorker) holdVerdict(kind string, d sendingpolicy.Decision) error {
+	if d.Terminal {
+		w.emitNotify(kind, outcomePermanent)
+		return river.JobCancel(fmt.Errorf("webhook notify: sending policy: %s", d.Reason))
+	}
+	w.emitNotify(kind, outcomeOutage)
+	delay := notifyOutageSnooze
+	if !d.RetryAt.IsZero() {
+		if until := time.Until(d.RetryAt); until > delay {
+			delay = until
+		}
+	}
+	return river.JobSnooze(delay)
 }
