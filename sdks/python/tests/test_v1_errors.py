@@ -231,6 +231,11 @@ def test_catalog_family_overrides():
         ),
         E2APermissionError,
     )
+    paused = from_api_exception(
+        _exc(403, body='{"error":{"code":"sending_paused","message":"x"}}')
+    )
+    assert isinstance(paused, E2APermissionError)
+    assert paused.retryable is False
     assert isinstance(
         from_api_exception(
             _exc(409, body='{"error":{"code":"message_not_pending","message":"x"}}')

@@ -1490,8 +1490,17 @@ func waitForOutboundJobsTerminal(
 
 func outboundJobMessageID(job outboundJobRecord) (string, error) {
 	var args map[string]json.RawMessage
-	if json.Unmarshal([]byte(job.Args), &args) != nil || len(args) != 1 {
+	if json.Unmarshal([]byte(job.Args), &args) != nil {
 		return "", errors.New("invalid outbound job args")
+	}
+	// The accept transaction stamps the durable sending operation reference
+	// beside the message id (sending abuse prevention, slice B6). Nothing
+	// else may appear: the eval's safety claim is that the queue holds only
+	// the jobs it knows the shape of.
+	for key := range args {
+		if key != "message_id" && key != "operation_ref" {
+			return "", errors.New("invalid outbound job args")
+		}
 	}
 	var messageID string
 	if json.Unmarshal(args["message_id"], &messageID) != nil || messageID == "" {

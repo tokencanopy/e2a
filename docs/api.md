@@ -313,6 +313,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `unauthorized` | 401 | Missing or invalid credentials (REST and the WebSocket handshake). |
 | `forbidden` | 403 | Authenticated but not allowed (key scope, cross-tenant access). |
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
+| `sending_paused` | 403 | Outbound sending is paused for the account by the platform's abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |
@@ -859,6 +860,8 @@ retryability; clients must not reinterpret those fields independently:
 | `submission.provider_rejected` | `submission` | `failed` | false |
 | `submission.local_retries_exhausted` | `submission` | `failed` | true |
 | `submission.cancelled` | `submission` | `failed` | false |
+| `submission.policy_budget_expired` | `submission` | `failed` | true |
+| `submission.sending_setup_expired` | `submission` | `failed` | true |
 | `delivery.recipient_server_accepted` | `delivery` | `delivered` | false |
 | `delivery.temporary_delay` | `delivery` | `deferred` | true |
 | `delivery.permanent_bounce` | `delivery` | `bounced` | false |

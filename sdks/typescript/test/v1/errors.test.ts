@@ -168,6 +168,10 @@ describe("code-first class selection (F2)", () => {
     expect(toE2AError({ status: 403, code: "blocked_by_policy", message: "x" })).toBeInstanceOf(
       E2APermissionError,
     );
+    expect(toE2AError({ status: 403, code: "sending_paused", message: "x" })).toBeInstanceOf(
+      E2APermissionError,
+    );
+    expect(toE2AError({ status: 403, code: "sending_paused", message: "x" }).retryable).toBe(false);
     expect(toE2AError({ status: 409, code: "message_not_pending", message: "x" })).toBeInstanceOf(
       E2AConflictError,
     );
