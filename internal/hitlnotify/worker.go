@@ -85,6 +85,10 @@ type Deliverer interface {
 // account, so the job is cancelled, never retried.
 var errOperationMismatch = errors.New("hitl notify: job operation reference does not name this message")
 
+// maxNotifyAge bounds how long an approval request may wait behind a gate
+// hold, independent of the hold's own TTL.
+const maxNotifyAge = 7 * 24 * time.Hour
+
 // OperationResolver recovers the durable operation for a job that carries no
 // reference, through the same Prepare path an enqueue runs.
 type OperationResolver func(ctx context.Context, messageID string) (sendingpolicy.OperationRef, error)
@@ -114,6 +118,7 @@ type NotifyWorker struct {
 	gate      sendingpolicy.Gate
 	resolve   OperationResolver
 	stamp     ArgStamper
+	restamp   ArgStamper
 }
 
 // NewNotifyWorker builds a worker with no sending-protection gate. Without one
@@ -140,10 +145,20 @@ func (w *NotifyWorker) WithOperationResolver(r OperationResolver) *NotifyWorker 
 	return w
 }
 
-// WithArgStamper injects the job-args stamp used after a legacy resolution.
+// WithArgStamper injects the job-args stamp used after a legacy resolution
+// (adds the reference only when absent).
 func (w *NotifyWorker) WithArgStamper(s ArgStamper) *NotifyWorker {
 	if s != nil {
 		w.stamp = s
+	}
+	return w
+}
+
+// WithArgRestamper injects the unconditional re-key used when a job carries
+// a pre-derivation reference.
+func (w *NotifyWorker) WithArgRestamper(s ArgStamper) *NotifyWorker {
+	if s != nil {
+		w.restamp = s
 	}
 	return w
 }
@@ -175,6 +190,13 @@ func (w *NotifyWorker) Work(ctx context.Context, job *river.Job[HITLNotifyArgs])
 	}
 	if msg.ApprovalExpiresAt != nil && msg.ApprovalExpiresAt.Before(time.Now()) {
 		return nil // hold already past TTL — a review email is now useless
+	}
+	if !job.CreatedAt.IsZero() && time.Since(job.CreatedAt) > maxNotifyAge {
+		// A hold with no TTL on record behind a paused account would otherwise
+		// snooze forever (River's snooze spends no attempt); a week-old
+		// approval request is stale by any reading.
+		log.Printf("[hitl-notify] dropping notice for %s: older than %s", msg.ID, maxNotifyAge)
+		return nil
 	}
 	if pn.Notified {
 		return nil // a prior attempt already sent it (crash-after-send re-drive)
@@ -271,11 +293,22 @@ func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[HITLNoti
 	// reference naming any other operation would charge another account: the
 	// same binding the message worker enforces, checked before Reserve.
 	want := sendingpolicy.HITLNotificationOperationID(job.Args.MessageID)
+	stamp := w.stamp
 	if job.Args.OperationRef != nil && !job.Args.OperationRef.IsZero() {
-		if job.Args.OperationRef.ID() != want {
+		stored := job.Args.OperationRef.ID()
+		if stored == want {
+			return *job.Args.OperationRef, nil
+		}
+		if sendingpolicy.IsHITLNotificationOperationID(stored) {
+			// A derived id for a different message: foreign, never authorize.
 			return sendingpolicy.OperationRef{}, errOperationMismatch
 		}
-		return *job.Args.OperationRef, nil
+		// A pre-derivation reference — migration 113 stamped adopted jobs
+		// with op_<md5>, and the first build of this seam minted op_<rand>.
+		// Its source is still this job's own message, so re-derive through
+		// the same Prepare path and replace the reference, once.
+		log.Printf("[hitl-notify] job %d carries a pre-derivation operation reference %s; re-keying", job.ID, stored)
+		stamp = w.restamp
 	}
 	if w.resolve == nil {
 		return sendingpolicy.OperationRef{}, fmt.Errorf("hitl notify: legacy job %d carries no operation and no resolver is wired", job.ID)
@@ -287,10 +320,10 @@ func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[HITLNoti
 	if ref.ID() != want {
 		return sendingpolicy.OperationRef{}, errOperationMismatch
 	}
-	if w.stamp != nil {
-		if err := w.stamp(ctx, job.ID, ref); err != nil {
+	if stamp != nil {
+		if err := stamp(ctx, job.ID, ref); err != nil {
 			// Not fatal: the reference is valid for this execution; a retry
-			// resolves again and stamps then.
+			// resolves again (idempotently) and stamps then.
 			log.Printf("[hitl-notify] stamp operation on legacy job %d: %v", job.ID, err)
 		}
 	}

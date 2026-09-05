@@ -122,6 +122,8 @@ func (j *Jobs) NotifyWorker() *NotifyWorker {
 	if j.pool != nil {
 		w = w.WithArgStamper(func(ctx context.Context, jobID int64, ref sendingpolicy.OperationRef) error {
 			return jobs.StampJobArg(ctx, j.pool, jobID, "operation_ref", ref)
+		}).WithArgRestamper(func(ctx context.Context, jobID int64, ref sendingpolicy.OperationRef) error {
+			return jobs.SetJobArg(ctx, j.pool, jobID, "operation_ref", ref)
 		})
 	}
 	return w

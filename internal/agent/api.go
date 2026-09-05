@@ -2009,7 +2009,10 @@ func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, s
 			// this path (the request ends here), so give its units back
 			// rather than leave them charged until midnight. Best effort:
 			// the gate's day-scoped expiry is the backstop.
-			if cerr := a.gate.CancelAttempt(context.WithoutCancel(ctx), attemptRef); cerr != nil {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), feedbackReleaseTimeout)
+			cerr := a.gate.CancelAttempt(releaseCtx, attemptRef)
+			cancel()
+			if cerr != nil {
 				log.Printf("[feedback] release reserved attempt after authorize error: %v", cerr)
 			}
 			return fmt.Errorf("authorize feedback attempt: %w", err)
@@ -2033,12 +2036,20 @@ func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, s
 }
 
 // feedbackSendAttempts bounds the physical submissions one feedback request
-// may make; feedbackRetryBackoff paces them so every attempt fits inside
-// feedbackEmailTimeout. Each is a distinct charged attempt on the feedback
-// operation.
+// may make; feedbackRetryBackoff paces them. The sleeps total six of the ten
+// seconds feedbackEmailTimeout allows, so all four attempts fit only when
+// the relay answers quickly (a refused connection, a fast 4xx); a relay that
+// hangs consumes the budget on its first attempt and the deadline exit
+// reports that attempt's error. Each attempt is a distinct charged ordinal
+// on the feedback operation.
 const feedbackSendAttempts = 4
 
 var feedbackRetryBackoff = []time.Duration{time.Second, 2 * time.Second, 3 * time.Second}
+
+// feedbackReleaseTimeout bounds the best-effort release of a reserved
+// attempt after an authorize error, so a database that is already failing
+// cannot park the handler goroutine.
+const feedbackReleaseTimeout = 2 * time.Second
 
 // feedbackSubmissionID mints the server-side identity one feedback request's
 // operation is keyed by.

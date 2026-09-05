@@ -257,3 +257,40 @@ func TestReconcileLegacySendingJobsLeavesClaimedJobsToTheirWorker(t *testing.T) 
 		t.Fatalf("already stamped job: outcome=%v err=%v, want skipped", outcome, err)
 	}
 }
+
+// TestReconcileLegacySendingJobsReKeysPreDerivationReferences: a notify job
+// migration 113 stamped with op_<md5> is scanned, re-resolved through the
+// Prepare path and re-keyed to the derived id; a conforming one is left alone.
+func TestReconcileLegacySendingJobsReKeysPreDerivationReferences(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	resetRiverJobs(t, pool)
+	store := identity.NewStore(pool)
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	msg, wh := seedReconcileSource(t, pool, store, "rekey")
+
+	md5Hitl := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1,"id":"op_0123456789abcdef0123456789abcdef"}}`)
+	md5Wh := insertLegacyJob(t, pool, "webhook_notify", `{"webhook_id":"`+wh.ID+`","kind":"warning","operation_ref":{"v":1,"id":"op_fedcba9876543210fedcba9876543210"}}`)
+	conforming := insertLegacyJob(t, pool, "hitl_notify", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1,"id":"`+sendingpolicy.HITLNotificationOperationID(msg.ID)+`"}}`)
+	send := insertLegacyJob(t, pool, "outbound_send", `{"message_id":"`+msg.ID+`","operation_ref":{"v":1,"id":"`+msg.ID+`"}}`)
+
+	var out bytes.Buffer
+	if err := runReconcileLegacySendingJobs(ctx, pool, gate, &out); err != nil {
+		t.Fatalf("reconcile: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "scanned:   2") || !strings.Contains(out.String(), "stamped:   2") {
+		t.Fatalf("want the two md5-keyed jobs scanned and re-keyed:\n%s", out.String())
+	}
+	if _, op := legacyJobState(t, pool, md5Hitl); op != sendingpolicy.HITLNotificationOperationID(msg.ID) {
+		t.Errorf("hitl job op = %q, want the derived id", op)
+	}
+	if _, op := legacyJobState(t, pool, md5Wh); op != webhooknotify.ExpectedOperationID(wh, webhooknotify.KindWarning) {
+		t.Errorf("webhook job op = %q, want the warning episode's derived id", op)
+	}
+	if _, op := legacyJobState(t, pool, conforming); op != sendingpolicy.HITLNotificationOperationID(msg.ID) {
+		t.Errorf("conforming hitl job touched: %q", op)
+	}
+	if _, op := legacyJobState(t, pool, send); op != msg.ID {
+		t.Errorf("conforming send job touched: %q", op)
+	}
+}

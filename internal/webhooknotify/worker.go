@@ -145,6 +145,7 @@ type NotifyWorker struct {
 	gate      sendingpolicy.Gate
 	resolve   OperationResolver
 	stamp     ArgStamper
+	restamp   ArgStamper
 	metrics   Metrics // nil ⇒ no emission (nil-safe via emitNotify)
 }
 
@@ -170,10 +171,20 @@ func (w *NotifyWorker) WithOperationResolver(r OperationResolver) *NotifyWorker 
 	return w
 }
 
-// WithArgStamper injects the job-args stamp used after a legacy resolution.
+// WithArgStamper injects the job-args stamp used after a legacy resolution
+// (adds the reference only when absent).
 func (w *NotifyWorker) WithArgStamper(s ArgStamper) *NotifyWorker {
 	if s != nil {
 		w.stamp = s
+	}
+	return w
+}
+
+// WithArgRestamper injects the unconditional re-key used when a job carries
+// a pre-derivation reference.
+func (w *NotifyWorker) WithArgRestamper(s ArgStamper) *NotifyWorker {
+	if s != nil {
+		w.restamp = s
 	}
 	return w
 }
@@ -348,11 +359,21 @@ func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[WebhookN
 	// episode's (nothing left to say): the binding the message worker
 	// enforces, checked before Reserve.
 	want := ExpectedOperationID(wh, job.Args.NotifyKind)
+	stamp := w.stamp
 	if job.Args.OperationRef != nil && !job.Args.OperationRef.IsZero() {
-		if job.Args.OperationRef.ID() != want {
+		stored := job.Args.OperationRef.ID()
+		if stored == want {
+			return *job.Args.OperationRef, nil
+		}
+		if sendingpolicy.IsWebhookHealthOperationID(stored) {
+			// A derived id for another webhook or a superseded episode.
 			return sendingpolicy.OperationRef{}, errOperationMismatch
 		}
-		return *job.Args.OperationRef, nil
+		// A pre-derivation reference (migration 113's op_<md5>, or the first
+		// build of this seam): its source is still this job's own webhook,
+		// so re-derive through the same Prepare path and replace it, once.
+		log.Printf("[webhook-notify] job %d carries a pre-derivation operation reference %s; re-keying", job.ID, stored)
+		stamp = w.restamp
 	}
 	if w.resolve == nil {
 		return sendingpolicy.OperationRef{}, fmt.Errorf("webhook notify: legacy job %d carries no operation and no resolver is wired", job.ID)
@@ -364,8 +385,8 @@ func (w *NotifyWorker) operationFor(ctx context.Context, job *river.Job[WebhookN
 	if ref.ID() != want {
 		return sendingpolicy.OperationRef{}, errOperationMismatch
 	}
-	if w.stamp != nil {
-		if err := w.stamp(ctx, job.ID, ref); err != nil {
+	if stamp != nil {
+		if err := stamp(ctx, job.ID, ref); err != nil {
 			log.Printf("[webhook-notify] stamp operation on legacy job %d: %v", job.ID, err)
 		}
 	}

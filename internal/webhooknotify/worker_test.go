@@ -503,3 +503,39 @@ func isCancel(err error) bool {
 	var cancel *river.JobCancelError
 	return errors.As(err, &cancel)
 }
+
+// TestNotifyWorker_PreDerivationReferenceIsReKeyed: a job stamped before the
+// episode-derived ids existed (migration 113's op_<md5>) is re-resolved and
+// its reference replaced, not cancelled.
+func TestNotifyWorker_PreDerivationReferenceIsReKeyed(t *testing.T) {
+	fd := &fakeDeliverer{}
+	g := allowAll()
+	resolved, stamped, restamped := 0, 0, 0
+	var restampedWith string
+	w := webhooknotify.NewNotifyWorker(&fakeStore{wh: hook(false, nil)}, fd).WithMetrics(&fakeMetrics{}).WithGate(g).
+		WithOperationResolver(func(_ context.Context, id, kind string) (sendingpolicy.OperationRef, error) {
+			resolved++
+			wh := hook(false, nil)
+			wh.ID = id
+			return refFor(webhooknotify.ExpectedOperationID(wh, kind)), nil
+		}).
+		WithArgStamper(func(context.Context, int64, sendingpolicy.OperationRef) error { stamped++; return nil }).
+		WithArgRestamper(func(_ context.Context, _ int64, ref sendingpolicy.OperationRef) error {
+			restamped++
+			restampedWith = ref.ID()
+			return nil
+		})
+	j := job("wh_test", webhooknotify.KindDisabled, 1)
+	legacy := refFor("op_0123456789abcdef0123456789abcdef")
+	j.Args.OperationRef = &legacy
+	if err := w.Work(context.Background(), j); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	want := webhooknotify.ExpectedOperationID(hook(false, nil), webhooknotify.KindDisabled)
+	if resolved != 1 || restamped != 1 || stamped != 0 || restampedWith != want {
+		t.Fatalf("resolved=%d restamped=%d stamped=%d with=%q, want 1/1/0 with %q", resolved, restamped, stamped, restampedWith, want)
+	}
+	if g.reserves != 1 || fd.called != 1 {
+		t.Fatalf("reserves=%d submits=%d, want 1/1", g.reserves, fd.called)
+	}
+}

@@ -38,3 +38,25 @@ func StampJobArg(ctx context.Context, db Execer, jobID int64, key string, value 
 	}
 	return nil
 }
+
+// SetJobArg writes one key into a River job's args unconditionally, leaving
+// every other field in place. It is the re-key half of the compatibility
+// story: a job whose reference predates the source-derived ids (migration
+// 113 stamped `op_<md5>`) is re-resolved through the same Prepare path and
+// its reference replaced, once.
+func SetJobArg(ctx context.Context, db Execer, jobID int64, key string, value any) error {
+	if db == nil {
+		return fmt.Errorf("set job arg: no database")
+	}
+	patch, err := json.Marshal(map[string]any{key: value})
+	if err != nil {
+		return fmt.Errorf("set job arg: encode %s: %w", key, err)
+	}
+	if _, err := db.Exec(ctx,
+		`UPDATE river_job SET args = args || $2::jsonb WHERE id = $1`,
+		jobID, string(patch),
+	); err != nil {
+		return fmt.Errorf("set job arg %s on job %d: %w", key, jobID, err)
+	}
+	return nil
+}

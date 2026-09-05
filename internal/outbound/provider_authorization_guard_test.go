@@ -19,9 +19,17 @@ import (
 //     authorized adapter;
 //   - any exported relay method that could open a socket without a token.
 //
-// Exceptions are exact file paths, never substrings, and each is named here
-// with the reason it may exist. Adding a provider-bound caller anywhere else
-// fails this test until it goes through ProviderSubmitter.SubmitOnce.
+// Exceptions are exact file paths (or one exact symbol), never substrings,
+// and each is named here with the reason it may exist. Adding a
+// provider-bound caller anywhere else fails this test until it goes through
+// ProviderSubmitter.SubmitOnce.
+//
+// What it does not see, stated so nobody over-reads it: a second unexported
+// dialer added inside smtp_relay.go under another name (that file may import
+// net/smtp; the sentinel check catches a rename of the core, not an addition
+// beside it), a mail-capable SDK other than the ones fenced below, and any
+// provider reached over plain net/http. Those arrive as a new import or a new
+// dependency, which is where review catches them.
 func TestEveryProviderCallRequiresAuthorization(t *testing.T) {
 	root := moduleRoot(t)
 	files := trackedGoFiles(t, root)
@@ -102,7 +110,7 @@ func TestEveryProviderCallRequiresAuthorization(t *testing.T) {
 					allowedSocketCalls++
 					return true
 				}
-				t.Errorf("%s:%s references the relay's socket-opening core outside ProviderSubmitter.SubmitOnce", rel, fset.Position(sel.Pos()))
+				t.Errorf("%s references the relay's socket-opening core outside ProviderSubmitter.SubmitOnce", fset.Position(sel.Pos()))
 				return true
 			})
 		}

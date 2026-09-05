@@ -133,6 +133,9 @@ func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
 // stats, MIME, Message-ID, DKIM), classified like a send so the worker
 // treats a permanent compose failure the same way.
 func (n *Notifier) Compose(ctx context.Context, wh *identity.Webhook, kind string) (outbound.Envelope, DeliverOutcome) {
+	if n == nil {
+		return outbound.Envelope{}, DeliverOutcome{Err: fmt.Errorf("webhook notify: notifier is nil")}
+	}
 	env, err := n.compose(ctx, wh, kind)
 	if err != nil {
 		return outbound.Envelope{}, classify(err)
@@ -143,6 +146,9 @@ func (n *Notifier) Compose(ctx context.Context, wh *identity.Webhook, kind strin
 // Submit implements Deliverer: one authorized submission, classified for the
 // NotifyWorker.
 func (n *Notifier) Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	if n == nil {
+		return DeliverOutcome{Err: fmt.Errorf("webhook notify: notifier is nil")}
+	}
 	if _, err := n.submitter.SubmitOnce(ctx, auth, env); err != nil {
 		return classify(fmt.Errorf("webhook notify: smtp send: %w", err))
 	}

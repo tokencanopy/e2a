@@ -464,3 +464,55 @@ func TestNotifyWorker_ForeignOperationReferenceIsCancelled(t *testing.T) {
 		t.Fatalf("legacy: reserves=%d submits=%d, want 0/0", g.reserves, fd.called)
 	}
 }
+
+// TestNotifyWorker_PreDerivationReferenceIsReKeyed: a job stamped before the
+// source-derived ids existed (migration 113's op_<md5>, or the first build
+// of this seam) is re-resolved through the Prepare path and its reference
+// replaced, not cancelled — its source is still this job's own message.
+func TestNotifyWorker_PreDerivationReferenceIsReKeyed(t *testing.T) {
+	fd := &fakeDeliverer{}
+	g := allowAll()
+	resolved, stamped, restamped := 0, 0, 0
+	var restampedWith string
+	w := hitlnotify.NewNotifyWorker(&fakeStore{pn: pending("msg_1")}, fd).WithGate(g).
+		WithOperationResolver(func(_ context.Context, id string) (sendingpolicy.OperationRef, error) {
+			resolved++
+			return refFor(sendingpolicy.HITLNotificationOperationID(id)), nil
+		}).
+		WithArgStamper(func(context.Context, int64, sendingpolicy.OperationRef) error { stamped++; return nil }).
+		WithArgRestamper(func(_ context.Context, _ int64, ref sendingpolicy.OperationRef) error {
+			restamped++
+			restampedWith = ref.ID()
+			return nil
+		})
+	j := job("msg_1", 1)
+	legacy := refFor("op_0123456789abcdef0123456789abcdef")
+	j.Args.OperationRef = &legacy
+	if err := w.Work(context.Background(), j); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if resolved != 1 || restamped != 1 || stamped != 0 || restampedWith != sendingpolicy.HITLNotificationOperationID("msg_1") {
+		t.Fatalf("resolved=%d restamped=%d stamped=%d with=%q, want 1/1/0 with the derived id", resolved, restamped, stamped, restampedWith)
+	}
+	if g.reserves != 1 || fd.called != 1 {
+		t.Fatalf("reserves=%d submits=%d, want 1/1", g.reserves, fd.called)
+	}
+}
+
+// TestNotifyWorker_StaleNoticeIsDropped: a request older than the age bound
+// is dropped instead of snoozing forever behind a hold.
+func TestNotifyWorker_StaleNoticeIsDropped(t *testing.T) {
+	fd := &fakeDeliverer{}
+	g := &fakeGate{reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonAccountPaused}}
+	pn := pending("msg_1")
+	pn.Message.ApprovalExpiresAt = nil
+	w := hitlnotify.NewNotifyWorker(&fakeStore{pn: pn}, fd).WithGate(g)
+	j := gatedJob("msg_1", 1)
+	j.CreatedAt = time.Now().Add(-8 * 24 * time.Hour)
+	if err := w.Work(context.Background(), j); err != nil {
+		t.Fatalf("err = %v, want a silent drop", err)
+	}
+	if g.reserves != 0 || fd.composed != 0 || fd.called != 0 {
+		t.Fatalf("reserves=%d composes=%d submits=%d, want 0/0/0", g.reserves, fd.composed, fd.called)
+	}
+}

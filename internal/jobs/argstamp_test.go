@@ -43,6 +43,25 @@ func TestStampJobArg(t *testing.T) {
 	if err := jobs.StampJobArg(ctx, pool, id+1000, "operation_ref", "x"); err != nil {
 		t.Fatalf("missing job must be a no-op, got %v", err)
 	}
+
+	// SetJobArg replaces the key and keeps the rest.
+	if err := jobs.SetJobArg(ctx, pool, id, "operation_ref", map[string]any{"v": 1, "id": "op_3"}); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT args->>'message_id', args->'operation_ref'->>'id' FROM river_job WHERE id = $1`, id,
+	).Scan(&messageID, &opID); err != nil {
+		t.Fatal(err)
+	}
+	if messageID != "msg_1" || opID != "op_3" {
+		t.Fatalf("after set: message_id=%q operation_ref.id=%q, want msg_1 / op_3", messageID, opID)
+	}
+	if err := jobs.SetJobArg(ctx, nil, id, "k", "v"); err == nil {
+		t.Fatal("nil database must be refused")
+	}
+	if err := jobs.SetJobArg(ctx, pool, id, "k", make(chan int)); err == nil {
+		t.Fatal("unencodable value must be refused")
+	}
 }
 
 // TestStampJobArgRefusesBadInputs: no database and an unencodable value are

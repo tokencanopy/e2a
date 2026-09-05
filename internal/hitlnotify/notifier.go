@@ -253,6 +253,9 @@ func (n *Notifier) submit(ctx context.Context, env outbound.Envelope, auth sendi
 // Compose implements Deliverer: the provider-free half, classified like a
 // send so the worker treats a permanent compose failure the same way.
 func (n *Notifier) Compose(ctx context.Context, pn *identity.PendingNotify) (outbound.Envelope, DeliverOutcome) {
+	if n == nil {
+		return outbound.Envelope{}, DeliverOutcome{Err: fmt.Errorf("notify: notifier is nil")}
+	}
 	if pn == nil {
 		return outbound.Envelope{}, DeliverOutcome{Err: fmt.Errorf("notify: nothing to compose"), Permanent: true}
 	}
@@ -267,6 +270,9 @@ func (n *Notifier) Compose(ctx context.Context, pn *identity.PendingNotify) (out
 // River NotifyWorker — a 5xx / validation reject is Permanent (no retry), an
 // unreachable relay is an Outage (snooze), everything else retries.
 func (n *Notifier) Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	if n == nil {
+		return DeliverOutcome{Err: fmt.Errorf("notify: notifier is nil")}
+	}
 	if err := n.submit(ctx, env, auth); err != nil {
 		return classify(err)
 	}

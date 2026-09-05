@@ -41,6 +41,17 @@ var legacyReconcileStates = []string{
 	string(rivertype.JobStateScheduled),
 }
 
+// conformingReferenceSQL is true for a river_job row whose operation_ref
+// already has the shape its worker derives: the message id for a send, the
+// op_hitl_ / op_wh_ derivations for the two notice kinds.
+const conformingReferenceSQL = `(
+	(args ? 'operation_ref') AND (
+		(kind = 'outbound_send')
+		OR (kind = 'hitl_notify' AND args->'operation_ref'->>'id' LIKE 'op\_hitl\_%')
+		OR (kind = 'webhook_notify' AND args->'operation_ref'->>'id' LIKE 'op\_wh\_%')
+	)
+)`
+
 // legacyReconcileCounts is the operator-facing summary of one reconcile pass.
 type legacyReconcileCounts struct {
 	Scanned   int
@@ -68,12 +79,15 @@ func runReconcileLegacySendingJobs(ctx context.Context, pool *pgxpool.Pool, gate
 	if err != nil {
 		return fmt.Errorf("river client: %w", err)
 	}
+	// A job is legacy when it carries no reference, or a pre-derivation one:
+	// migration 113 stamped adopted notify jobs with op_<md5>, which the
+	// workers now re-key at fire time; this command does the same up front.
 	rows, err := pool.Query(ctx, `
 		SELECT id, kind, args
 		  FROM river_job
 		 WHERE kind = ANY($1)
 		   AND state = ANY($2)
-		   AND NOT (args ? 'operation_ref')
+		   AND NOT `+conformingReferenceSQL+`
 		 ORDER BY id`, legacySendingJobKinds, legacyReconcileStates)
 	if err != nil {
 		return fmt.Errorf("scan legacy sending jobs: %w", err)
@@ -158,17 +172,17 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 	// left the reconcilable states is skipped and left to that worker. The
 	// lock also serializes against the worker's own stamp.
 	var state string
-	var stamped bool
+	var conforming bool
 	err = tx.QueryRow(ctx,
-		`SELECT state, (args ? 'operation_ref') FROM river_job WHERE id = $1 FOR UPDATE`, jobID,
-	).Scan(&state, &stamped)
+		`SELECT state, `+conformingReferenceSQL+` FROM river_job WHERE id = $1 FOR UPDATE`, jobID,
+	).Scan(&state, &conforming)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return legacyOutcomeSkipped, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("lock job: %w", err)
 	}
-	if stamped || !slices.Contains(legacyReconcileStates, state) {
+	if conforming || !slices.Contains(legacyReconcileStates, state) {
 		return legacyOutcomeSkipped, nil
 	}
 
@@ -227,7 +241,9 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 			return 0, fmt.Errorf("cancel (%s): %w", cancelReason, err)
 		}
 		outcome = legacyOutcomeCancelled
-	} else if err := jobs.StampJobArg(ctx, tx, jobID, "operation_ref", ref); err != nil {
+	} else if err := jobs.SetJobArg(ctx, tx, jobID, "operation_ref", ref); err != nil {
+		// Unconditional: the row is locked and known non-conforming, and a
+		// pre-derivation reference must be replaced, not kept.
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -312,8 +312,13 @@ cross it:
   `op_wh_<kind>_<webhook id>_<episode>` for a health notice, where the
   episode is the `warn_notified_at` / `auto_disabled_at` stamp the sweep
   wrote in the same transaction — so preparing the same source twice yields
-  one operation, and the worker cancels a job whose reference names any
-  other operation (the binding the message worker enforces). The worker
+  one operation, and the worker cancels a job whose reference is a derived
+  id for any other source (the binding the message worker enforces). A
+  reference of any other shape — migration 113 stamped adopted notify jobs
+  with `op_<md5>` — is a pre-derivation reference for the job's own source:
+  the worker re-resolves it through the same Prepare path and replaces it
+  once (`jobs.SetJobArg`), so an upgrade that crosses v1.8.7 drains its
+  backlog instead of cancelling it. The worker
   order is compose → Reserve → early hold → ConsumeAttempt → authorized
   submit: every fallible, provider-free step (owner lookup, token signing,
   MIME, DKIM) runs before an ordinal is charged, and the token is consumed
@@ -330,8 +335,9 @@ cross it:
 
 Operators cutting over a slot with a queued backlog run
 `e2a -reconcile-legacy-sending-jobs`: it stamps an operation onto every
-pending `outbound_send` / `hitl_notify` / `webhook_notify` job that has none,
-through exactly the Prepare path its enqueue would have used, cancels the
+pending `outbound_send` / `hitl_notify` / `webhook_notify` job that has none
+or a pre-derivation one, through exactly the Prepare path its enqueue would
+have used, cancels the
 ones whose source row is gone, and exits nonzero unless every scanned job was
 decided. Each job is re-read under its row lock inside its own transaction,
 so one a worker claimed after the scan is skipped and left to that worker;
