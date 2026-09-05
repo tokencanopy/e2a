@@ -2,16 +2,19 @@ package outboundsend_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 type fakeStore struct {
@@ -32,6 +35,7 @@ type fakeStore struct {
 	suppressedErr error
 
 	sent      []sentCall
+	holds     []holdCall
 	failed    []failedCall
 	deferred  []failedCall
 	temporary []failedCall
@@ -43,12 +47,18 @@ type fakeStore struct {
 }
 
 type sentCall struct{ id, provider, sentAs string }
+type holdCall struct {
+	id     string
+	class  outboundsend.HoldClass
+	anchor time.Time
+}
 type failedCall struct {
 	id                string
 	attempt           int
 	occurredAt        time.Time
 	detail            string
 	source            delivery.FailureSource
+	reason            messagelifecycle.ReasonCode
 	blockedRecipients []string
 }
 
@@ -62,8 +72,8 @@ func (f *fakeStore) MarkSent(_ context.Context, id string, _ int64, _ int, _ tim
 	f.sent = append(f.sent, sentCall{id, provider, sentAs})
 	return f.markSentErr
 }
-func (f *fakeStore) MarkFailed(_ context.Context, id string, _ int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, _ messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error) {
-	f.failed = append(f.failed, failedCall{id: id, attempt: attempt, occurredAt: occurredAt, detail: detail, source: source, blockedRecipients: blockedRecipients})
+func (f *fakeStore) MarkFailed(_ context.Context, id string, _ int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error) {
+	f.failed = append(f.failed, failedCall{id: id, attempt: attempt, occurredAt: occurredAt, detail: detail, source: source, reason: reason, blockedRecipients: blockedRecipients})
 	status := f.settleStatus
 	if status == "" {
 		status = delivery.StatusFailed
@@ -86,6 +96,13 @@ func (f *fakeStore) RecordTemporaryFailure(_ context.Context, id string, _ int64
 	f.temporary = append(f.temporary, failedCall{id: id})
 	return f.releaseErr
 }
+func (f *fakeStore) RecordHold(_ context.Context, id string, class outboundsend.HoldClass, anchor time.Time) error {
+	f.holds = append(f.holds, holdCall{id: id, class: class, anchor: anchor})
+	if f.job != nil && f.job.MessageID == id {
+		f.job.LocalHoldClass, f.job.LocalHoldAnchor = class, anchor
+	}
+	return nil
+}
 func (f *fakeStore) ReleaseSend(_ context.Context, id string, _ int64) error {
 	f.released = append(f.released, id)
 	return f.releaseErr
@@ -101,45 +118,11 @@ type fakeDeliverer struct {
 	out        outboundsend.DeliverOutcome
 	calls      int
 	returnedAt time.Time
+	auths      []sendingpolicy.ProviderAuthorization
 }
 
-type fakeRampGate struct {
-	decision   outboundsend.RampDecision
-	err        error
-	calls      []outboundsend.RampRequest
-	confirmed  []string
-	released   []string
-	resolved   []string
-	confirmErr error
-	releaseErr error
-}
-
-func (f *fakeRampGate) Reserve(_ context.Context, req outboundsend.RampRequest) (outboundsend.RampDecision, error) {
-	f.calls = append(f.calls, req)
-	return f.decision, f.err
-}
-
-func (f *fakeRampGate) Confirm(_ context.Context, messageID string) error {
-	f.confirmed = append(f.confirmed, messageID)
-	return f.confirmErr
-}
-
-func (f *fakeRampGate) Release(_ context.Context, messageID string) error {
-	f.released = append(f.released, messageID)
-	return f.releaseErr
-}
-
-func (f *fakeRampGate) Resolve(_ context.Context, messageID string) error {
-	f.resolved = append(f.resolved, messageID)
-	return nil
-}
-
-type permanentRampError struct{ msg string }
-
-func (e permanentRampError) Error() string   { return e.msg }
-func (e permanentRampError) Permanent() bool { return true }
-
-func (f *fakeDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (f *fakeDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob, auth sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
+	f.auths = append(f.auths, auth)
 	f.calls++
 	f.returnedAt = time.Now().UTC()
 	return f.out
@@ -286,172 +269,6 @@ func TestSendWorker_SuppressionObservationTimeFollowsDecision(t *testing.T) {
 	}
 }
 
-func TestSendWorker_RampLimitedReleasesAndSnoozesWithoutProviderIO(t *testing.T) {
-	j := acceptedJob("msg_1")
-	j.Domain = "new.example.com"
-	j.MessageType = "send"
-	j.SentAs = "own_address"
-	j.Recipients = []string{"One@example.net", "one@example.net", "two@example.net"}
-	st := &fakeStore{job: j}
-	dl := &fakeDeliverer{}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{
-		Allowed: false,
-		RetryAt: time.Now().Add(6 * time.Hour),
-	}}
-
-	err := outboundsend.NewSendWorker(st, dl, gate).Work(context.Background(), job("msg_1", 5))
-	if err == nil {
-		t.Fatal("limited send should snooze")
-	}
-	if dl.calls != 0 {
-		t.Fatalf("provider calls = %d, want 0", dl.calls)
-	}
-	if len(st.released) != 1 || st.released[0] != "msg_1" {
-		t.Fatalf("released = %v, want msg_1", st.released)
-	}
-	if len(gate.calls) != 1 || gate.calls[0].Units != 2 || gate.calls[0].Domain != "new.example.com" {
-		t.Fatalf("gate calls = %+v, want two deduplicated recipients", gate.calls)
-	}
-}
-
-func TestSendWorker_RampErrorFailsClosedAndSnoozes(t *testing.T) {
-	j := acceptedJob("msg_1")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	st := &fakeStore{job: j}
-	dl := &fakeDeliverer{}
-	gate := &fakeRampGate{err: errors.New("database unavailable")}
-
-	if err := outboundsend.NewSendWorker(st, dl, gate).Work(context.Background(), job("msg_1", 1)); err == nil {
-		t.Fatal("ramp storage error should snooze")
-	}
-	if dl.calls != 0 || len(st.released) != 1 {
-		t.Fatalf("gate error must release without provider I/O: calls=%d released=%v", dl.calls, st.released)
-	}
-}
-
-func TestSendWorker_RampExemptsPlatformTest(t *testing.T) {
-	j := acceptedJob("msg_test")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "test", "relay"
-	st := &fakeStore{job: j}
-	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-test"}}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: false}}
-
-	if err := outboundsend.NewSendWorker(st, dl, gate).Work(context.Background(), job("msg_test", 1)); err != nil {
-		t.Fatalf("Work: %v", err)
-	}
-	if len(gate.calls) != 0 || dl.calls != 1 {
-		t.Fatalf("platform test should bypass ramp: gate=%d provider=%d", len(gate.calls), dl.calls)
-	}
-}
-
-func TestSendWorker_ProviderEvidencePrecedesRamp(t *testing.T) {
-	j := acceptedJob("msg_1")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	j.ProviderAccepted, j.ProviderMessageID = true, "ses-evidence"
-	st := &fakeStore{job: j}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: false}}
-
-	if err := outboundsend.NewSendWorker(st, &fakeDeliverer{}, gate).Work(context.Background(), job("msg_1", 2)); err != nil {
-		t.Fatalf("Work: %v", err)
-	}
-	if len(gate.calls) != 0 {
-		t.Fatalf("provider evidence must settle before ramp reservation, got %+v", gate.calls)
-	}
-}
-
-func TestSendWorker_ConfirmsRampAfterMarkSent(t *testing.T) {
-	j := acceptedJob("msg_confirm")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	st := &fakeStore{job: j}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-confirm", SentAs: "own_address"}}
-	if err := outboundsend.NewSendWorker(st, dl, gate).Work(context.Background(), job(j.MessageID, 1)); err != nil {
-		t.Fatalf("Work: %v", err)
-	}
-	if len(st.sent) != 1 || len(gate.confirmed) != 1 || gate.confirmed[0] != j.MessageID {
-		t.Fatalf("sent=%v confirmed=%v", st.sent, gate.confirmed)
-	}
-}
-
-func TestSendWorker_RepairsRampConfirmationForAlreadySentMessage(t *testing.T) {
-	j := acceptedJob("msg_repair")
-	j.Domain, j.MessageType, j.SentAs, j.Status = "new.example.com", "send", "own_address", "sent"
-	gate := &fakeRampGate{}
-	dl := &fakeDeliverer{}
-	if err := outboundsend.NewSendWorker(&fakeStore{job: j}, dl, gate).Work(context.Background(), job(j.MessageID, 2)); err != nil {
-		t.Fatalf("Work: %v", err)
-	}
-	if dl.calls != 0 || len(gate.resolved) != 1 {
-		t.Fatalf("deliver=%d resolved=%v", dl.calls, gate.resolved)
-	}
-}
-
-func TestSendWorker_ReleasesRampOnPermanentProviderFailure(t *testing.T) {
-	j := acceptedJob("msg_release")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("rejected"), Permanent: true}}
-	_ = outboundsend.NewSendWorker(&fakeStore{job: j}, dl, gate).Work(context.Background(), job(j.MessageID, 1))
-	if len(gate.released) != 1 || gate.released[0] != j.MessageID {
-		t.Fatalf("released=%v", gate.released)
-	}
-}
-
-func TestSendWorker_RetainsRampOnAmbiguousFailure(t *testing.T) {
-	j := acceptedJob("msg_ambiguous")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("connection reset")}}
-	_ = outboundsend.NewSendWorker(&fakeStore{job: j}, dl, gate).Work(context.Background(), job(j.MessageID, 1))
-	if len(gate.released) != 0 {
-		t.Fatalf("ambiguous failure released ramp: %v", gate.released)
-	}
-}
-
-func TestSendWorker_FailsPermanentRampInvariant(t *testing.T) {
-	j := acceptedJob("msg_bad_ramp")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	st := &fakeStore{job: j}
-	gate := &fakeRampGate{err: permanentRampError{"domain missing"}}
-	if err := outboundsend.NewSendWorker(st, &fakeDeliverer{}, gate).Work(context.Background(), job(j.MessageID, 1)); err == nil {
-		t.Fatal("permanent ramp invariant should terminate")
-	}
-	if len(st.failed) != 1 {
-		t.Fatalf("failed=%v", st.failed)
-	}
-}
-
-func TestSendWorker_FailsRampDeferredMessagePastHorizon(t *testing.T) {
-	j := acceptedJob("msg_ramp_timeout")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	j.AcceptedAt = time.Now().Add(-73 * time.Hour)
-	st := &fakeStore{job: j}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: false, RetryAt: time.Now().Add(time.Hour)}}
-	if err := outboundsend.NewSendWorker(st, &fakeDeliverer{}, gate).Work(context.Background(), job(j.MessageID, 1)); err == nil {
-		t.Fatal("past-horizon ramp deferral should terminate")
-	}
-	if len(st.failed) != 1 || len(gate.released) != 1 {
-		t.Fatalf("failed=%v released=%v", st.failed, gate.released)
-	}
-}
-
-// A scheduled send measures its retry horizon from scheduled_at, not accept:
-// accepted 10 days ago but firing ~now, a ramp deferral must snooze/retry — NOT
-// terminally fail as the immediate-send case above does at the same accept age.
-// Guards the fix for the long-scheduled-send false-failure blocker.
-func TestSendWorker_ScheduledSendHorizonMeasuredFromScheduledAt(t *testing.T) {
-	j := acceptedJob("msg_sched_horizon")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	j.AcceptedAt = time.Now().Add(-10 * 24 * time.Hour) // long before fire
-	j.ScheduledAt = time.Now()                          // just fired — inside the horizon
-	st := &fakeStore{job: j}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: false, RetryAt: time.Now().Add(time.Hour)}}
-	err := outboundsend.NewSendWorker(st, &fakeDeliverer{}, gate).Work(context.Background(), job(j.MessageID, 1))
-	if len(st.failed) != 0 {
-		t.Fatalf("a just-fired long-scheduled send must not be terminated on a ramp deferral; failed=%v err=%v", st.failed, err)
-	}
-}
-
 func TestSendWorker_RetryableFailureDoesNotMarkFailed(t *testing.T) {
 	st := &fakeStore{job: acceptedJob("msg_1")}
 	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("transient 421")}}
@@ -480,34 +297,6 @@ func TestSendWorker_RetryableFailureReleaseErrorRetries(t *testing.T) {
 	}
 	if len(st.released) != 1 {
 		t.Fatalf("release calls = %v, want one", st.released)
-	}
-}
-
-func TestSendWorker_TerminalRampReleaseFailureResolvesOnRetry(t *testing.T) {
-	j := acceptedJob("msg_1")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	st := &fakeStore{job: j, terminalAfterFailure: true}
-	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("provider rejected message"), Permanent: true}}
-	gate := &fakeRampGate{
-		decision:   outboundsend.RampDecision{Allowed: true},
-		releaseErr: errors.New("ramp database unavailable"),
-	}
-	w := outboundsend.NewSendWorker(st, dl, gate)
-
-	if err := w.Work(context.Background(), job(j.MessageID, 1)); err == nil || !errors.Is(err, gate.releaseErr) {
-		t.Fatalf("first Work error = %v, want ramp release failure", err)
-	}
-	if len(st.failed) != 1 || len(gate.released) != 1 {
-		t.Fatalf("first Work failed/released = %v/%v, want one each", st.failed, gate.released)
-	}
-
-	// MarkFailed made the message terminal, so the retry cannot claim it. The
-	// worker must still settle the orphaned reservation from the durable outcome.
-	if err := w.Work(context.Background(), job(j.MessageID, 2)); err != nil {
-		t.Fatalf("retry Work: %v", err)
-	}
-	if len(gate.resolved) != 1 || gate.resolved[0] != j.MessageID {
-		t.Fatalf("resolved reservations = %v, want [%s]", gate.resolved, j.MessageID)
 	}
 }
 
@@ -560,4 +349,93 @@ func TestSendWorker_NextRetryMatchesEnvelope(t *testing.T) {
 			t.Errorf("attempt %d: next retry in %v, want ~%v", i, got, d)
 		}
 	}
+}
+
+// fakeGate is a scriptable sendingpolicy.Gate. Its references and tokens are
+// zero values — the worker never inspects them beyond nil/zero checks — and it
+// records every ledger call so tests can assert the fixed worker order.
+type fakeGate struct {
+	reserve     sendingpolicy.Decision
+	reserveErr  error
+	consume     sendingpolicy.Decision
+	consumeErr  error
+	deferred    []string
+	cancelled   []string
+	settled     []sendingpolicy.SettlementOutcome
+	reserves    int
+	consumes    int
+	lookupErr   error
+	lookupCalls int
+}
+
+func allowAll() *fakeGate {
+	return &fakeGate{reserve: sendingpolicy.Decision{Allow: true}, consume: sendingpolicy.Decision{Allow: true}}
+}
+
+func (g *fakeGate) PrepareExternalTx(context.Context, pgx.Tx, string) (sendingpolicy.AcceptanceDecision, sendingpolicy.OperationRef, error) {
+	return sendingpolicy.AcceptanceAccept, refFor("msg_prepared"), nil
+}
+func (g *fakeGate) PrepareNotificationTx(context.Context, pgx.Tx, sendingpolicy.NotificationRef) (sendingpolicy.OperationRef, error) {
+	return sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) PrepareProtectionNoticeTx(context.Context, pgx.Tx, sendingpolicy.ProtectionNoticeRef) (sendingpolicy.OperationRef, error) {
+	return sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) PreparePublicFeedback(context.Context, sendingpolicy.PublicFeedbackRef) (sendingpolicy.OperationRef, error) {
+	return sendingpolicy.OperationRef{}, nil
+}
+func (g *fakeGate) Reserve(context.Context, sendingpolicy.OperationRef) (sendingpolicy.Decision, sendingpolicy.AttemptRef, error) {
+	g.reserves++
+	return g.reserve, sendingpolicy.AttemptRef{}, g.reserveErr
+}
+func (g *fakeGate) ConsumeAttempt(context.Context, sendingpolicy.AttemptRef) (sendingpolicy.Decision, *sendingpolicy.ProviderAuthorization, error) {
+	g.consumes++
+	if g.consumeErr != nil || !g.consume.Allow {
+		return g.consume, nil, g.consumeErr
+	}
+	return g.consume, &sendingpolicy.ProviderAuthorization{}, nil
+}
+func (g *fakeGate) RedeemProviderCall(context.Context, sendingpolicy.ProviderAuthorization) error {
+	return nil
+}
+func (g *fakeGate) DeferAttempt(_ context.Context, a sendingpolicy.AttemptRef) error {
+	g.deferred = append(g.deferred, a.OperationID())
+	return nil
+}
+func (g *fakeGate) CancelAttempt(_ context.Context, a sendingpolicy.AttemptRef) error {
+	g.cancelled = append(g.cancelled, a.OperationID())
+	return nil
+}
+func (g *fakeGate) SettleProvider(_ context.Context, s sendingpolicy.ProviderSettlement) error {
+	g.settled = append(g.settled, s.Outcome)
+	return nil
+}
+func (g *fakeGate) SettleOperation(_ context.Context, _ sendingpolicy.OperationRef, o sendingpolicy.SettlementOutcome, _ string) error {
+	g.settled = append(g.settled, o)
+	return nil
+}
+func (g *fakeGate) LookupOperation(_ context.Context, id string) (sendingpolicy.OperationRef, error) {
+	g.lookupCalls++
+	if g.lookupErr != nil {
+		return sendingpolicy.OperationRef{}, g.lookupErr
+	}
+	return refFor(id), nil
+}
+
+// refFor builds an operation reference the way a River job carries one: the
+// versioned wire form holding only the id.
+func refFor(id string) sendingpolicy.OperationRef {
+	var ref sendingpolicy.OperationRef
+	if err := json.Unmarshal([]byte(`{"v":1,"id":"`+id+`"}`), &ref); err != nil {
+		panic(err)
+	}
+	return ref
+}
+
+// gatedJob is job() with the operation reference the accept path would stamp.
+func gatedJob(id string, attempt int) *river.Job[outboundsend.OutboundSendArgs] {
+	j := job(id, attempt)
+	ref := refFor(id)
+	j.Args.OperationRef = &ref
+	return j
 }

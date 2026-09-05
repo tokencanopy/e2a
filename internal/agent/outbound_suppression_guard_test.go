@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,37 +21,10 @@ import (
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
-	"github.com/tokencanopy/e2a/internal/sendramp"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
-
-type blockingRampGate struct {
-	entered  chan struct{}
-	resume   chan struct{}
-	mu       sync.Mutex
-	released []string
-}
-
-func (g *blockingRampGate) Reserve(context.Context, outboundsend.RampRequest) (outboundsend.RampDecision, error) {
-	close(g.entered)
-	<-g.resume
-	return outboundsend.RampDecision{Allowed: true}, nil
-}
-func (*blockingRampGate) Confirm(context.Context, string) error { return nil }
-func (g *blockingRampGate) Release(_ context.Context, messageID string) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.released = append(g.released, messageID)
-	return nil
-}
-func (*blockingRampGate) Resolve(context.Context, string) error { return nil }
-
-func (g *blockingRampGate) releasedIDs() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.released...)
-}
 
 // countingDeliverer records provider submits so the guard can assert zero I/O.
 type countingDeliverer struct {
@@ -73,7 +45,7 @@ func (s *failOnceSuppressionStore) SuppressedRecipients(ctx context.Context, use
 	return s.Store.SuppressedRecipients(ctx, userID, agentID, recipients)
 }
 
-func (d *countingDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (d *countingDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob, _ sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
 	d.calls++
 	return d.out
 }
@@ -375,100 +347,6 @@ func TestSendWorker_ProviderEvidenceCorrectionRetainsFallbackSuppression(t *test
 	event := eventLifecycle(t, pool, res.MessageID, webhookpub.EventEmailSent)
 	if len(event) != 1 || event[0].ID != accepted.ID {
 		t.Fatalf("email.sent lifecycle=%+v want accepted transition %+v", event, accepted)
-	}
-}
-
-func TestSendWorker_SuppressionAddedDuringRampReservePreventsProviderIO(t *testing.T) {
-	api, store, outbox, _ := setupAsyncAPI(t)
-	ctx := context.Background()
-	user, ag := selfAgent(t, store, "suppduringramp")
-	if err := store.SetSendingStatus(ctx, ag.RegisteredDomain, "verified", "verified", "verified", "", nil); err != nil {
-		t.Fatalf("SetSendingStatus: %v", err)
-	}
-	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
-		To: []string{"late@external.test"}, Subject: "ramp race", Body: "x",
-	}, "send", "", nil, nil)
-	if oerr != nil {
-		t.Fatalf("DeliverOutbound: %+v", oerr)
-	}
-
-	gate := &blockingRampGate{entered: make(chan struct{}), resume: make(chan struct{})}
-	deliverer := &countingDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "must-not-happen"}}
-	worker := outboundsend.NewSendWorker(agent.NewOutboundSendStore(store, outbox, usage.NewNoopUsageTracker()), deliverer, gate)
-	done := make(chan error, 1)
-	go func() { done <- worker.Work(ctx, workerJob(res.MessageID, 1)) }()
-	<-gate.entered
-	if _, _, err := store.AddAgentSuppression(ctx, user.ID, ag.ID, "late@external.test", "opted out", "unsubscribe", nil); err != nil {
-		t.Fatal(err)
-	}
-	close(gate.resume)
-	if err := <-done; err == nil {
-		t.Fatal("suppression created during ramp reservation must cancel the send")
-	}
-	if deliverer.calls != 0 {
-		t.Fatalf("provider calls = %d, want zero", deliverer.calls)
-	}
-	if got := gate.releasedIDs(); len(got) != 1 || got[0] != res.MessageID {
-		t.Fatalf("released reservations = %v, want [%s]", got, res.MessageID)
-	}
-	var status, detail string
-	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT delivery_status, COALESCE(delivery_detail,'') FROM messages WHERE id=$1`, res.MessageID).Scan(&status, &detail)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if status != "failed" || !strings.Contains(detail, "recipient_suppressed") {
-		t.Fatalf("status/detail = %q/%q, want failed recipient_suppressed", status, detail)
-	}
-}
-
-func TestSendWorker_TransientSuppressionFailureReusesRealRampReservation(t *testing.T) {
-	api, store, outbox, _, pool := setupAsyncAPIWithPool(t)
-	ctx := context.Background()
-	user, ag := selfAgent(t, store, "rampretryreal")
-	if err := store.SetSendingStatus(ctx, ag.RegisteredDomain, "verified", "verified", "verified", "", nil); err != nil {
-		t.Fatalf("SetSendingStatus: %v", err)
-	}
-	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
-		To: []string{"recipient@external.test"}, Subject: "retry after suppression lookup", Body: "x",
-	}, "send", "", nil, nil)
-	if oerr != nil {
-		t.Fatalf("DeliverOutbound: %+v", oerr)
-	}
-
-	baseStore := agent.NewOutboundSendStore(store, outbox, usage.NewNoopUsageTracker())
-	failingStore := &failOnceSuppressionStore{Store: baseStore}
-	day := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	ramp := agent.NewOutboundRampGate(sendramp.NewStore(pool), sendramp.NewSchedule(50, 100, 2), true, func() time.Time { return day })
-	deliverer := &countingDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-after-retry", SentAs: "own_address"}}
-	worker := outboundsend.NewSendWorker(failingStore, deliverer, ramp)
-
-	if err := worker.Work(ctx, workerJobWithID(res.MessageID, 999, 1)); err == nil {
-		t.Fatal("first worker attempt must return the injected transient error")
-	}
-	var firstState string
-	if err := pool.QueryRow(ctx, `SELECT state FROM sending_ramp_reservations WHERE message_id=$1`, res.MessageID).Scan(&firstState); err != nil {
-		t.Fatalf("read first reservation: %v", err)
-	}
-	if firstState != "reserved" {
-		t.Fatalf("reservation after transient error = %q, want reserved", firstState)
-	}
-	if deliverer.calls != 0 {
-		t.Fatalf("provider calls after transient error = %d, want zero", deliverer.calls)
-	}
-
-	if err := worker.Work(ctx, workerJobWithID(res.MessageID, 999, 2)); err != nil {
-		t.Fatalf("retry worker attempt: %v", err)
-	}
-	var finalState, status string
-	if err := pool.QueryRow(ctx, `SELECT state FROM sending_ramp_reservations WHERE message_id=$1`, res.MessageID).Scan(&finalState); err != nil {
-		t.Fatalf("read final reservation: %v", err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT delivery_status FROM messages WHERE id=$1`, res.MessageID).Scan(&status); err != nil {
-		t.Fatalf("read final message: %v", err)
-	}
-	if finalState != "confirmed" || status != "sent" || deliverer.calls != 1 {
-		t.Fatalf("final reservation/status/provider calls = %q/%q/%d, want confirmed/sent/1", finalState, status, deliverer.calls)
 	}
 }
 

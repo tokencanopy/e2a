@@ -222,13 +222,12 @@ func TestSendWorker_RateLimitedPastRetryHorizonFailsTerminally(t *testing.T) {
 	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
 	st := &fakeStore{job: j}
 	dl := &fakeDeliverer{}
-	ramp := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
 	gate := &fakeRateGate{decision: outboundsend.RateDecision{
 		Allowed: false,
 		RetryAt: time.Now().Add(30 * time.Second),
 	}}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, dl, ramp).WithRateGate(gate).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, dl).WithRateGate(gate).WithMetrics(rec)
 
 	err := w.Work(context.Background(), job("msg_1", 4))
 	if err == nil {
@@ -248,9 +247,6 @@ func TestSendWorker_RateLimitedPastRetryHorizonFailsTerminally(t *testing.T) {
 		t.Errorf("terminal = {detail %q, source %v}, want {send_rate_timeout, local}",
 			got.detail, got.source)
 	}
-	if len(ramp.released) != 1 || ramp.released[0] != "msg_1" {
-		t.Errorf("ramp releases = %v, want [msg_1] (timeout releases the reservation)", ramp.released)
-	}
 	if !stringsEqual(rec.terminals, []string{"failed_local_retries"}) {
 		t.Errorf("terminals = %v, want [failed_local_retries]", rec.terminals)
 	}
@@ -266,10 +262,9 @@ func TestSendWorker_RateGateErrorPastRetryHorizonFailsTerminally(t *testing.T) {
 	j.AcceptedAt = time.Now().Add(-73 * time.Hour)
 	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
 	st := &fakeStore{job: j}
-	ramp := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
 	gate := &fakeRateGate{err: errors.New("rate store down")}
 	rec := &recordingMetrics{}
-	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}, ramp).WithRateGate(gate).WithMetrics(rec)
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithRateGate(gate).WithMetrics(rec)
 
 	err := w.Work(context.Background(), job("msg_1", 4))
 	if err == nil {
@@ -285,36 +280,6 @@ func TestSendWorker_RateGateErrorPastRetryHorizonFailsTerminally(t *testing.T) {
 	if got := st.failed[0]; got.detail != "send_rate_timeout: rate store down" || got.source != delivery.FailureSourceLocal {
 		t.Errorf("terminal = {detail %q, source %v}, want {send_rate_timeout: rate store down, local}",
 			got.detail, got.source)
-	}
-	if len(ramp.released) != 1 || ramp.released[0] != "msg_1" {
-		t.Errorf("ramp releases = %v, want [msg_1] (timeout releases the reservation)", ramp.released)
-	}
-}
-
-// TestSendWorker_RateLimitedDeferralKeepsRampReservation pins the complement
-// of the horizon path: an ordinary deferral releases the SEND CLAIM but keeps
-// the ramp reservation — same-message Reserve is idempotent, while a released
-// reservation is terminal and cannot be re-reserved.
-func TestSendWorker_RateLimitedDeferralKeepsRampReservation(t *testing.T) {
-	j := acceptedJob("msg_1")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	st := &fakeStore{job: j}
-	ramp := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	gate := &fakeRateGate{decision: outboundsend.RateDecision{
-		Allowed: false,
-		RetryAt: time.Now().Add(30 * time.Second),
-	}}
-	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}, ramp).WithRateGate(gate)
-
-	requireSnooze(t, w.Work(context.Background(), job("msg_1", 1)))
-	if len(ramp.calls) != 1 {
-		t.Errorf("ramp reserves = %d, want 1 (taken before the rate gate)", len(ramp.calls))
-	}
-	if len(ramp.released) != 0 {
-		t.Errorf("ramp releases = %v, want none — a deferral keeps the reservation", ramp.released)
-	}
-	if len(st.released) != 1 || st.released[0] != "msg_1" {
-		t.Errorf("send-claim releases = %v, want [msg_1]", st.released)
 	}
 }
 

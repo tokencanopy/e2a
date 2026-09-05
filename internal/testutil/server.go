@@ -27,6 +27,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/relay"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhook"
 	"github.com/tokencanopy/e2a/internal/webhookdelivery"
@@ -217,11 +218,15 @@ func TestServer(t *testing.T, pool *pgxpool.Pool, opts ...TestServerOption) *E2A
 	}
 	outboundSendStore := agent.NewOutboundSendStore(store, outbox, noopUsage)
 	store.SetScheduledSendFinalizer(outboundSendStore)
+	// The same composition production uses: a config-source gate running the
+	// disabled policy (pass-through admission, every attempt still durable)
+	// and the authorized submitter that refuses to dial without its token.
+	sendingGate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
 	outboundJobs := outboundsend.NewJobs(
 		outboundSendStore,
-		agent.NewOutboundDeliverer(sender),
+		agent.NewOutboundDeliverer(outbound.NewProviderSubmitter(smtpRelay, sendingGate)),
 		pool,
-	)
+	).WithGate(sendingGate)
 	jobsClient, err := jobs.New(pool, jobs.Config{OutboundWorkers: 2}, outboundJobs)
 	if err != nil {
 		t.Fatalf("build River client: %v", err)
