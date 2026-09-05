@@ -34,6 +34,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/oauth"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/piguard"
 	"github.com/tokencanopy/e2a/internal/ratelimit"
 	"github.com/tokencanopy/e2a/internal/telemetry"
@@ -1607,6 +1608,12 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		accepted = msg
 		return nil
 	}); txErr != nil {
+		if errors.Is(txErr, outboundsend.ErrSendingPaused) {
+			// The account is paused for sending abuse: refuse at the door
+			// rather than queue mail that can never leave. Nothing was
+			// committed — the message row rolled back with the job.
+			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
+		}
 		log.Printf("[api] async accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}
@@ -1728,6 +1735,9 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 		accepted = msg
 		return nil
 	}); txErr != nil {
+		if errors.Is(txErr, outboundsend.ErrSendingPaused) {
+			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
+		}
 		log.Printf("[api] platform accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}

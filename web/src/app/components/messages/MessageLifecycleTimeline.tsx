@@ -40,6 +40,8 @@ export const LIFECYCLE_PRESENTATION: Record<ReasonCode, LifecyclePresentation> =
   "submission.provider_rejected": { title: "Delivery provider rejected message", description: "The delivery provider refused the message, so it was not handed off." },
   "submission.local_retries_exhausted": { title: "Delivery failed", description: "e2a could not hand off the message after repeated attempts." },
   "submission.cancelled": { title: "Delivery cancelled", description: "Delivery was stopped before the message was handed off." },
+  "submission.policy_budget_expired": { title: "Delivery failed", description: "The message waited for sending capacity for seven days and was not handed off." },
+  "submission.sending_setup_expired": { title: "Delivery failed", description: "Sending setup for this account did not complete in time, so the message was not handed off." },
   "delivery.recipient_server_accepted": { title: "Accepted by recipient server", description: "The recipient's mail server accepted the message. This does not confirm inbox placement." },
   "delivery.temporary_delay": { title: "Delivery delayed", description: "The delivery provider reported a temporary delay." },
   "delivery.permanent_bounce": { title: "Delivery failed permanently", description: "The recipient's mail server permanently rejected the message." },
@@ -79,6 +81,8 @@ function lifecycleSummary(last: MessageLifecycleTransitionWire): string {
     case "submission.provider_rejected":
     case "submission.local_retries_exhausted":
     case "submission.cancelled":
+    case "submission.policy_budget_expired":
+    case "submission.sending_setup_expired":
     case "suppression.recipient_blocked":
       return "Failed";
     default:

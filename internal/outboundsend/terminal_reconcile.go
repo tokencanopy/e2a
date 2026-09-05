@@ -2,6 +2,7 @@ package outboundsend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 const terminalReconcileInterval = time.Minute
@@ -49,15 +51,21 @@ type TerminalReconcileWorker struct {
 	river.WorkerDefaults[TerminalReconcileArgs]
 	pool    *pgxpool.Pool
 	store   Store
-	ramp    RampGate
+	gate    sendingpolicy.Gate
 	metrics Metrics
 }
 
 // NewTerminalReconcileWorker builds the periodic safety-net worker.
-func NewTerminalReconcileWorker(pool *pgxpool.Pool, store Store, ramps ...RampGate) *TerminalReconcileWorker {
-	w := &TerminalReconcileWorker{pool: pool, store: store, metrics: noopMetrics{}}
-	if len(ramps) > 0 {
-		w.ramp = ramps[0]
+func NewTerminalReconcileWorker(pool *pgxpool.Pool, store Store) *TerminalReconcileWorker {
+	return &TerminalReconcileWorker{pool: pool, store: store, metrics: noopMetrics{}}
+}
+
+// WithGate injects the sending-protection gate so an evidence-settled row can
+// also settle its provider attempt (ramp progress, provider-id binding).
+// Reconciliation is settlement-only: it never resubmits and never reserves.
+func (w *TerminalReconcileWorker) WithGate(g sendingpolicy.Gate) *TerminalReconcileWorker {
+	if g != nil {
+		w.gate = g
 	}
 	return w
 }
@@ -86,6 +94,7 @@ type terminalCandidate struct {
 	failureOccurredAt        *time.Time
 	failureAttempt           *int
 	failureBlockedRecipients []string
+	providerMessageID        string
 }
 
 // submissionAnchor is this candidate's acceptance→terminal SLI baseline — the
@@ -116,7 +125,8 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		        r.finalized_at,
 		        m.created_at, m.scheduled_at, m.reviewed_at,
 		        COALESCE(m.delivery_failure_source,''),COALESCE(m.delivery_detail,''),COALESCE(m.delivery_failure_reason_code,''),
-		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.delivery_failure_blocked_recipients
+		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.delivery_failure_blocked_recipients,
+		        COALESCE(m.provider_message_id,'')
 		   FROM messages m
 		   LEFT JOIN river_job r ON r.id = m.send_job_id
 		  WHERE m.direction = 'outbound'
@@ -138,7 +148,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 	candidates := make([]terminalCandidate, 0)
 	for rows.Next() {
 		var candidate terminalCandidate
-		if err := rows.Scan(&candidate.messageID, &candidate.jobID, &candidate.attempt, &candidate.state, &candidate.finalizedAt, &candidate.acceptedAt, &candidate.scheduledAt, &candidate.reviewedAt, &candidate.failureSource, &candidate.detail, &candidate.failureReason, &candidate.failureOccurredAt, &candidate.failureAttempt, &candidate.failureBlockedRecipients); err != nil {
+		if err := rows.Scan(&candidate.messageID, &candidate.jobID, &candidate.attempt, &candidate.state, &candidate.finalizedAt, &candidate.acceptedAt, &candidate.scheduledAt, &candidate.reviewedAt, &candidate.failureSource, &candidate.detail, &candidate.failureReason, &candidate.failureOccurredAt, &candidate.failureAttempt, &candidate.failureBlockedRecipients, &candidate.providerMessageID); err != nil {
 			return err
 		}
 		candidates = append(candidates, candidate)
@@ -184,7 +194,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		// fails it with provenance 'local' so later authoritative evidence can
 		// still correct it. The stored detail of a deferred final attempt is
 		// preferred over this generic sweep detail.
-		settled, settledAt, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
+		settled, settledAt, providerID, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
 		if err != nil {
 			if processed > 0 {
 				log.Printf("[outbound-terminal-reconcile] processed %d candidates", processed)
@@ -204,69 +214,41 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 			emitTerminal(w.metrics, terminalOutcome(source, reason, candidate.failureBlockedRecipients), candidate.submissionAnchor(), settledAt)
 		case delivery.StatusSent:
 			emitTerminal(w.metrics, terminalSent, candidate.submissionAnchor(), settledAt)
-		}
-		if w.ramp != nil {
-			if err := w.ramp.Resolve(ctx, candidate.messageID); err != nil {
-				return fmt.Errorf("resolve sending ramp for %s: %w", candidate.messageID, err)
+			// Provider evidence settled the row; settle the attempt that
+			// dialed, so ramp progress and the provider-id binding catch up.
+			// Best effort and idempotent — an attempt that predates the gate
+			// has nothing to settle.
+			if providerID == "" {
+				providerID = candidate.providerMessageID
 			}
+			w.settleFromEvidence(ctx, candidate.messageID, providerID)
 		}
 		processed++
 	}
 	if processed > 0 {
 		log.Printf("[outbound-terminal-reconcile] processed %d candidates", processed)
 	}
-	return w.resolveTerminalRampReservations(ctx)
+	return nil
 }
 
-// resolveTerminalRampReservations is the durable safety net for the narrow
-// window where a worker commits a terminal message outcome, then cannot settle
-// its sending-ramp reservation. That worker returns an error and normally fixes
-// the reservation on its next (unclaimable-message) retry, but its last River
-// attempt can be discarded before another retry. The sweep also revisits a
-// released reservation when authoritative provider feedback later corrects a
-// locally inferred failure. The reservation table's state/updated_at index
-// makes this bounded sweep cheap; Resolve derives confirm versus release from
-// the message's durable delivery status.
-func (w *TerminalReconcileWorker) resolveTerminalRampReservations(ctx context.Context) error {
-	if w.ramp == nil {
-		return nil
+func (w *TerminalReconcileWorker) settleFromEvidence(ctx context.Context, messageID, providerMessageID string) {
+	if w.gate == nil {
+		return
 	}
-	rows, err := w.pool.Query(ctx,
-		`SELECT r.message_id
-		   FROM sending_ramp_reservations r
-		   JOIN messages m ON m.id = r.message_id
-		  WHERE (r.state = 'reserved'
-		         AND m.delivery_status IN ('sent', 'failed', 'deferred', 'delivered', 'bounced', 'complained'))
-		     OR (r.state = 'released'
-		         AND m.delivery_status IN ('sent', 'deferred', 'delivered', 'bounced', 'complained'))
-		  ORDER BY r.updated_at ASC, r.message_id ASC
-		  LIMIT $1`,
-		jobs.DefaultReconcileBatch,
-	)
+	ref, err := w.gate.LookupOperation(ctx, messageID)
 	if err != nil {
-		return err
-	}
-	messageIDs := make([]string, 0)
-	for rows.Next() {
-		var messageID string
-		if err := rows.Scan(&messageID); err != nil {
-			rows.Close()
-			return err
+		if !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+			log.Printf("[outbound-terminal-reconcile] lookup operation for %s: %v", messageID, err)
 		}
-		messageIDs = append(messageIDs, messageID)
+		return
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, messageID := range messageIDs {
-		if err := w.ramp.Resolve(ctx, messageID); err != nil {
-			return fmt.Errorf("resolve terminal sending ramp for %s: %w", messageID, err)
+	if err := w.gate.SettleOperation(ctx, ref, sendingpolicy.SettlementProviderAccepted, providerMessageID); err != nil && !errors.Is(err, sendingpolicy.ErrAttemptStale) {
+		if errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+			log.Printf("[outbound-terminal-reconcile] CRITICAL: provider id conflict settling %s from evidence: %v", messageID, err)
+			return
 		}
+		log.Printf("[outbound-terminal-reconcile] settle %s from provider evidence: %v", messageID, err)
 	}
-	return nil
 }
 
 func terminalReconcilePeriodicConstructor() (river.JobArgs, *river.InsertOpts) {

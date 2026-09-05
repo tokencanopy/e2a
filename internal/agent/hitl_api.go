@@ -15,6 +15,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/logredact"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/outboundsend"
 )
 
 // approveRequest is the JSON body accepted by the approve endpoint. Every
@@ -280,6 +281,10 @@ func approveAsyncError(agentID, messageID string, err error) *OutboundError {
 		return &OutboundError{Status: http.StatusConflict, Code: "message_not_pending", Msg: "message is not pending approval"}
 	case errors.Is(err, identity.ErrMessageNotFound):
 		return &OutboundError{Status: http.StatusNotFound, Code: "not_found", Msg: "message not found"}
+	case errors.Is(err, outboundsend.ErrSendingPaused):
+		// The draft stays pending_review (the approval transaction rolled
+		// back); the reviewer learns why rather than seeing a 500.
+		return &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account; the draft remains pending"}
 	default:
 		var ve *outbound.ValidationError
 		if errors.As(err, &ve) {

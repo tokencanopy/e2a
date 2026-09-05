@@ -66,12 +66,20 @@ const (
 	ReasonSubmissionProviderRejected        ReasonCode = "submission.provider_rejected"
 	ReasonSubmissionLocalRetriesExhausted   ReasonCode = "submission.local_retries_exhausted"
 	ReasonSubmissionCancelled               ReasonCode = "submission.cancelled"
-	ReasonDeliveryRecipientServerAccepted   ReasonCode = "delivery.recipient_server_accepted"
-	ReasonDeliveryTemporaryDelay            ReasonCode = "delivery.temporary_delay"
-	ReasonDeliveryPermanentBounce           ReasonCode = "delivery.permanent_bounce"
-	ReasonDeliveryTransientBounce           ReasonCode = "delivery.transient_bounce"
-	ReasonDeliveryUndeterminedBounce        ReasonCode = "delivery.undetermined_bounce"
-	ReasonComplaintRecipientReported        ReasonCode = "complaint.recipient_reported"
+	// ReasonSubmissionPolicyBudgetExpired means a sending-budget hold reached
+	// its seven-day deadline without capacity freeing. It is a local policy
+	// outcome, never a recipient rejection or a provider outage.
+	ReasonSubmissionPolicyBudgetExpired ReasonCode = "submission.policy_budget_expired"
+	// ReasonSubmissionSendingSetupExpired means the account's provider-side
+	// sending setup (SES tenant readiness) did not complete within the
+	// 72-hour setup deadline.
+	ReasonSubmissionSendingSetupExpired   ReasonCode = "submission.sending_setup_expired"
+	ReasonDeliveryRecipientServerAccepted ReasonCode = "delivery.recipient_server_accepted"
+	ReasonDeliveryTemporaryDelay          ReasonCode = "delivery.temporary_delay"
+	ReasonDeliveryPermanentBounce         ReasonCode = "delivery.permanent_bounce"
+	ReasonDeliveryTransientBounce         ReasonCode = "delivery.transient_bounce"
+	ReasonDeliveryUndeterminedBounce      ReasonCode = "delivery.undetermined_bounce"
+	ReasonComplaintRecipientReported      ReasonCode = "complaint.recipient_reported"
 )
 
 // Definition is the fixed meaning of a reason code.
@@ -106,6 +114,8 @@ var canonicalCatalog = map[ReasonCode]Definition{
 	ReasonSubmissionProviderRejected:        {StageSubmission, OutcomeFailed, false},
 	ReasonSubmissionLocalRetriesExhausted:   {StageSubmission, OutcomeFailed, true},
 	ReasonSubmissionCancelled:               {StageSubmission, OutcomeFailed, false},
+	ReasonSubmissionPolicyBudgetExpired:     {StageSubmission, OutcomeFailed, true},
+	ReasonSubmissionSendingSetupExpired:     {StageSubmission, OutcomeFailed, true},
 	ReasonDeliveryRecipientServerAccepted:   {StageDelivery, OutcomeDelivered, false},
 	ReasonDeliveryTemporaryDelay:            {StageDelivery, OutcomeDeferred, true},
 	ReasonDeliveryPermanentBounce:           {StageDelivery, OutcomeBounced, false},

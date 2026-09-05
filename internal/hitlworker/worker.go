@@ -27,6 +27,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/loopback"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/piguard"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
@@ -61,6 +62,11 @@ const DefaultBatchSize = 100
 
 // Worker runs the TTL sweep. Construct with New; its RunOnce is driven on a
 // schedule by the River maintenance periodic (see maintenance.go).
+// pausedReviewRetry is how far a TTL-expired review on a paused account is
+// deferred before the sweep looks at it again. Long enough not to churn, short
+// enough that a resume is picked up within the hour.
+const pausedReviewRetry = time.Hour
+
 type Worker struct {
 	store      *identity.Store
 	sender     *outbound.Sender
@@ -405,6 +411,17 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 	if err != nil {
 		if errors.Is(err, identity.ErrNotPendingApproval) {
 			return true // resolved between load and transition
+		}
+		if errors.Is(err, outboundsend.ErrSendingPaused) {
+			// The account is paused for sending. The draft stays pending_review
+			// — that is the held queue the pause promises — but it must not
+			// stay the sweep's oldest candidate, or it is re-picked first every
+			// cycle and starves every other expired review. Defer its TTL; the
+			// sweep after resume resolves it.
+			if derr := w.store.DeferReviewExpiry(ctx, c.MessageID, time.Now().Add(pausedReviewRetry)); derr != nil {
+				log.Printf("[hitl-worker] auto-approve %s: defer while account is paused: %v", c.MessageID, derr)
+			}
+			return true
 		}
 		// Transient tx/enqueue failure: leave the row pending_review for the next
 		// cycle. Do NOT autoReject — no send happened, so this is not a "stuck" send.

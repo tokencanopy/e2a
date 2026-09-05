@@ -20,6 +20,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
@@ -481,9 +482,8 @@ func TestTerminalReconcileWorker_ReconcilesOnlyTerminalJobs(t *testing.T) {
 	sentID := f.seed(t, "sent", "sent", "completed", false)
 	missingID := f.seed(t, "missing", "accepted", "", true)
 
-	gate := &fakeRampGate{}
 	rec := &recordingMetrics{}
-	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter, gate).WithMetrics(rec)
+	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter).WithMetrics(rec)
 	if err := worker.Work(context.Background(), &river.Job[outboundsend.TerminalReconcileArgs]{}); err != nil {
 		t.Fatalf("Work: %v", err)
 	}
@@ -541,9 +541,6 @@ func TestTerminalReconcileWorker_ReconcilesOnlyTerminalJobs(t *testing.T) {
 		}
 		f.assertEventCarriesOnly(t, tc.id, webhookpub.EventEmailFailed, tr)
 	}
-	if len(gate.resolved) != 4 {
-		t.Errorf("ramp resolutions = %v, want four terminal outcomes", gate.resolved)
-	}
 	// One terminal metric per settled row; all four sweeps here wrote a
 	// locally inferred failure (no provider provenance, no suppression list).
 	// One terminal per settled row, labeled by provenance: the cancelled-state
@@ -572,82 +569,6 @@ func TestTerminalReconcileWorker_ReconcilesOnlyTerminalJobs(t *testing.T) {
 	}
 }
 
-func TestTerminalReconcileWorker_ResolvesReservedRampForTerminalMessage(t *testing.T) {
-	pool := testutil.TestDB(t)
-	store := identity.NewStore(pool)
-	adapter := agent.NewOutboundSendStore(store,
-		webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true)), usage.NewNoopUsageTracker())
-	f := newTerminalFixture(t, pool, store, adapter)
-	messageID := f.seed(t, "terminal-ramp-cleanup", "accepted", "cancelled", false)
-
-	ctx := context.Background()
-	var userID string
-	if err := pool.QueryRow(ctx, `SELECT user_id FROM agent_identities WHERE id=$1`, f.agentID).Scan(&userID); err != nil {
-		t.Fatalf("read agent owner: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`UPDATE messages SET delivery_status='failed' WHERE id=$1`, messageID); err != nil {
-		t.Fatalf("make message terminal: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO domain_send_counters (user_id, domain, day, reserved_count, confirmed_count, daily_limit)
-		 VALUES ($1, 'example.com', current_date, 1, 0, 50)`, userID); err != nil {
-		t.Fatalf("seed ramp counter: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO sending_ramp_reservations (message_id, day, user_id, domain, units)
-		 VALUES ($1, current_date, $2, 'example.com', 1)`, messageID, userID); err != nil {
-		t.Fatalf("seed reserved ramp: %v", err)
-	}
-
-	gate := &fakeRampGate{}
-	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter, gate)
-	if err := worker.Work(ctx, &river.Job[outboundsend.TerminalReconcileArgs]{}); err != nil {
-		t.Fatalf("Work: %v", err)
-	}
-	if len(gate.resolved) != 1 || gate.resolved[0] != messageID {
-		t.Fatalf("ramp resolutions = %v, want [%s]", gate.resolved, messageID)
-	}
-}
-
-func TestTerminalReconcileWorker_ResolvesReleasedRampAfterProviderCorrection(t *testing.T) {
-	pool := testutil.TestDB(t)
-	store := identity.NewStore(pool)
-	adapter := agent.NewOutboundSendStore(store,
-		webhookpub.NewOutbox(pool, webhookpub.StaticFlag(true)), usage.NewNoopUsageTracker())
-	f := newTerminalFixture(t, pool, store, adapter)
-	messageID := f.seed(t, "released-ramp-provider-correction", "accepted", "cancelled", false)
-
-	ctx := context.Background()
-	var userID string
-	if err := pool.QueryRow(ctx, `SELECT user_id FROM agent_identities WHERE id=$1`, f.agentID).Scan(&userID); err != nil {
-		t.Fatalf("read agent owner: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`UPDATE messages SET delivery_status='delivered' WHERE id=$1`, messageID); err != nil {
-		t.Fatalf("apply provider correction: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO domain_send_counters (user_id, domain, day, reserved_count, confirmed_count, daily_limit)
-		 VALUES ($1, 'example.com', current_date, 0, 0, 50)`, userID); err != nil {
-		t.Fatalf("seed ramp counter: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO sending_ramp_reservations (message_id, day, user_id, domain, units, state)
-		 VALUES ($1, current_date, $2, 'example.com', 1, 'released')`, messageID, userID); err != nil {
-		t.Fatalf("seed released ramp: %v", err)
-	}
-
-	gate := &fakeRampGate{}
-	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter, gate)
-	if err := worker.Work(ctx, &river.Job[outboundsend.TerminalReconcileArgs]{}); err != nil {
-		t.Fatalf("Work: %v", err)
-	}
-	if len(gate.resolved) != 1 || gate.resolved[0] != messageID {
-		t.Fatalf("ramp resolutions = %v, want [%s]", gate.resolved, messageID)
-	}
-}
-
 // TestTerminalReconcileWorker_GraceWindowHoldsFreshTerminalJobs pins the §3.1
 // grace behavior: a row whose job just reached a terminal state is NOT failed
 // while provider evidence may still be arriving; it is failed once the job has
@@ -662,8 +583,7 @@ func TestTerminalReconcileWorker_GraceWindowHoldsFreshTerminalJobs(t *testing.T)
 	freshID := f.seed(t, "fresh-discard", "accepted", "discarded", false)
 	f.freshenJob(t, freshID) // terminal seconds ago — inside the grace window
 
-	gate := &fakeRampGate{}
-	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter, gate)
+	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter)
 	if err := worker.Work(context.Background(), &river.Job[outboundsend.TerminalReconcileArgs]{}); err != nil {
 		t.Fatalf("Work: %v", err)
 	}
@@ -721,8 +641,7 @@ func TestTerminalReconcileWorker_ProviderEvidenceSettlesAsSent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gate := &fakeRampGate{}
-	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter, gate)
+	worker := outboundsend.NewTerminalReconcileWorker(pool, adapter)
 	if err := worker.Work(context.Background(), &river.Job[outboundsend.TerminalReconcileArgs]{}); err != nil {
 		t.Fatalf("Work: %v", err)
 	}
@@ -783,9 +702,6 @@ func TestTerminalReconcileWorker_ProviderEvidenceSettlesAsSent(t *testing.T) {
 	}
 	if got := f.failedEventCount(t, evidenceID); got != 0 {
 		t.Errorf("email.failed count = %d, want 0 — evidence must suppress the false failure", got)
-	}
-	if len(gate.resolved) != 1 || gate.resolved[0] != evidenceID {
-		t.Errorf("ramp resolutions = %v, want evidence message", gate.resolved)
 	}
 
 	// Idempotent: a second pass no-ops (the row left accepted/sending).
@@ -938,14 +854,19 @@ func testLocalFallbackReason(t *testing.T, label string, want messagelifecycle.R
 		if _, err := pool.Exec(context.Background(), `UPDATE messages SET sent_as='own_address' WHERE id=$1`, messageID); err != nil {
 			t.Fatal(err)
 		}
-		worker = outboundsend.NewSendWorker(adapter, &fakeDeliverer{}, &fakeRampGate{err: permanentRampError{msg: "invalid ramp"}})
+		// A terminal gate hold (the account is gone) is the local cancellation
+		// this reason describes.
+		worker = outboundsend.NewSendWorker(adapter, &fakeDeliverer{}).WithGate(&fakeGate{
+			reserve: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonAccountDeleted, Terminal: true},
+		})
 	} else {
 		if _, err := pool.Exec(context.Background(), `UPDATE messages SET created_at=now()-interval '73 hours' WHERE id=$1`, messageID); err != nil {
 			t.Fatal(err)
 		}
 		worker = outboundsend.NewSendWorker(adapter, &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("provider unavailable"), Outage: true}})
 	}
-	rj := &river.Job[outboundsend.OutboundSendArgs]{JobRow: &rivertype.JobRow{ID: jobID, Attempt: 3, CreatedAt: time.Now().UTC()}, Args: outboundsend.OutboundSendArgs{MessageID: messageID}}
+	ref := refFor(messageID)
+	rj := &river.Job[outboundsend.OutboundSendArgs]{JobRow: &rivertype.JobRow{ID: jobID, Attempt: 3, CreatedAt: time.Now().UTC()}, Args: outboundsend.OutboundSendArgs{MessageID: messageID, OperationRef: &ref}}
 	if err := worker.Work(context.Background(), rj); err == nil {
 		t.Fatal("terminal branch must return cancellation/error")
 	}
@@ -988,8 +909,7 @@ func testProviderRejectionAtomicFailure(t *testing.T, label, install, uninstall 
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), uninstall) })
 	deliverer := &fakeDeliverer{out: outboundsend.DeliverOutcome{Err: errors.New("550 explicit rejection"), Permanent: true}}
-	ramp := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	w := outboundsend.NewSendWorker(adapter, deliverer, ramp)
+	w := outboundsend.NewSendWorker(adapter, deliverer)
 	rj := &river.Job[outboundsend.OutboundSendArgs]{JobRow: &rivertype.JobRow{ID: jobID, Attempt: 2, CreatedAt: time.Now().UTC()}, Args: outboundsend.OutboundSendArgs{MessageID: messageID}}
 	if err := w.Work(context.Background(), rj); err == nil {
 		t.Fatal("provider rejection must cancel")
@@ -1017,9 +937,6 @@ func testProviderRejectionAtomicFailure(t *testing.T, label, install, uninstall 
 	}
 	if deliverer.calls != 1 {
 		t.Fatalf("fallback re-drive provider calls=%d, want exactly the original call", deliverer.calls)
-	}
-	if len(ramp.calls) != 1 || len(ramp.released) != 1 || len(ramp.resolved) != 1 {
-		t.Fatalf("fallback ramp reserve=%d release=%v resolve=%v, want one of each without re-reserve", len(ramp.calls), ramp.released, ramp.resolved)
 	}
 	if _, err := pool.Exec(context.Background(), uninstall); err != nil {
 		t.Fatal(err)
@@ -1132,14 +1049,17 @@ func (s failingTerminalStore) ClaimSend(context.Context, string, int64) (*outbou
 	return nil, nil
 }
 func (s failingTerminalStore) ReleaseSend(context.Context, string, int64) error { return nil }
+func (s failingTerminalStore) RecordHold(context.Context, string, outboundsend.HoldClass, time.Time) error {
+	return nil
+}
 func (s failingTerminalStore) MarkSent(context.Context, string, int64, int, time.Time, string, string) error {
 	return nil
 }
-func (s failingTerminalStore) MarkFailed(_ context.Context, _ string, _ int64, _ int, occurredAt time.Time, _ string, _ delivery.FailureSource, _ messagelifecycle.ReasonCode, _ []string) (delivery.Status, time.Time, error) {
+func (s failingTerminalStore) MarkFailed(_ context.Context, _ string, _ int64, _ int, occurredAt time.Time, _ string, _ delivery.FailureSource, _ messagelifecycle.ReasonCode, _ []string) (delivery.Status, time.Time, string, error) {
 	if s.err != nil {
-		return "", time.Time{}, s.err
+		return "", time.Time{}, "", s.err
 	}
-	return delivery.StatusFailed, occurredAt, nil
+	return delivery.StatusFailed, occurredAt, "", nil
 }
 func (s failingTerminalStore) PreserveTerminalFailure(context.Context, string, int64, int, time.Time, string, delivery.FailureSource, messagelifecycle.ReasonCode, []string) error {
 	return nil

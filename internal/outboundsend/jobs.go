@@ -2,6 +2,7 @@ package outboundsend
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -9,6 +10,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/tokencanopy/e2a/internal/jobs"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // Jobs is the outbound-send integration on the shared River client: a
@@ -19,22 +21,56 @@ import (
 type Jobs struct {
 	store     Store
 	deliverer Deliverer
-	ramp      RampGate
+	gate      sendingpolicy.Gate
 	rate      RateGate
 	pool      *pgxpool.Pool
 	enq       jobs.Enqueuer
 	metrics   Metrics
+
+	// registered is the send worker the last RegisterJobs call handed to River.
+	registered *SendWorker
 }
 
 // NewJobs builds the integration with its dependencies (no client yet). pool
-// backs the periodic terminal-state reconciler's scan.
-func NewJobs(store Store, deliverer Deliverer, pool *pgxpool.Pool, ramp ...RampGate) *Jobs {
-	j := &Jobs{store: store, deliverer: deliverer, pool: pool, metrics: noopMetrics{}}
-	if len(ramp) > 0 {
-		j.ramp = ramp[0]
+// backs the periodic terminal-state reconciler's scan and the legacy-argument
+// resolver's transaction.
+func NewJobs(store Store, deliverer Deliverer, pool *pgxpool.Pool) *Jobs {
+	return &Jobs{store: store, deliverer: deliverer, pool: pool, metrics: noopMetrics{}}
+}
+
+// WithGate injects the sending-protection gate. Every enqueue then prepares a
+// durable operation in the accept transaction, and every worker execution
+// authorizes through it. Chainable; nil keeps the gateless default (unit
+// tests only — see NewSendWorker).
+func (j *Jobs) WithGate(g sendingpolicy.Gate) *Jobs {
+	if g != nil {
+		j.gate = g
 	}
 	return j
 }
+
+// SendWorker builds the fully armed send worker RegisterJobs registers: the
+// gate, the legacy resolver, the rate gate, and metrics. It is the one place
+// those are wired, and the composition root's test inspects its result.
+func (j *Jobs) SendWorker() *SendWorker {
+	return NewSendWorker(j.store, j.deliverer).WithMetrics(j.metrics).WithRateGate(j.rate).WithGate(j.gate).WithOperationResolver(j.ResolveLegacyOperation)
+}
+
+// TerminalReconcileWorker builds the reconciler RegisterJobs registers.
+func (j *Jobs) TerminalReconcileWorker() *TerminalReconcileWorker {
+	return NewTerminalReconcileWorker(j.pool, j.store).WithMetrics(j.metrics).WithGate(j.gate)
+}
+
+// RegisteredSendWorker returns the send worker the last RegisterJobs call
+// registered with River, or nil before any registration.
+func (j *Jobs) RegisteredSendWorker() *SendWorker { return j.registered }
+
+// Gate exposes the wired sending-protection gate, for the composition root's
+// wiring test. nil when none is wired.
+func (j *Jobs) Gate() sendingpolicy.Gate { return j.gate }
+
+// Deliverer exposes the wired provider deliverer, for the same test.
+func (j *Jobs) Deliverer() Deliverer { return j.deliverer }
 
 // SetEnqueuer injects the shared client so EnqueueSendTx can insert jobs.
 func (j *Jobs) SetEnqueuer(e jobs.Enqueuer) { j.enq = e }
@@ -62,8 +98,12 @@ func (j *Jobs) WithRateGate(g RateGate) *Jobs {
 // RegisterJobs adds the SendWorker and terminal-state safety net to the shared
 // client's bundle. Implements jobs.Registrar.
 func (j *Jobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
-	river.AddWorker(w, NewSendWorker(j.store, j.deliverer, j.ramp).WithMetrics(j.metrics).WithRateGate(j.rate))
-	river.AddWorker(w, NewTerminalReconcileWorker(j.pool, j.store, j.ramp).WithMetrics(j.metrics))
+	// The worker registered here is recorded so the composition root's
+	// wiring test can inspect the exact object River will run, not merely
+	// what a constructor would produce.
+	j.registered = j.SendWorker()
+	river.AddWorker(w, j.registered)
+	river.AddWorker(w, j.TerminalReconcileWorker())
 	return []*river.PeriodicJob{
 		river.NewPeriodicJob(
 			river.PeriodicInterval(terminalReconcileInterval),
@@ -119,7 +159,31 @@ func (j *Jobs) EnqueueScheduledSendTx(ctx context.Context, tx pgx.Tx, messageID 
 // enqueueSendTx is the shared outbox insert behind the immediate and scheduled
 // entry points. A non-zero `at` sets InsertOpts.ScheduledAt; a zero value omits
 // it (River defaults ScheduledAt to now, i.e. immediately available).
+//
+// With a gate wired, the durable provider operation is prepared HERE, after
+// the message insert and before the River insert, in the caller's transaction:
+// a paused account is refused at the door (ErrSendingPaused) rather than
+// queueing mail that can never leave, and the job carries the operation
+// reference so the worker never derives purpose or attribution on its own.
 func (j *Jobs) enqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string, at time.Time) (int64, error) {
+	args := OutboundSendArgs{MessageID: messageID}
+	if j.gate != nil {
+		decision, ref, err := j.gate.PrepareExternalTx(ctx, tx, messageID)
+		if err != nil {
+			return 0, fmt.Errorf("prepare sending operation: %w", err)
+		}
+		if decision == sendingpolicy.AcceptanceSendingPaused {
+			return 0, ErrSendingPaused
+		}
+		if ref.IsZero() {
+			// The only accepted shape without an operation is an exact
+			// self-send, and those never enqueue. Refusing here keeps a
+			// prepared-but-operationless job from masquerading as a legacy
+			// one that the worker would then kill.
+			return 0, fmt.Errorf("prepare sending operation: message %s has no provider operation", messageID)
+		}
+		args.OperationRef = &ref
+	}
 	opts := &river.InsertOpts{
 		Queue:       jobs.QueueOutbound,
 		MaxAttempts: MaxSendAttempts,
@@ -127,9 +191,34 @@ func (j *Jobs) enqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string, a
 	if !at.IsZero() {
 		opts.ScheduledAt = at
 	}
-	res, err := j.enq.InsertTx(ctx, tx, OutboundSendArgs{MessageID: messageID}, opts)
+	res, err := j.enq.InsertTx(ctx, tx, args, opts)
 	if err != nil {
 		return 0, err
 	}
 	return res.Job.ID, nil
+}
+
+// ResolveLegacyOperation is the compatibility resolver for a job enqueued by
+// a pre-floor slot with no operation reference. It runs the same
+// PrepareExternalTx an accept transaction runs — idempotent on the durable
+// operation row — in its own committed transaction, so an old job and a new
+// one authorize identically. There is deliberately no other way to obtain an
+// operation from a bare message id.
+func (j *Jobs) ResolveLegacyOperation(ctx context.Context, messageID string) (sendingpolicy.AcceptanceDecision, sendingpolicy.OperationRef, error) {
+	if j.gate == nil || j.pool == nil {
+		return "", sendingpolicy.OperationRef{}, fmt.Errorf("legacy operation resolver is not wired")
+	}
+	tx, err := j.pool.Begin(ctx)
+	if err != nil {
+		return "", sendingpolicy.OperationRef{}, fmt.Errorf("begin legacy resolve: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	decision, ref, err := j.gate.PrepareExternalTx(ctx, tx, messageID)
+	if err != nil {
+		return "", sendingpolicy.OperationRef{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", sendingpolicy.OperationRef{}, fmt.Errorf("commit legacy resolve: %w", err)
+	}
+	return decision, ref, nil
 }

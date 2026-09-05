@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -17,7 +18,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
-	"github.com/tokencanopy/e2a/internal/sendramp"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
 )
@@ -106,71 +107,6 @@ func NewOutboundSendStore(store *identity.Store, outbox webhookpub.Outbox, usage
 	return &outboundSendStore{store: store, outbox: outbox, usage: usageTracker}
 }
 
-type outboundRampGate struct {
-	store    *sendramp.Store
-	schedule sendramp.Schedule
-	enabled  bool
-	now      func() time.Time
-}
-
-// NewOutboundRampGate adapts the durable sendramp store to the worker-owned
-// gate contract. The schedule is snapshotted by Store on the first eligible
-// send; config changes therefore affect only domains that have not armed yet.
-func NewOutboundRampGate(store *sendramp.Store, schedule sendramp.Schedule, enabled bool, clocks ...func() time.Time) outboundsend.RampGate {
-	now := time.Now
-	if len(clocks) > 0 && clocks[0] != nil {
-		now = clocks[0]
-	}
-	return &outboundRampGate{store: store, schedule: schedule, enabled: enabled, now: now}
-}
-
-func (g *outboundRampGate) Reserve(ctx context.Context, req outboundsend.RampRequest) (outboundsend.RampDecision, error) {
-	if !g.enabled {
-		// Disabled is pass-through: reserve nothing, count nothing, stamp
-		// nothing. The domain stays 'inactive'.
-		//
-		// An earlier revision stamped the domain 'exempt' here, reasoning that
-		// a sender allowed to send unthrottled must not be re-throttled if the
-		// ramp is later enabled. That turned every eligible send into a silent,
-		// unmarked grandfathering decision, and 'exempt' has since grown
-		// meaning beyond "skip the ramp": an exempt domain reads as an
-		// established sender, so it also stops consuming the shared probation
-		// pool that bounds Sybil abuse. Widening that set from the send path,
-		// once per send, is not a decision this gate gets to make.
-		//
-		// Grandfathering belongs to the audited one-shot that already exists
-		// for it: sendingpolicy's ActivationRequest.GrandfatherCurrentSendingDomains,
-		// which writes a replay marker, locks the domains table against
-		// concurrent sender transitions, and can never widen its set twice.
-		return outboundsend.RampDecision{Allowed: true}, nil
-	}
-	d, err := g.store.Reserve(ctx, sendramp.ReserveRequest{
-		MessageID: req.MessageID,
-		UserID:    req.UserID,
-		Domain:    req.Domain,
-		Units:     req.Units,
-		Day:       g.now().UTC(),
-		Schedule:  g.schedule,
-	})
-	return outboundsend.RampDecision{Allowed: d.Allowed, RetryAt: d.RetryAt}, err
-}
-
-// Confirm, Release and Resolve delegate unconditionally, including while the
-// ramp is disabled: a reservation taken before an operator turned the ramp off
-// still has to settle. With the ramp disabled no reservation is ever created,
-// so on that path the store methods find no row and write nothing.
-func (g *outboundRampGate) Confirm(ctx context.Context, messageID string) error {
-	return g.store.Confirm(ctx, messageID)
-}
-
-func (g *outboundRampGate) Release(ctx context.Context, messageID string) error {
-	return g.store.Release(ctx, messageID)
-}
-
-func (g *outboundRampGate) Resolve(ctx context.Context, messageID string) error {
-	return g.store.Resolve(ctx, messageID)
-}
-
 func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, jobID int64) (*outboundsend.SendJob, error) {
 	if a.usage == nil {
 		return nil, fmt.Errorf("outbound usage tracker is required")
@@ -210,7 +146,7 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 					anchor = *p.ScheduledAt
 				}
 				if !anchor.IsZero() && time.Since(anchor) > outboundsend.SendRetryHorizon {
-					if _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+					if _, _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
 						"daily_send_cap_timeout: daily send limit still exceeded past the retry horizon",
 						delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionLocalRetriesExhausted, nil); failErr != nil {
 						return nil, failErr
@@ -228,7 +164,7 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 				log.Printf("[outbound-send:%s] daily send cap exhausted at fire time, deferring to %s", p.ID, retryAt.Format(time.RFC3339))
 				return nil, &outboundsend.DailyQuotaDeferredError{RetryAt: retryAt}
 			}
-			if _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
+			if _, _, _, failErr := a.MarkFailed(ctx, p.ID, jobID, 0, time.Now().UTC(),
 				"send canceled: monthly send limit exceeded at send time",
 				delivery.FailureSourceLocal, messagelifecycle.ReasonSubmissionCancelled, nil); failErr != nil {
 				return nil, failErr
@@ -258,7 +194,22 @@ func (a *outboundSendStore) ClaimSend(ctx context.Context, messageID string, job
 	if p.ReviewedAt != nil {
 		sj.ReviewedAt = *p.ReviewedAt
 	}
+	sj.LocalHoldClass = outboundsend.HoldClass(p.LocalHoldClass)
+	if p.LocalHoldAnchor != nil {
+		sj.LocalHoldAnchor = *p.LocalHoldAnchor
+	}
+	if p.LastResumedAt != nil {
+		sj.LastResumedAt = *p.LastResumedAt
+	}
+	if p.TenantReadyAt != nil {
+		sj.TenantReadyAt = *p.TenantReadyAt
+	}
 	return sj, nil
+}
+
+// RecordHold persists the worker's finite-hold class and anchor on the row.
+func (a *outboundSendStore) RecordHold(ctx context.Context, messageID string, class outboundsend.HoldClass, anchor time.Time) error {
+	return a.store.RecordOutboundHold(ctx, messageID, string(class), anchor)
 }
 
 // SuppressedRecipients backs the SendWorker's pre-provider suppression guard:
@@ -416,7 +367,7 @@ func (a *outboundSendStore) FinalizeScheduledCancellationTx(
 // time is the occurred_at the write actually used: the provider-accept
 // evidence time on an evidence settle, the caller's occurredAt on a failure,
 // zero on a no-op.
-func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error) {
+func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, string, error) {
 	detail = messagelifecycle.SafeDiagnostic(detail)
 	blockedRecipients = normalizeBlockedRecipients(blockedRecipients)
 	var settled delivery.Status
@@ -464,12 +415,12 @@ func (a *outboundSendStore) MarkFailed(ctx context.Context, messageID string, jo
 		e.ID = webhookpub.DeterministicEventID(messageID, webhookpub.EventEmailFailed)
 		return a.outbox.PublishTx(ctx, tx, e)
 	}); err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, "", err
 	}
 	if resolved != nil {
 		log.Printf("[outbound-send] %s: terminal-failure guard settled as sent on provider evidence (provider id %q)", messageID, resolvedProviderID)
 	}
-	return settled, settledAt, nil
+	return settled, settledAt, resolvedProviderID, nil
 }
 
 func (a *outboundSendStore) PreserveTerminalFailure(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) error {
@@ -615,30 +566,39 @@ func buildEmailFailedEventFromRow(info *identity.OutboundSentInfo, detail string
 	}
 }
 
-// outboundDeliverer implements outboundsend.Deliverer over Sender.SubmitOnce — a
-// single SMTP submit of the persisted Sent-folder bytes (River owns retries).
+// outboundDeliverer implements outboundsend.Deliverer over the authorized
+// provider seam (outbound.ProviderSubmitter): one token-redeeming SMTP submit
+// of the persisted Sent-folder bytes (River owns retries). There is no
+// tokenless path through here.
 type outboundDeliverer struct {
-	sender *outbound.Sender
+	submitter *outbound.ProviderSubmitter
 }
 
 // NewOutboundDeliverer builds the outboundsend.Deliverer adapter for main.go.
-func NewOutboundDeliverer(sender *outbound.Sender) outboundsend.Deliverer {
-	return &outboundDeliverer{sender: sender}
+func NewOutboundDeliverer(submitter *outbound.ProviderSubmitter) outboundsend.Deliverer {
+	return &outboundDeliverer{submitter: submitter}
 }
 
-func (d *outboundDeliverer) Deliver(ctx context.Context, j *outboundsend.SendJob) outboundsend.DeliverOutcome {
-	providerID, err := d.sender.SubmitOnceContext(ctx, j.MessageID, j.EnvelopeFrom, j.Recipients, j.RawMessage)
+func (d *outboundDeliverer) Deliver(ctx context.Context, j *outboundsend.SendJob, auth sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
+	res, err := d.submitter.SubmitOnce(ctx, auth, outbound.Envelope{
+		From:       j.EnvelopeFrom,
+		Recipients: j.Recipients,
+		Message:    j.RawMessage,
+	})
 	if err != nil {
 		// Classify (design §8): a definitely-permanent 5xx is terminal (JobCancel);
 		// a provider-connection failure (relay unreachable/misconfigured) is an
-		// outage → snooze without burning an attempt; everything else (4xx/unknown)
-		// takes the bounded retry. Terminal-failing a send that could still succeed
-		// would violate at-least-once.
+		// outage → snooze without burning an attempt; a failure after the body
+		// was handed over is acceptance-unknown; everything else (4xx/unknown)
+		// takes the bounded retry. Terminal-failing a send that could still
+		// succeed would violate at-least-once.
+		unknown := errors.Is(err, outbound.ErrProviderAcceptanceUnknown)
 		return outboundsend.DeliverOutcome{
-			Err:       err,
-			Permanent: outbound.IsPermanentSMTPError(err),
-			Outage:    outbound.IsConnectionError(err),
+			Err:               err,
+			Permanent:         outbound.IsPermanentSMTPError(err),
+			Outage:            !unknown && outbound.IsConnectionError(err),
+			AcceptanceUnknown: unknown,
 		}
 	}
-	return outboundsend.DeliverOutcome{ProviderMessageID: providerID, SentAs: j.SentAs}
+	return outboundsend.DeliverOutcome{ProviderMessageID: res.ProviderMessageID, SentAs: j.SentAs, SettlementErr: res.SettlementErr}
 }

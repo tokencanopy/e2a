@@ -17,12 +17,13 @@ import (
 	"testing"
 
 	"github.com/tokencanopy/e2a/internal/outboundsend"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // trippingDeliverer fails the test if any provider I/O is attempted.
 type trippingDeliverer struct{ t *testing.T }
 
-func (d trippingDeliverer) Deliver(_ context.Context, j *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (d trippingDeliverer) Deliver(_ context.Context, j *outboundsend.SendJob, _ sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
 	d.t.Errorf("provider Deliver called for %s despite suppression guard", j.MessageID)
 	return outboundsend.DeliverOutcome{}
 }
@@ -31,8 +32,7 @@ func TestSendWorker_SuppressedRecipientFailsTerminallyWithoutProviderIO(t *testi
 	j := acceptedJob("msg_1")
 	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
 	st := &fakeStore{job: j, suppressed: []string{"b@y.com"}}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	w := outboundsend.NewSendWorker(st, trippingDeliverer{t}, gate)
+	w := outboundsend.NewSendWorker(st, trippingDeliverer{t})
 
 	err := w.Work(context.Background(), job("msg_1", 1))
 	if err == nil {
@@ -57,9 +57,6 @@ func TestSendWorker_SuppressedRecipientFailsTerminallyWithoutProviderIO(t *testi
 	if st.suppressionAgentID != st.job.AgentID {
 		t.Errorf("suppression check agent = %q, want %q", st.suppressionAgentID, st.job.AgentID)
 	}
-	if len(gate.released) != 1 || gate.released[0] != "msg_1" {
-		t.Errorf("ramp releases = %v, want [msg_1]", gate.released)
-	}
 }
 
 // A store error on the guard is conservative: no provider I/O, no terminal
@@ -80,45 +77,6 @@ func TestSendWorker_SuppressionCheckErrorFailsClosed(t *testing.T) {
 	}
 	if len(st.released) != 1 || st.released[0] != "msg_1" {
 		t.Errorf("released claims = %v, want [msg_1]", st.released)
-	}
-}
-
-func TestSendWorker_SuppressionCheckErrorAfterRampPreservesReservation(t *testing.T) {
-	j := acceptedJob("msg_1")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	st := &fakeStore{job: j, suppressedErr: errors.New("suppression store down")}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	w := outboundsend.NewSendWorker(st, trippingDeliverer{t}, gate)
-
-	if err := w.Work(context.Background(), job("msg_1", 1)); err == nil {
-		t.Fatal("suppression-store error must retry")
-	}
-	if len(gate.released) != 0 {
-		t.Fatalf("ramp releases = %v, want none so same-day retry stays idempotent", gate.released)
-	}
-	if len(st.released) != 1 || st.released[0] != "msg_1" {
-		t.Fatalf("claim releases = %v, want [msg_1]", st.released)
-	}
-}
-
-func TestSendWorker_SuppressionCheckErrorKeepsRampReservationWhenClaimReleaseFails(t *testing.T) {
-	lookupErr := errors.New("suppression store down")
-	claimErr := errors.New("claim release down")
-	j := acceptedJob("msg_1")
-	j.Domain, j.MessageType, j.SentAs = "new.example.com", "send", "own_address"
-	st := &fakeStore{job: j, suppressedErr: lookupErr, releaseErr: claimErr}
-	gate := &fakeRampGate{decision: outboundsend.RampDecision{Allowed: true}}
-	w := outboundsend.NewSendWorker(st, trippingDeliverer{t}, gate)
-
-	err := w.Work(context.Background(), job("msg_1", 1))
-	if !errors.Is(err, lookupErr) || !errors.Is(err, claimErr) {
-		t.Fatalf("error = %v, want joined lookup and claim-release causes", err)
-	}
-	if len(st.released) != 1 {
-		t.Fatalf("claim release calls = %v, want one attempt", st.released)
-	}
-	if len(gate.released) != 0 {
-		t.Fatalf("ramp releases = %v, want none while claim remains held", gate.released)
 	}
 }
 

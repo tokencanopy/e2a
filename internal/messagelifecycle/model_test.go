@@ -42,6 +42,8 @@ func TestCatalogIsExhaustive(t *testing.T) {
 		{ReasonSubmissionProviderRejected, StageSubmission, OutcomeFailed, false},
 		{ReasonSubmissionLocalRetriesExhausted, StageSubmission, OutcomeFailed, true},
 		{ReasonSubmissionCancelled, StageSubmission, OutcomeFailed, false},
+		{ReasonSubmissionPolicyBudgetExpired, StageSubmission, OutcomeFailed, true},
+		{ReasonSubmissionSendingSetupExpired, StageSubmission, OutcomeFailed, true},
 		{ReasonDeliveryRecipientServerAccepted, StageDelivery, OutcomeDelivered, false},
 		{ReasonDeliveryTemporaryDelay, StageDelivery, OutcomeDeferred, true},
 		{ReasonDeliveryPermanentBounce, StageDelivery, OutcomeBounced, false},
@@ -51,7 +53,7 @@ func TestCatalogIsExhaustive(t *testing.T) {
 	}
 
 	catalog := Catalog()
-	if got, want := len(catalog), 30; got != want {
+	if got, want := len(catalog), 32; got != want {
 		t.Fatalf("Catalog() length = %d, want %d", got, want)
 	}
 	seen := make(map[ReasonCode]bool, len(tests))
@@ -93,7 +95,7 @@ func TestCatalogRejectsUnknownAndCannotBeMutated(t *testing.T) {
 	if !ok || got != (Definition{Stage: StageAccepted, Outcome: OutcomeAccepted}) {
 		t.Fatalf("caller mutation changed canonical lookup: %+v, %v", got, ok)
 	}
-	if got := len(Catalog()); got != 30 {
+	if got := len(Catalog()); got != 32 {
 		t.Fatalf("caller mutation changed canonical catalog length to %d", got)
 	}
 }
@@ -500,7 +502,7 @@ func TestNewTransitionSchemaEnumTags(t *testing.T) {
 	assertTag("Direction", "enum", "inbound,outbound")
 	assertTag("Stage", "enum", "accepted,authentication,review,suppression,queued,submission,delivery,complaint")
 	assertTag("Outcome", "enum", "accepted,passed,failed,indeterminate,pending,approved,rejected,blocked,applied,enqueued,deferred,delivered,bounced,reported")
-	assertTag("ReasonCode", "enum", "acceptance.inbound_smtp,acceptance.outbound_api,acceptance.local_loopback,authentication.dmarc_pass,authentication.dmarc_fail,authentication.dmarc_none,authentication.dmarc_temporary_error,authentication.dmarc_permanent_error,review.hold_created,review.approved,review.rejected,review.expired_approved,review.expired_rejected,suppression.recipient_blocked,suppression.hard_bounce_applied,suppression.complaint_applied,queue.inbound_processing,queue.outbound_submission,submission.upstream_accepted,submission.local_loopback_accepted,submission.temporary_failure,submission.provider_rejected,submission.local_retries_exhausted,submission.cancelled,delivery.recipient_server_accepted,delivery.temporary_delay,delivery.permanent_bounce,delivery.transient_bounce,delivery.undetermined_bounce,complaint.recipient_reported")
+	assertTag("ReasonCode", "enum", "acceptance.inbound_smtp,acceptance.outbound_api,acceptance.local_loopback,authentication.dmarc_pass,authentication.dmarc_fail,authentication.dmarc_none,authentication.dmarc_temporary_error,authentication.dmarc_permanent_error,review.hold_created,review.approved,review.rejected,review.expired_approved,review.expired_rejected,suppression.recipient_blocked,suppression.hard_bounce_applied,suppression.complaint_applied,queue.inbound_processing,queue.outbound_submission,submission.upstream_accepted,submission.local_loopback_accepted,submission.temporary_failure,submission.provider_rejected,submission.local_retries_exhausted,submission.cancelled,submission.policy_budget_expired,submission.sending_setup_expired,delivery.recipient_server_accepted,delivery.temporary_delay,delivery.permanent_bounce,delivery.transient_bounce,delivery.undetermined_bounce,complaint.recipient_reported")
 }
 
 func validAppendInput() AppendInput {

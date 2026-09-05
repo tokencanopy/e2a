@@ -256,3 +256,39 @@ Still open:
 6. **Residual-window reconciler** (header-tagged SNS feedback vs a `sending` row): ~~alert-only v1, auto-heal later~~ **shipped as auto-heal (2026-07-16)**: header-tagged evidence is recorded on the row, the re-driven worker/terminal reconciler settles evidence-bearing `accepted`/`sending` rows as sent, and the §3.1 correction rule heals an already-written local `failed` when correlated delivery feedback arrives.
 7. **Inbound (I2): raw-blob retention** — `river_job.args` holds full raw messages for pending inbound jobs; cap size / age-out policy for a backlog.
 8. **`email.accepted` event — emit or not?** Currently **not** emitted: the caller learns `accepted` synchronously (the 200 body + `delivery_status='accepted'` on the row), and contract §4's *push* vocabulary is deliberately terminal-only (`sent`/`failed`/`deferred`). Optional addition: a one-line `PublishTx` of `email.accepted` in the accept-tx would populate the `webhook_events` log (visible in `GET /v1/events`) and deliver only to anyone who *explicitly* subscribes — harmless, but it widens the event vocabulary. Decide: accept-time event-log entry for observability vs. keep the push vocabulary terminal-only. (Leaning: skip at GA — the sync 200 already carries `accepted`; revisit if subscribers ask for an accept-time signal.)
+
+## Addendum (2026-09-05): the sending-protection gate owns admission
+
+Slice B6 of the sending abuse prevention plan (`e2a-ops` docs/superpowers) moved
+every provider-bound decision behind `internal/sendingpolicy`'s `Gate`. The
+worker-owned `RampGate` and `agent.NewOutboundRampGate` are gone; the
+custom-domain ramp is composed inside the gate (B4) and the SMTP seam is the
+token-requiring `outbound.ProviderSubmitter` (B5). The worker order is now
+fixed:
+
+1. `Reserve` the durable attempt (idempotent per ordinal; a confirmed ordinal
+   is followed by a fresh one, allocated by the gate, never by the worker);
+2. an early hold snoozes without provider I/O;
+3. the per-agent rate gate `DeferAttempt`s and snoozes; a final suppression
+   match `CancelAttempt`s and fails;
+4. `ConsumeAttempt` is the last serialized decision; a hold here is handled
+   like an early one;
+5. the authorized submitter redeems the token immediately before the socket
+   opens and settles the provider's answer (`SettleProvider`); a lost 250 is
+   `ErrProviderAcceptanceUnknown` — retried as a new ordinal, never settled.
+
+The accept transaction prepares the operation (`PrepareExternalTx`) between the
+message insert and the River insert; a paused account is refused at the door
+(`ErrSendingPaused` → HTTP 403 `sending_paused`). Jobs enqueued by a pre-floor
+slot carry no reference and are resolved at fire time through the same path
+(`Jobs.ResolveLegacyOperation`).
+
+Finite holds persist `messages.local_hold_class` / `local_hold_anchor`
+(migration 116); the deadline is always derived — 72 hours for
+`rate_ramp_or_provider` and `tenant_setup`, seven days for `policy_budget` —
+and expiry emits `submission.local_retries_exhausted`,
+`submission.sending_setup_expired`, or `submission.policy_budget_expired`
+respectively. An account pause has no clock and starts no hold, but a deadline
+already running keeps running. Terminal reconciliation is settlement-only: an
+evidence-settled row also settles the attempt that dialed
+(`Gate.SettleOperation`).

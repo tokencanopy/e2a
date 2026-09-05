@@ -13,6 +13,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
@@ -26,7 +27,7 @@ type captureDeliverer struct {
 	out  outboundsend.DeliverOutcome
 }
 
-func (c *captureDeliverer) Deliver(_ context.Context, j *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (c *captureDeliverer) Deliver(_ context.Context, j *outboundsend.SendJob, _ sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
 	c.jobs = append(c.jobs, j)
 	return c.out
 }

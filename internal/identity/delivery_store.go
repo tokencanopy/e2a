@@ -319,6 +319,7 @@ func (s *Store) RecordDeliveryOutcomeTx(ctx context.Context, tx pgx.Tx, messageI
 			if _, err := tx.Exec(ctx,
 				`UPDATE messages
 				    SET delivery_status = 'failed',
+			        local_hold_class = NULL, local_hold_anchor = NULL,
 				        delivery_failure_source = COALESCE(delivery_failure_source, 'provider')
 				  WHERE id = $1`, messageID,
 			); err != nil {
@@ -373,7 +374,7 @@ func (s *Store) MarkMessageSent(ctx context.Context, messageID, sentAs string, t
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx,
-		`UPDATE messages SET delivery_status = 'sent', sent_as = $2 WHERE id = $1`,
+		`UPDATE messages SET delivery_status = 'sent', sent_as = $2, local_hold_class = NULL, local_hold_anchor = NULL WHERE id = $1`,
 		messageID, nullIfEmpty(sentAs),
 	); err != nil {
 		return err
@@ -444,6 +445,18 @@ type OutboundSendPayload struct {
 	ReviewedAt *time.Time
 	// ProviderMessageID is the evidence-repaired provider id ('' when none).
 	ProviderMessageID string
+	// LocalHoldClass / LocalHoldAnchor are the durable finite-hold state the
+	// worker persisted on an earlier execution ('' / nil when the message has
+	// never entered a finite hold). The absolute deadline is always derived
+	// from this pair, never stored.
+	LocalHoldClass  string
+	LocalHoldAnchor *time.Time
+	// LastResumedAt is account_sending_controls.last_resumed_at for the owning
+	// account; TenantReadyAt is its ses_tenant_ready_at (nil until the SES
+	// tenant is ready). Both feed the worker's hold-anchor and setup→rate
+	// transition rules. nil when the account has no control row yet.
+	LastResumedAt *time.Time
+	TenantReadyAt *time.Time
 }
 
 // OutboundSentInfo carries the fields the async worker's MarkSent/MarkFailed
@@ -590,6 +603,10 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		failureAttempt     *int
 		scheduledAt        *time.Time
 		reviewedAt         *time.Time
+		holdClass          string
+		holdAnchor         *time.Time
+		lastResumedAt      *time.Time
+		tenantReadyAt      *time.Time
 	)
 	var userID, registeredDomain string
 	// Lock agent first to match permanent agent deletion's lock order, then
@@ -613,14 +630,18 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		        m.to_recipients, m.cc, m.bcc, m.raw_message, m.created_at,
 		        m.deleted_at, m.send_job_id, m.provider_accepted_at, COALESCE(m.provider_message_id,''),
 		        COALESCE(m.delivery_failure_source,''),COALESCE(m.delivery_failure_reason_code,''),
-		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.scheduled_at,m.reviewed_at
+		        m.delivery_failure_occurred_at,m.delivery_failure_attempt,m.scheduled_at,m.reviewed_at,
+		        COALESCE(m.local_hold_class,''), m.local_hold_anchor,
+		        c.last_resumed_at, c.ses_tenant_ready_at
 		   FROM messages m
+		   LEFT JOIN account_sending_controls c ON c.user_id = $3
 		  WHERE m.id = $1 AND m.agent_id = $2 AND m.direction = 'outbound'
 		  FOR UPDATE OF m`,
-		messageID, agentID,
+		messageID, agentID, userID,
 	).Scan(&deliveryStatus, &envelopeFrom, &sentAs, &messageType, &to, &cc, &bcc, &raw, &createdAt,
 		&deletedAt, &stampedJobID, &providerAcceptedAt, &providerMessageID,
-		&failureSource, &failureReason, &failureOccurredAt, &failureAttempt, &scheduledAt, &reviewedAt)
+		&failureSource, &failureReason, &failureOccurredAt, &failureAttempt, &scheduledAt, &reviewedAt,
+		&holdClass, &holdAnchor, &lastResumedAt, &tenantReadyAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
@@ -665,6 +686,7 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		if _, err := tx.Exec(ctx,
 			`UPDATE messages
 			    SET delivery_status = 'failed',
+			        local_hold_class = NULL, local_hold_anchor = NULL,
 			        delivery_detail = 'send canceled because the message or agent is in trash',
 			        delivery_failure_source = 'local',
 			        delivery_failure_reason_code = 'submission.cancelled',
@@ -710,11 +732,37 @@ func (s *Store) ClaimOutboundForSend(ctx context.Context, messageID string, jobI
 		ProviderMessageID:  providerMessageID,
 		ScheduledAt:        scheduledAt,
 		ReviewedAt:         reviewedAt,
+		LocalHoldClass:     holdClass,
+		LocalHoldAnchor:    holdAnchor,
+		LastResumedAt:      lastResumedAt,
+		TenantReadyAt:      tenantReadyAt,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// RecordOutboundHold persists a message's finite-hold class and anchor.
+//
+// The worker owns the transition rules (first finite hold, setup→rate,
+// monotonic promotion to policy_budget); this writes exactly the pair it was
+// given and only while the message is still pre-terminal. Terminal writes
+// clear the pair, so a stale hold can never outlive its message's outcome.
+func (s *Store) RecordOutboundHold(ctx context.Context, messageID, class string, anchor time.Time) error {
+	if class == "" || anchor.IsZero() {
+		return fmt.Errorf("record outbound hold: class and anchor are required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE messages
+		   SET local_hold_class = $2, local_hold_anchor = $3
+		 WHERE id = $1 AND direction = 'outbound'
+		   AND delivery_status IN ('accepted', 'sending')`,
+		messageID, class, anchor.UTC())
+	if err != nil {
+		return fmt.Errorf("record outbound hold: %w", err)
+	}
+	return nil
 }
 
 func isCompleteTerminalFallback(source, reason string, occurredAt *time.Time, attempt *int) bool {
@@ -724,7 +772,8 @@ func isCompleteTerminalFallback(source, reason string, occurredAt *time.Time, at
 	switch messagelifecycle.ReasonCode(reason) {
 	case messagelifecycle.ReasonSubmissionProviderRejected:
 		return delivery.FailureSource(source) == delivery.FailureSourceProvider
-	case messagelifecycle.ReasonSubmissionLocalRetriesExhausted, messagelifecycle.ReasonSubmissionCancelled:
+	case messagelifecycle.ReasonSubmissionLocalRetriesExhausted, messagelifecycle.ReasonSubmissionCancelled,
+		messagelifecycle.ReasonSubmissionPolicyBudgetExpired, messagelifecycle.ReasonSubmissionSendingSetupExpired:
 		return delivery.FailureSource(source) == delivery.FailureSourceLocal
 	default:
 		return false
@@ -808,6 +857,7 @@ func (s *Store) MarkOutboundSentTx(ctx context.Context, tx pgx.Tx, messageID, pr
 	err := tx.QueryRow(ctx,
 		`UPDATE messages m
 		    SET delivery_status = 'sent', provider_message_id = $2, send_claimed_at = NULL,
+		        local_hold_class = NULL, local_hold_anchor = NULL,
 		        rfc_message_id_key = CASE
 		          WHEN rfc_message_id_key IS NULL AND $3 <> '' THEN $3
 		          ELSE rfc_message_id_key
@@ -891,7 +941,7 @@ func (s *Store) ResolveOutboundProviderAcceptedTx(ctx context.Context, tx pgx.Tx
 	m := &Message{ID: messageID, Direction: "outbound", DeliveryStatus: "sent"}
 	err = tx.QueryRow(ctx,
 		`UPDATE messages m
-		    SET delivery_status = 'sent', send_claimed_at = NULL, delivery_failure_source = NULL, delivery_failure_reason_code = NULL, delivery_detail = NULL,
+		    SET delivery_status = 'sent', send_claimed_at = NULL, local_hold_class = NULL, local_hold_anchor = NULL, delivery_failure_source = NULL, delivery_failure_reason_code = NULL, delivery_detail = NULL,
 		        delivery_failure_occurred_at=NULL, delivery_failure_attempt=NULL, delivery_failure_blocked_recipients=NULL
 		   FROM agent_identities a
 		  WHERE m.id = $1 AND m.direction = 'outbound'
@@ -981,6 +1031,7 @@ func (s *Store) MarkOutboundFailedTx(ctx context.Context, tx pgx.Tx, messageID, 
 	err := tx.QueryRow(ctx,
 		`UPDATE messages m
 		    SET delivery_status = 'failed',
+			        local_hold_class = NULL, local_hold_anchor = NULL,
 		        delivery_detail = COALESCE(NULLIF(m.delivery_detail, ''), $2),
 		        delivery_failure_source = $3,
 		        send_claimed_at = NULL

@@ -193,6 +193,7 @@ _CODE_MAP: "dict[str, tuple[type[E2AError], bool]]" = {
     # 403 family
     "forbidden": (E2APermissionError, False),
     "blocked_by_policy": (E2APermissionError, False),
+    "sending_paused": (E2APermissionError, False),
     # 404/410 family — also covers *_not_found via the suffix check in _resolve.
     "not_found": (E2ANotFoundError, False),
     "gone": (E2ANotFoundError, False),

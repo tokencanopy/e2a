@@ -106,7 +106,7 @@ The event-to-reason mapping is:
 |---|---|
 | `email.received` | `acceptance.inbound_smtp` (or `acceptance.local_loopback`); DMARC `pass` → `authentication.dmarc_pass`, DMARC `fail` → `authentication.dmarc_fail`, DMARC `none` → `authentication.dmarc_none`, DMARC `temperror` → `authentication.dmarc_temporary_error`, and DMARC `permerror` → `authentication.dmarc_permanent_error`; plus `queue.inbound_processing` when async intake was durably queued. |
 | `email.sent` | `submission.upstream_accepted` or `submission.local_loopback_accepted`. |
-| `email.failed` | `submission.provider_rejected`, `submission.local_retries_exhausted`, or `submission.cancelled`, matching the terminal cause. Temporary attempts use `submission.temporary_failure` in the ledger but do not emit a terminal `email.failed` event. |
+| `email.failed` | `submission.provider_rejected`, `submission.local_retries_exhausted`, `submission.cancelled`, `submission.policy_budget_expired`, or `submission.sending_setup_expired`, matching the terminal cause. Temporary attempts use `submission.temporary_failure` in the ledger but do not emit a terminal `email.failed` event. |
 | `email.delivered` | `delivery.recipient_server_accepted` for `delivered_to`. |
 | `email.bounced` | `delivery.permanent_bounce`, `delivery.transient_bounce`, or `delivery.undetermined_bounce` for `delivered_to`. |
 | `email.complained` | `complaint.recipient_reported` for `delivered_to`. |

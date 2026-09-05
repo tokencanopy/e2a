@@ -85,7 +85,8 @@ stable field are beta, `x-experimental-values` on that field):
 the screening + review-hold event types (`email.flagged`, `email.blocked`,
 `email.review_requested`, `email.review_approved`, `email.review_rejected` —
 marked via `x-experimental-values` on the stable `type` field). The stable
-`error.code` vocabulary likewise marks only `blocked_by_policy` experimental.
+`error.code` vocabulary likewise marks only `blocked_by_policy` and
+`sending_paused` experimental.
 See [events.md](events.md).
 
 The exact operation-level list is repeated with methods and paths in
@@ -313,6 +314,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `unauthorized` | 401 | Missing or invalid credentials (REST and the WebSocket handshake). |
 | `forbidden` | 403 | Authenticated but not allowed (key scope, cross-tenant access). |
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
+| `sending_paused` | 403 | **Experimental.** Outbound sending is paused for the account by the platform abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |
@@ -465,7 +467,8 @@ every `/v1` operation not listed here is covered by the GA freeze.
   `x-experimental-values` listing exactly those values — the field itself
   stays stable, the listed values (and their payloads) may still change, and
   every unlisted value is stable. The stable `ErrorBody.code` discriminator
-  similarly marks only `blocked_by_policy` experimental. Anything not marked
+  similarly marks only `blocked_by_policy` and `sending_paused` experimental.
+  Anything not marked
   beta or experimental is stable surface. One deliberate schema-level use of
   the beta marker under a **stable** operation: the account export's interior
   record schemas (`GET /v1/account/export`) are beta-marked because they are
@@ -859,6 +862,8 @@ retryability; clients must not reinterpret those fields independently:
 | `submission.provider_rejected` | `submission` | `failed` | false |
 | `submission.local_retries_exhausted` | `submission` | `failed` | true |
 | `submission.cancelled` | `submission` | `failed` | false |
+| `submission.policy_budget_expired` | `submission` | `failed` | true |
+| `submission.sending_setup_expired` | `submission` | `failed` | true |
 | `delivery.recipient_server_accepted` | `delivery` | `delivered` | false |
 | `delivery.temporary_delay` | `delivery` | `deferred` | true |
 | `delivery.permanent_bounce` | `delivery` | `bounced` | false |

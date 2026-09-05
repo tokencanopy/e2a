@@ -18,6 +18,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/relay"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil/testdb"
 	"github.com/tokencanopy/e2a/internal/unsubscribe"
 	"github.com/tokencanopy/e2a/internal/usage"
@@ -117,11 +118,15 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	// River enqueue semantics without submitting external email.
 	outboundSendStore := agent.NewOutboundSendStore(store, outbox, noopUsage)
 	store.SetScheduledSendFinalizer(outboundSendStore)
+	// The same composition production uses: a config-source gate running the
+	// disabled policy (pass-through admission, every attempt still durable)
+	// and the authorized submitter that refuses to dial without its token.
+	sendingGate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
 	outboundJobs := outboundsend.NewJobs(
 		outboundSendStore,
-		agent.NewOutboundDeliverer(sender),
+		agent.NewOutboundDeliverer(outbound.NewProviderSubmitter(smtpRelay, sendingGate)),
 		pool,
-	)
+	).WithGate(sendingGate)
 	jobsClient, err := jobs.New(pool, jobs.Config{OutboundWorkers: 1}, outboundJobs)
 	if err != nil {
 		pool.Close()

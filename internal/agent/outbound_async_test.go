@@ -22,6 +22,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhookpub"
@@ -122,13 +123,13 @@ func (f *fakeNotifyEnqueuer) EnqueueNotifyTx(_ context.Context, _ pgx.Tx, _ stri
 // fakeAsyncDeliverer is the SMTP submit the SendWorker calls — no network.
 type fakeAsyncDeliverer struct{ out outboundsend.DeliverOutcome }
 
-func (f fakeAsyncDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (f fakeAsyncDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob, _ sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
 	return f.out
 }
 
 type countingAsyncDeliverer struct{ calls int }
 
-func (d *countingAsyncDeliverer) Deliver(context.Context, *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (d *countingAsyncDeliverer) Deliver(context.Context, *outboundsend.SendJob, sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
 	d.calls++
 	return outboundsend.DeliverOutcome{ProviderMessageID: "unexpected"}
 }
@@ -138,7 +139,7 @@ type timedAsyncDeliverer struct {
 	returnedAt time.Time
 }
 
-func (d *timedAsyncDeliverer) Deliver(context.Context, *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (d *timedAsyncDeliverer) Deliver(context.Context, *outboundsend.SendJob, sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
 	d.returnedAt = time.Now().UTC()
 	return d.out
 }
@@ -155,7 +156,7 @@ type blockingAsyncDeliverer struct {
 	out     outboundsend.DeliverOutcome
 }
 
-func (d *blockingAsyncDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob) outboundsend.DeliverOutcome {
+func (d *blockingAsyncDeliverer) Deliver(_ context.Context, _ *outboundsend.SendJob, _ sendingpolicy.ProviderAuthorization) outboundsend.DeliverOutcome {
 	close(d.entered)
 	<-d.release
 	return d.out
@@ -1270,7 +1271,7 @@ func TestOutboundSendStore_MarkFailed(t *testing.T) {
 
 	adapter := agent.NewOutboundSendStore(store, outbox, usage.NewNoopUsageTracker())
 	occurredAt := time.Now().UTC()
-	settled, settledAt, err := adapter.MarkFailed(ctx, res.MessageID, 999, 6, occurredAt, "550 mailbox unavailable", delivery.FailureSourceProvider, messagelifecycle.ReasonSubmissionProviderRejected, nil)
+	settled, settledAt, _, err := adapter.MarkFailed(ctx, res.MessageID, 999, 6, occurredAt, "550 mailbox unavailable", delivery.FailureSourceProvider, messagelifecycle.ReasonSubmissionProviderRejected, nil)
 	if err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}

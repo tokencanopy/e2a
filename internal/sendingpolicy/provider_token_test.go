@@ -269,3 +269,139 @@ func TestProviderTokenSettlementComparesNormalizedProviderMessageID(t *testing.T
 		t.Fatalf("different id err = %v, want ErrProviderMessageIDConflict", err)
 	}
 }
+
+// TestProviderTokenSettleOperationTargetsTheLatestDialedAttempt: evidence that
+// arrives without a token settles the most recent attempt that opened a
+// socket — not a later ordinal that was only reserved, and nothing at all when
+// no attempt ever dialed.
+func TestProviderTokenSettleOperationTargetsTheLatestDialedAttempt(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	ref, attempt := f.prepareAndReserve(g, agent, 1)
+
+	err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-early")
+	if !errors.Is(err, sendingpolicy.ErrAttemptStale) {
+		t.Fatalf("settle before any dial err = %v, want ErrAttemptStale", err)
+	}
+
+	_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || auth == nil {
+		t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+	if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	// The worker died after the socket opened; a later execution re-reserved
+	// ordinal two but never consumed it. Delayed evidence belongs to ordinal one.
+	if _, next, err := g.Reserve(f.ctx, ref); err != nil || next.Attempt() != 2 {
+		t.Fatalf("re-reserve: attempt=%v err=%v", next, err)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "<ses-late@us-east-2.amazonses.com>"); err != nil {
+		t.Fatalf("settle by operation: %v", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 1); got == nil || *got != "ses-late" {
+		t.Fatalf("attempt one bound = %v, want ses-late", got)
+	}
+	var bound int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM sending_feedback_correlations
+		 WHERE operation_id = $1 AND provider_message_id IS NOT NULL`, ref.ID()).Scan(&bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound != 1 {
+		t.Fatalf("%d attempts carry a provider id, want exactly the dialed one", bound)
+	}
+	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
+		Attempt: auth.Attempt(), Outcome: sendingpolicy.SettlementProviderAccepted, ProviderMessageID: "ses-late",
+	}); err != nil {
+		t.Fatalf("replay by token: %v", err)
+	}
+}
+
+// TestProviderTokenLookupOperationResolvesOnlyDurableOperations: a reference
+// can be recovered for an operation that exists, and for nothing else.
+func TestProviderTokenLookupOperationResolvesOnlyDurableOperations(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	_, ref := f.prepareMessage(g, f.message(agent, "own_address", 1))
+
+	got, err := g.LookupOperation(f.ctx, ref.ID())
+	if err != nil || got.ID() != ref.ID() || got.Purpose() != sendingpolicy.PurposeCustomerMessage {
+		t.Fatalf("lookup = %+v err=%v, want the prepared operation", got, err)
+	}
+	if _, err := g.LookupOperation(f.ctx, "msg_never_prepared"); !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("lookup of an unknown operation err = %v, want ErrSourceUnavailable", err)
+	}
+	if _, err := g.LookupOperation(f.ctx, ""); !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("lookup of an empty id err = %v, want ErrSourceUnavailable", err)
+	}
+}
+
+// TestProviderTokenSettleOperationPrefersTheOldestUnboundDialedAttempt: two
+// attempts dialed and both lost their 250. Evidence arriving in send order
+// binds attempt one first, then attempt two — neither steals the other's id.
+func TestProviderTokenSettleOperationPrefersTheOldestUnboundDialedAttempt(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	ref, attempt := f.prepareAndReserve(g, agent, 1)
+	for i := 1; i <= 2; i++ {
+		if i == 2 {
+			var err error
+			if _, attempt, err = g.Reserve(f.ctx, ref); err != nil || attempt.Attempt() != 2 {
+				t.Fatalf("reserve ordinal two: attempt=%v err=%v", attempt, err)
+			}
+		}
+		_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+		if err != nil || auth == nil {
+			t.Fatalf("authorize %d: auth=%v err=%v", i, auth, err)
+		}
+		if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+			t.Fatalf("redeem %d: %v", i, err)
+		}
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-first"); err != nil {
+		t.Fatalf("settle first evidence: %v", err)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-second"); err != nil {
+		t.Fatalf("settle second evidence: %v", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 1); got == nil || *got != "ses-first" {
+		t.Fatalf("attempt one bound = %v, want ses-first", got)
+	}
+	if got := f.providerMessageID(ref.ID(), 2); got == nil || *got != "ses-second" {
+		t.Fatalf("attempt two bound = %v, want ses-second", got)
+	}
+	// A replay for attempt one arriving while a LATER attempt is still
+	// unbound must return to attempt one, never spill onto the unbound one.
+	// Set that shape up on ordinal three.
+	if _, third, err := g.Reserve(f.ctx, ref); err != nil || third.Attempt() != 3 {
+		t.Fatalf("reserve ordinal three: attempt=%v err=%v", third, err)
+	} else {
+		_, auth, err := g.ConsumeAttempt(f.ctx, third)
+		if err != nil || auth == nil {
+			t.Fatalf("authorize 3: auth=%v err=%v", auth, err)
+		}
+		if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+			t.Fatalf("redeem 3: %v", err)
+		}
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-first"); err != nil {
+		t.Fatalf("replay of attempt one with attempt three unbound: %v", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 3); got != nil {
+		t.Fatalf("attempt three bound = %q by a replay of attempt one's id", *got)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-third"); err != nil {
+		t.Fatalf("attempt three's own evidence: %v", err)
+	}
+	// Everything bound: a replay of any id is idempotent, a fourth id is a conflict.
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-second"); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-fourth"); !errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+		t.Fatalf("fourth id err = %v, want ErrProviderMessageIDConflict", err)
+	}
+}

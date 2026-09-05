@@ -349,6 +349,23 @@ func (s *Store) ExpireApproveReviewWithTransition(ctx context.Context, messageID
 	return s.transitionReview(ctx, messageID, "", MessageStatusReviewExpiredApproved, nil, "")
 }
 
+// DeferReviewExpiry pushes a pending review's TTL forward without resolving
+// it. The expiration sweep orders candidates by approval_expires_at, so a
+// hold that cannot resolve yet — its account is paused for sending — would
+// otherwise stay the oldest candidate and be re-picked first every cycle,
+// starving every other expired review once enough of them accumulate.
+// Deferring it yields the slot; when the account resumes, the next sweep
+// after the deferred instant resolves it normally.
+func (s *Store) DeferReviewExpiry(ctx context.Context, messageID string, until time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE messages SET approval_expires_at = $2 WHERE id = $1 AND status = 'pending_review'`,
+		messageID, until.UTC())
+	if err != nil {
+		return fmt.Errorf("defer review expiry: %w", err)
+	}
+	return nil
+}
+
 // ExpireRejectReview is the worker-side TTL auto-reject: drops the message
 // (status review_expired_rejected) with no human reviewer. System-scoped.
 func (s *Store) ExpireRejectReview(ctx context.Context, messageID, reason string) error {

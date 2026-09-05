@@ -21,6 +21,7 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "unauthorized", Status: "401", Family: "auth"},
 	{Code: "forbidden", Status: "403", Family: "auth"},
 	{Code: "blocked_by_policy", Status: "403", Family: "auth"},
+	{Code: "sending_paused", Status: "403", Family: "auth"},
 	{Code: "invalid_request", Status: "400 / 422", Family: "validation", DetailsSchema: "ValidationErrorDetails"},
 	{Code: "invalid_cursor", Status: "400", Family: "validation"},
 	{Code: "invalid_filter", Status: "400", Family: "validation"},
