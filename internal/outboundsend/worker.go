@@ -321,8 +321,11 @@ type Store interface {
 	// state", not to unconditionally fail.
 	// The returned status reports what the guarded write actually did:
 	// StatusFailed, StatusSent (evidence settle), or "" (no-op). The returned
-	// time is the occurred_at the write actually used.
-	MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error)
+	// time is the occurred_at the write actually used, and the returned
+	// provider id is the evidence's provider message id on an evidence
+	// settle ('' otherwise), so the attempt that dialed can be settled with
+	// it.
+	MarkFailed(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, string, error)
 	PreserveTerminalFailure(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) error
 	// DeferTerminalFailure records a final attempt's diagnostic + releases the
 	// I/O claim WITHOUT declaring failed: the terminal reconciler declares the
@@ -501,7 +504,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 			if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
 				return w.cancelTerminally(ctx, job, j, reserved, observedAt, "sending_policy: operation unavailable: "+err.Error())
 			}
-			return w.snoozeOnGateError(ctx, job, j, "reserve", err)
+			return w.snoozeOnGateError(ctx, job, j, reserved, "reserve", err)
 		}
 		if !early.Allow {
 			return w.hold(ctx, job, j, reserved, early, observedAt)
@@ -569,7 +572,7 @@ func (w *SendWorker) Work(ctx context.Context, job *river.Job[OutboundSendArgs])
 		if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
 			return w.cancelTerminally(ctx, job, j, attempt, observedAt, "sending_policy: operation unavailable: "+err.Error())
 		}
-		return w.snoozeOnGateError(ctx, job, j, "authorize", err)
+		return w.snoozeOnGateError(ctx, job, j, attempt, "authorize", err)
 	}
 	if !decision.Allow || auth == nil {
 		return w.hold(ctx, job, j, attempt, decision, observedAt)
@@ -694,7 +697,7 @@ func (w *SendWorker) operationFor(ctx context.Context, job *river.Job[OutboundSe
 		if errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
 			return sendingpolicy.OperationRef{}, w.cancelTerminally(ctx, job, j, sendingpolicy.AttemptRef{}, observedAt, "sending_policy: legacy source unavailable: "+err.Error())
 		}
-		return sendingpolicy.OperationRef{}, w.snoozeOnGateError(ctx, job, j, "resolve", err)
+		return sendingpolicy.OperationRef{}, w.snoozeOnGateError(ctx, job, j, sendingpolicy.AttemptRef{}, "resolve", err)
 	}
 	if decision == sendingpolicy.AcceptanceSendingPaused {
 		return sendingpolicy.OperationRef{}, w.hold(ctx, job, j, sendingpolicy.AttemptRef{}, sendingpolicy.Decision{Reason: sendingpolicy.ReasonAccountPaused}, observedAt)
@@ -863,9 +866,9 @@ func (w *SendWorker) cancelTerminally(ctx context.Context, job *river.Job[Outbou
 // It is a bounded wait like every other one: the message enters (or stays
 // in) the rate/ramp/provider class and expires at that class's deadline, so a
 // gate that is down for days does not park mail forever.
-func (w *SendWorker) snoozeOnGateError(ctx context.Context, job *river.Job[OutboundSendArgs], j *SendJob, step string, gerr error) error {
+func (w *SendWorker) snoozeOnGateError(ctx context.Context, job *river.Job[OutboundSendArgs], j *SendJob, attempt sendingpolicy.AttemptRef, step string, gerr error) error {
 	log.Printf("[outbound-send] sending policy %s failed for %s (snoozing): %v", step, j.MessageID, gerr)
-	return w.holdFinite(ctx, job, j, sendingpolicy.AttemptRef{}, HoldRateRampOrProvider, "sending_policy_unavailable: "+step+": "+gerr.Error(), gateErrorSnoozeInterval, w.now().UTC())
+	return w.holdFinite(ctx, job, j, attempt, HoldRateRampOrProvider, "sending_policy_unavailable: "+step+": "+gerr.Error(), gateErrorSnoozeInterval, w.now().UTC())
 }
 
 // deferAttempt gives the budget back for a rate deferral; a stale or already
@@ -907,6 +910,9 @@ func (w *SendWorker) resettle(ctx context.Context, messageID, providerMessageID 
 	for i := 0; i < terminalWriteRetries; i++ {
 		select {
 		case <-ctx.Done():
+			// Shutdown or the job timeout: the one moment a lost settlement
+			// is likeliest, so it must not also be the one that goes unlogged.
+			log.Printf("[outbound-send] CRITICAL: %s accepted by provider but not settled (context ended before retry): %v", messageID, err)
 			return
 		case <-time.After(time.Duration(i+1) * terminalWriteBackoff):
 		}
@@ -1019,7 +1025,8 @@ func (w *SendWorker) markFailed(ctx context.Context, messageID string, jobID int
 	for i := 0; i < terminalWriteRetries; i++ {
 		var settled delivery.Status
 		var settledAt time.Time
-		if settled, settledAt, err = w.store.MarkFailed(ctx, messageID, jobID, attempt, occurredAt, detail, source, reason, blockedRecipients); err == nil {
+		var providerID string
+		if settled, settledAt, providerID, err = w.store.MarkFailed(ctx, messageID, jobID, attempt, occurredAt, detail, source, reason, blockedRecipients); err == nil {
 			// Emit what the guarded write actually did, exactly once, only
 			// after the durable write: a failure with the caller's provenance,
 			// or "sent" when provider evidence settled the row. A no-op write
@@ -1038,7 +1045,7 @@ func (w *SendWorker) markFailed(ctx context.Context, messageID string, jobID int
 				// expected to fail it. The attempt that dialed still needs
 				// settling — ramp progress and the correlation binding — and
 				// only the operation, not this call's attempt, names it.
-				w.settleFromEvidence(ctx, messageID, "")
+				w.settleFromEvidence(ctx, messageID, providerID)
 			}
 			return nil
 		}

@@ -194,7 +194,7 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 		// fails it with provenance 'local' so later authoritative evidence can
 		// still correct it. The stored detail of a deferred final attempt is
 		// preferred over this generic sweep detail.
-		settled, settledAt, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
+		settled, settledAt, providerID, err := w.store.MarkFailed(ctx, candidate.messageID, candidate.jobID, attempt, occurredAt, detail, source, reason, candidate.failureBlockedRecipients)
 		if err != nil {
 			if processed > 0 {
 				log.Printf("[outbound-terminal-reconcile] processed %d candidates", processed)
@@ -218,7 +218,10 @@ func (w *TerminalReconcileWorker) Work(ctx context.Context, _ *river.Job[Termina
 			// dialed, so ramp progress and the provider-id binding catch up.
 			// Best effort and idempotent — an attempt that predates the gate
 			// has nothing to settle.
-			w.settleFromEvidence(ctx, candidate.messageID, candidate.providerMessageID)
+			if providerID == "" {
+				providerID = candidate.providerMessageID
+			}
+			w.settleFromEvidence(ctx, candidate.messageID, providerID)
 		}
 		processed++
 	}

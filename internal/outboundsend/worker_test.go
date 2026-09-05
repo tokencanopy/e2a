@@ -27,6 +27,8 @@ type fakeStore struct {
 	// occurred_at to the provider-accept evidence time for the durable write.
 	settleStatus delivery.Status
 	settleAt     time.Time
+	// settleProviderID is the evidence's provider id an evidence settle reports.
+	settleProviderID string
 	// terminalAfterFailure mirrors the production store: once MarkFailed commits,
 	// a retry can no longer claim the terminal message and ClaimSend returns nil.
 	terminalAfterFailure bool
@@ -72,7 +74,7 @@ func (f *fakeStore) MarkSent(_ context.Context, id string, _ int64, _ int, _ tim
 	f.sent = append(f.sent, sentCall{id, provider, sentAs})
 	return f.markSentErr
 }
-func (f *fakeStore) MarkFailed(_ context.Context, id string, _ int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, error) {
+func (f *fakeStore) MarkFailed(_ context.Context, id string, _ int64, attempt int, occurredAt time.Time, detail string, source delivery.FailureSource, reason messagelifecycle.ReasonCode, blockedRecipients []string) (delivery.Status, time.Time, string, error) {
 	f.failed = append(f.failed, failedCall{id: id, attempt: attempt, occurredAt: occurredAt, detail: detail, source: source, reason: reason, blockedRecipients: blockedRecipients})
 	status := f.settleStatus
 	if status == "" {
@@ -82,7 +84,7 @@ func (f *fakeStore) MarkFailed(_ context.Context, id string, _ int64, attempt in
 	if at.IsZero() {
 		at = occurredAt
 	}
-	return status, at, nil
+	return status, at, f.settleProviderID, nil
 }
 func (f *fakeStore) PreserveTerminalFailure(context.Context, string, int64, int, time.Time, string, delivery.FailureSource, messagelifecycle.ReasonCode, []string) error {
 	return nil
@@ -362,6 +364,7 @@ type fakeGate struct {
 	deferred    []string
 	cancelled   []string
 	settled     []sendingpolicy.SettlementOutcome
+	settledIDs  []string
 	reserves    int
 	consumes    int
 	lookupErr   error
@@ -410,8 +413,9 @@ func (g *fakeGate) SettleProvider(_ context.Context, s sendingpolicy.ProviderSet
 	g.settled = append(g.settled, s.Outcome)
 	return nil
 }
-func (g *fakeGate) SettleOperation(_ context.Context, _ sendingpolicy.OperationRef, o sendingpolicy.SettlementOutcome, _ string) error {
+func (g *fakeGate) SettleOperation(_ context.Context, _ sendingpolicy.OperationRef, o sendingpolicy.SettlementOutcome, id string) error {
 	g.settled = append(g.settled, o)
+	g.settledIDs = append(g.settledIDs, id)
 	return nil
 }
 func (g *fakeGate) LookupOperation(_ context.Context, id string) (sendingpolicy.OperationRef, error) {

@@ -1875,14 +1875,22 @@ func (m *Module) settle(ctx context.Context, operationID string, attempt int, se
 		return err
 	}
 	if attempt == 0 {
-		// Evidence without a token names an operation, not an ordinal. When
-		// several attempts dialed, the oldest one that has no provider id yet
-		// is the best owner: feedback arrives in send order far more often
-		// than not, and each binding retires its attempt from this choice.
-		// With every dialed attempt already bound, the latest one takes the
-		// replay, and the bind refuses a different id rather than absorb it.
+		// Evidence without a token names an operation, not an ordinal. The
+		// attempt is chosen in this order: one already bound to this exact
+		// provider id (a replay, which must be idempotent and must not spill
+		// onto a later attempt); else the oldest dialed attempt with no
+		// provider id yet, because feedback arrives in send order far more
+		// often than not and each binding retires its attempt from this
+		// choice; else the latest dialed attempt, whose bind refuses a
+		// different id rather than absorb it.
 		if err := tx.QueryRow(ctx, `
 			SELECT COALESCE(
+			    (SELECT MIN(r.submission_attempt)
+			       FROM sending_budget_reservations r
+			       JOIN sending_feedback_correlations c
+			         ON c.operation_id = r.operation_id AND c.submission_attempt = r.submission_attempt
+			      WHERE r.operation_id = $1 AND r.call_state = 'started'
+			        AND $2 <> '' AND c.provider_message_id = $2),
 			    (SELECT MIN(r.submission_attempt)
 			       FROM sending_budget_reservations r
 			       LEFT JOIN sending_feedback_correlations c
@@ -1892,7 +1900,7 @@ func (m *Module) settle(ctx context.Context, operationID string, attempt int, se
 			    (SELECT MAX(submission_attempt)
 			       FROM sending_budget_reservations
 			      WHERE operation_id = $1 AND call_state = 'started'),
-			    0)`, operationID,
+			    0)`, operationID, NormalizeProviderMessageID(settlement.ProviderMessageID),
 		).Scan(&attempt); err != nil {
 			return fmt.Errorf("sendingpolicy: find started attempt: %w", err)
 		}

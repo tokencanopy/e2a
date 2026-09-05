@@ -374,11 +374,34 @@ func TestProviderTokenSettleOperationPrefersTheOldestUnboundDialedAttempt(t *tes
 	if got := f.providerMessageID(ref.ID(), 2); got == nil || *got != "ses-second" {
 		t.Fatalf("attempt two bound = %v, want ses-second", got)
 	}
-	// Everything bound: a replay of either id is idempotent, a third id is a conflict.
+	// A replay for attempt one arriving while a LATER attempt is still
+	// unbound must return to attempt one, never spill onto the unbound one.
+	// Set that shape up on ordinal three.
+	if _, third, err := g.Reserve(f.ctx, ref); err != nil || third.Attempt() != 3 {
+		t.Fatalf("reserve ordinal three: attempt=%v err=%v", third, err)
+	} else {
+		_, auth, err := g.ConsumeAttempt(f.ctx, third)
+		if err != nil || auth == nil {
+			t.Fatalf("authorize 3: auth=%v err=%v", auth, err)
+		}
+		if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+			t.Fatalf("redeem 3: %v", err)
+		}
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-first"); err != nil {
+		t.Fatalf("replay of attempt one with attempt three unbound: %v", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 3); got != nil {
+		t.Fatalf("attempt three bound = %q by a replay of attempt one's id", *got)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-third"); err != nil {
+		t.Fatalf("attempt three's own evidence: %v", err)
+	}
+	// Everything bound: a replay of any id is idempotent, a fourth id is a conflict.
 	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-second"); err != nil {
 		t.Fatalf("replay: %v", err)
 	}
-	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-third"); !errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
-		t.Fatalf("third id err = %v, want ErrProviderMessageIDConflict", err)
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-fourth"); !errors.Is(err, sendingpolicy.ErrProviderMessageIDConflict) {
+		t.Fatalf("fourth id err = %v, want ErrProviderMessageIDConflict", err)
 	}
 }

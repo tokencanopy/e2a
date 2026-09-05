@@ -273,6 +273,9 @@ func TestGatedWorker_ProviderEvidenceSettlesTheOperation(t *testing.T) {
 	if g.lookupCalls != 1 || len(g.settled) != 1 || g.settled[0] != sendingpolicy.SettlementProviderAccepted {
 		t.Fatalf("lookups=%d settled=%v, want the operation settled as accepted", g.lookupCalls, g.settled)
 	}
+	if len(g.settledIDs) != 1 || g.settledIDs[0] != "ses-evidence" {
+		t.Fatalf("settled ids = %v, want the evidence's provider id carried into the settlement", g.settledIDs)
+	}
 }
 
 func TestGatedWorker_LegacyJobResolvesThroughTheAcceptPath(t *testing.T) {
@@ -454,13 +457,16 @@ func TestGatedWorker_EvidenceSettleUnderATerminalWriteSettlesTheOperation(t *tes
 	// A suppression arrives for a message whose earlier attempt dialed and
 	// whose provider evidence has since landed: the guarded terminal write
 	// settles the row as SENT, and the dialed attempt must be settled too.
-	st := &fakeStore{job: acceptedJob("msg_late_evidence"), suppressed: []string{"b@y.com"}, settleStatus: delivery.StatusSent}
+	st := &fakeStore{job: acceptedJob("msg_late_evidence"), suppressed: []string{"b@y.com"}, settleStatus: delivery.StatusSent, settleProviderID: "ses-under-terminal"}
 	g := allowAll()
 	if err := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(g).Work(context.Background(), gatedJob("msg_late_evidence", 2)); !isCancel(err) {
 		t.Fatalf("err = %v, want cancel", err)
 	}
 	if g.lookupCalls != 1 || len(g.settled) != 1 || g.settled[0] != sendingpolicy.SettlementProviderAccepted {
 		t.Fatalf("lookups=%d settled=%v, want the operation settled as accepted from the evidence", g.lookupCalls, g.settled)
+	}
+	if len(g.settledIDs) != 1 || g.settledIDs[0] != "ses-under-terminal" {
+		t.Fatalf("settled ids = %v, want the store's resolved provider id carried into the settlement", g.settledIDs)
 	}
 }
 
@@ -501,5 +507,20 @@ func TestGatedWorker_OperationReferenceMustNameThisMessage(t *testing.T) {
 	}
 	if len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionCancelled {
 		t.Fatalf("failed = %+v, want one local cancellation", st.failed)
+	}
+}
+
+func TestGatedWorker_FailedSettlementAfterAcceptanceIsRetriedNotResent(t *testing.T) {
+	st := &fakeStore{job: acceptedJob("msg_resettle")}
+	dl := &fakeDeliverer{out: outboundsend.DeliverOutcome{ProviderMessageID: "ses-resettle", SettlementErr: errors.New("settle: db blip")}}
+	g := allowAll()
+	if err := outboundsend.NewSendWorker(st, dl).WithGate(g).Work(context.Background(), gatedJob("msg_resettle", 1)); err != nil {
+		t.Fatalf("Work: %v — an accepted send must never surface a settlement failure as a send error", err)
+	}
+	if dl.calls != 1 || len(st.sent) != 1 {
+		t.Fatalf("delivers=%d sent=%d, want exactly one of each", dl.calls, len(st.sent))
+	}
+	if len(g.settled) != 1 || g.settled[0] != sendingpolicy.SettlementProviderAccepted || g.settledIDs[0] != "ses-resettle" {
+		t.Fatalf("settlements = %v / %v, want one retried acceptance carrying the provider id", g.settled, g.settledIDs)
 	}
 }
