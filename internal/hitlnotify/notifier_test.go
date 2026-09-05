@@ -5,12 +5,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
@@ -38,8 +40,52 @@ func newNotifier(t *testing.T) (
 		FromDomain: notifyFromDomain,
 	})
 	signer := approvaltoken.NewSigner(notifySecret)
-	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "", "", publicURL)
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	notifierGates[store] = gatePool{gate: gate, pool: pool}
+	n := hitlnotify.New(store, outbound.NewProviderSubmitter(relay, gate), signer, notifyFromDomain, "", "", publicURL)
 	return n, store, signer, smtpDone
+}
+
+type gatePool struct {
+	gate sendingpolicy.Gate
+	pool *pgxpool.Pool
+}
+
+// notifierGates remembers the gate each test store was built with, so a test
+// can mint the token its notification needs without threading it through
+// every helper signature.
+var notifierGates = map[*identity.Store]gatePool{}
+
+// tokenFor prepares the notification operation for a held message and runs
+// Reserve + ConsumeAttempt, returning the authorization the notifier redeems.
+func tokenFor(t *testing.T, store *identity.Store, messageID string) sendingpolicy.ProviderAuthorization {
+	t.Helper()
+	gp, ok := notifierGates[store]
+	if !ok {
+		t.Fatal("no gate for this store")
+	}
+	ctx := context.Background()
+	tx, err := gp.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := gp.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewHITLNotificationRef(messageID))
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("prepare notification: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	early, attempt, err := gp.gate.Reserve(ctx, ref)
+	if err != nil || !early.Allow {
+		t.Fatalf("reserve: decision=%+v err=%v", early, err)
+	}
+	decision, auth, err := gp.gate.ConsumeAttempt(ctx, attempt)
+	if err != nil || auth == nil {
+		t.Fatalf("authorize: decision=%+v err=%v", decision, err)
+	}
+	return *auth
 }
 
 // setupPendingMessage creates a verified HITL-enabled agent with one
@@ -83,7 +129,7 @@ func TestNotifierSendsEmailToOwner(t *testing.T) {
 	n, store, _, smtpDone := newNotifier(t)
 	agent, msg := setupPendingMessage(t, store, "send-email")
 
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatalf("NotifyPendingApproval: %v", err)
 	}
 
@@ -148,7 +194,7 @@ func TestNotifierMagicLinksAreVerifiable(t *testing.T) {
 	n, store, _, smtpDone := newNotifier(t)
 	agent, msg := setupPendingMessage(t, store, "tok-verify")
 
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatal(err)
 	}
 	data := smtpDone()[0].Data
@@ -191,7 +237,7 @@ func TestNotifierBuildsAbsoluteURLs(t *testing.T) {
 	n, store, _, smtpDone := newNotifier(t)
 	agent, msg := setupPendingMessage(t, store, "abs-url")
 
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatal(err)
 	}
 	data := smtpDone()[0].Data
@@ -213,7 +259,7 @@ func TestNotifierRejectsMessageWithNilApprovalExpiresAt(t *testing.T) {
 	agent, msg := setupPendingMessage(t, store, "nil-exp")
 	msg.ApprovalExpiresAt = nil
 
-	err := n.NotifyPendingApproval(context.Background(), msg, agent)
+	err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID))
 	if err == nil {
 		t.Fatal("expected error for nil ApprovalExpiresAt")
 	}
@@ -231,10 +277,10 @@ func TestNotifierDeterministicMessageID(t *testing.T) {
 	n, store, _, smtpDone := newNotifier(t)
 	agent, msg := setupPendingMessage(t, store, "msgid")
 
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatal(err)
 	}
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -251,8 +297,11 @@ func TestNotifierDeterministicMessageID(t *testing.T) {
 		if n := strings.Count(m.Data, "Message-ID:"); n != 1 {
 			t.Errorf("message %d has %d Message-ID headers, want exactly 1", i, n)
 		}
-		if !strings.HasPrefix(m.Data, "Message-ID: <hitl-approve-") {
-			t.Errorf("message %d: Message-ID should lead the header block; got:\n%.80s", i, m.Data)
+		// The provider submitter prepends its own attribution block (X-SES-* /
+		// X-E2A-*) ahead of the composed message; Message-ID must lead what the
+		// notifier composed, i.e. be the first non-provider header on the wire.
+		if !strings.HasPrefix(stripProviderBlock(m.Data), "Message-ID: <hitl-approve-") {
+			t.Errorf("message %d: Message-ID should lead the composed header block; got:\n%.200s", i, m.Data)
 		}
 	}
 }
@@ -263,7 +312,11 @@ func TestNotifierDeliver(t *testing.T) {
 
 	// Deliver is what the River NotifyWorker calls: it composes + sends once and
 	// classifies the result. A healthy send returns a zero-value outcome.
-	out := n.Deliver(context.Background(), &identity.PendingNotify{Message: msg, Agent: agent})
+	env, out := n.Compose(context.Background(), &identity.PendingNotify{Message: msg, Agent: agent})
+	if out.Err != nil {
+		t.Fatalf("Compose: unexpected err = %v", out.Err)
+	}
+	out = n.Submit(context.Background(), env, tokenFor(t, store, msg.ID))
 	if out.Err != nil {
 		t.Fatalf("Deliver: unexpected err = %v", out.Err)
 	}
@@ -280,7 +333,7 @@ func TestNotifierNilSafe(t *testing.T) {
 	var n *hitlnotify.Notifier
 	// The sync compose+send tolerates a nil receiver so wiring can omit the
 	// notifier in tests / partial deployments without guarding every call site.
-	if err := n.NotifyPendingApproval(context.Background(), nil, nil); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), nil, nil, sendingpolicy.ProviderAuthorization{}); err != nil {
 		t.Errorf("nil receiver sync: err = %v, want nil", err)
 	}
 }
@@ -315,11 +368,13 @@ func TestNotifierUsesConfiguredReplyTo(t *testing.T) {
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
 		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
 	})
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	notifierGates[store] = gatePool{gate: gate, pool: pool}
 	signer := approvaltoken.NewSigner(notifySecret)
-	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "", "support@inbox.test", publicURL)
+	n := hitlnotify.New(store, outbound.NewProviderSubmitter(relay, gate), signer, notifyFromDomain, "", "support@inbox.test", publicURL)
 
 	agent, msg := setupPendingMessage(t, store, "replyto")
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatalf("NotifyPendingApproval: %v", err)
 	}
 	msgs := smtpDone()
@@ -366,11 +421,13 @@ func TestNotifierHonoursConfiguredFromAddress(t *testing.T) {
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
 		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
 	})
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	notifierGates[store] = gatePool{gate: gate, pool: pool}
 	signer := approvaltoken.NewSigner(notifySecret)
-	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "alerts@mail.test", "", publicURL)
+	n := hitlnotify.New(store, outbound.NewProviderSubmitter(relay, gate), signer, notifyFromDomain, "alerts@mail.test", "", publicURL)
 
 	agent, msg := setupPendingMessage(t, store, "fromaddr")
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatalf("NotifyPendingApproval: %v", err)
 	}
 	msgs := smtpDone()
@@ -424,11 +481,13 @@ func TestNotifierSignsWithDKIMForConfiguredFromDomain(t *testing.T) {
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
 		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
 	})
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	notifierGates[store] = gatePool{gate: gate, pool: pool}
 	signer := approvaltoken.NewSigner(notifySecret)
-	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "approvals@corp.example", "", publicURL).WithDKIM(lookup)
+	n := hitlnotify.New(store, outbound.NewProviderSubmitter(relay, gate), signer, notifyFromDomain, "approvals@corp.example", "", publicURL).WithDKIM(lookup)
 
 	agent, msg := setupPendingMessage(t, store, "dkim")
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatalf("NotifyPendingApproval: %v", err)
 	}
 	msgs := smtpDone()
@@ -457,11 +516,13 @@ func TestNotifierSendsUnsignedWithoutDKIMKey(t *testing.T) {
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
 		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: notifyFromDomain,
 	})
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	notifierGates[store] = gatePool{gate: gate, pool: pool}
 	signer := approvaltoken.NewSigner(notifySecret)
-	n := hitlnotify.New(store, relay, signer, notifyFromDomain, "", "", publicURL).WithDKIM(lookup)
+	n := hitlnotify.New(store, outbound.NewProviderSubmitter(relay, gate), signer, notifyFromDomain, "", "", publicURL).WithDKIM(lookup)
 
 	agent, msg := setupPendingMessage(t, store, "nodkim")
-	if err := n.NotifyPendingApproval(context.Background(), msg, agent); err != nil {
+	if err := n.NotifyPendingApproval(context.Background(), msg, agent, tokenFor(t, store, msg.ID)); err != nil {
 		t.Fatalf("must succeed unsigned: %v", err)
 	}
 	msgs := smtpDone()
@@ -470,5 +531,20 @@ func TestNotifierSendsUnsignedWithoutDKIMKey(t *testing.T) {
 	}
 	if strings.Contains(string(msgs[0].Data), "DKIM-Signature:") {
 		t.Errorf("unexpected DKIM-Signature without a stored key")
+	}
+}
+
+// stripProviderBlock drops the leading provider-owned header lines the
+// submitter prepends (X-SES-* and X-E2A-*), returning the composed message.
+func stripProviderBlock(data string) string {
+	for {
+		if !strings.HasPrefix(data, "X-SES-") && !strings.HasPrefix(data, "X-E2A-") {
+			return data
+		}
+		nl := strings.Index(data, "\n")
+		if nl < 0 {
+			return ""
+		}
+		data = data[nl+1:]
 	}
 }

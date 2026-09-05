@@ -13,6 +13,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
 	"github.com/tokencanopy/e2a/internal/webhooknotify"
 )
@@ -49,9 +50,10 @@ func newE2EHarness(t *testing.T, replyTo string) *e2eHarness {
 	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{
 		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: "notify.test",
 	})
-	notifier := webhooknotify.New(store, relay, "notify.test", "", replyTo, "https://app.example.test")
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	notifier := webhooknotify.New(store, outbound.NewProviderSubmitter(relay, gate), "notify.test", "", replyTo, "https://app.example.test")
 
-	j := webhooknotify.NewJobs(store)
+	j := webhooknotify.NewJobs(store).WithGate(gate, pool)
 	client, err := jobs.New(pool, jobs.Config{}, j)
 	if err != nil {
 		t.Fatalf("jobs.New: %v", err)

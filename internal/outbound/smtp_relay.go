@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/smtp"
 	"net/textproto"
@@ -14,10 +13,7 @@ import (
 	"time"
 
 	"github.com/tokencanopy/e2a/internal/config"
-	"github.com/tokencanopy/e2a/internal/logredact"
 )
-
-var smtpRetryBackoffs = []time.Duration{1 * time.Second, 5 * time.Second, 15 * time.Second}
 
 // ErrProviderAcceptanceUnknown marks a failure that happened AFTER the whole
 // message body was handed to the provider: the terminating dot was written and
@@ -40,85 +36,12 @@ func (r *SMTPRelay) Configured() bool {
 	return r.cfg.Host != ""
 }
 
-// Send sends an email to one or more recipients and returns the Message-ID assigned by the remote server (e.g. SES).
-func (r *SMTPRelay) Send(from string, recipients []string, message []byte) (string, error) {
-	return r.SendWithContext(context.Background(), from, recipients, message)
-}
-
-// SendWithContext sends an email while honoring ctx during SMTP I/O and retry
-// backoff. It is intended for request-bound callers that cannot allow the
-// relay's normal retry envelope to outlive the request budget.
-func (r *SMTPRelay) SendWithContext(ctx context.Context, from string, recipients []string, message []byte) (string, error) {
-	return r.SendWithEnvelopeContext(ctx, from, recipients, message)
-}
-
-// SendWithEnvelope sends an email using envelopeFrom for SMTP MAIL FROM.
-// Issues RCPT TO for each recipient. If any RCPT TO is rejected, the transaction is aborted.
-// Returns the Message-ID assigned by the remote SMTP server from the DATA response.
-// Retries transient SMTP errors (4xx) up to 3 times with backoff.
-func (r *SMTPRelay) SendWithEnvelope(envelopeFrom string, recipients []string, message []byte) (string, error) {
-	return r.SendWithEnvelopeContext(context.Background(), envelopeFrom, recipients, message)
-}
-
-// SendWithEnvelopeContext is SendWithEnvelope with caller-controlled
-// cancellation and deadline propagation.
-func (r *SMTPRelay) SendWithEnvelopeContext(ctx context.Context, envelopeFrom string, recipients []string, message []byte) (string, error) {
-	if !r.Configured() {
-		return "", fmt.Errorf("outbound SMTP relay not configured")
-	}
-
-	var lastErr error
-	for attempt := 0; attempt <= len(smtpRetryBackoffs); attempt++ {
-		msgID, err := r.sendOnceContext(ctx, envelopeFrom, recipients, message)
-		if err == nil {
-			return msgID, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		if !isTransientSMTPError(lastErr) {
-			return "", lastErr
-		}
-		if attempt < len(smtpRetryBackoffs) {
-			// lastErr is an upstream MTA response and cannot be perfectly
-			// sanitized: rejections routinely quote the recipient back at us
-			// ("550 5.1.1 <bob@example.com>: user unknown"), which would
-			// otherwise defeat the recipient redaction on this same line. Cap
-			// it so at most a bounded slice of provider text is retained; the
-			// full error still reaches the caller and the message row.
-			log.Printf("[smtp-relay] transient error sending to recipient_count=%d recipient_domains=%v (attempt %d/%d), retrying in %s: %s",
-				len(recipients), logredact.AddressDomains(recipients), attempt+1, len(smtpRetryBackoffs)+1, smtpRetryBackoffs[attempt], logredact.Truncate(lastErr.Error(), 200))
-			select {
-			case <-time.After(smtpRetryBackoffs[attempt]):
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-		}
-	}
-	return "", lastErr
-}
-
-// SendOnce performs a SINGLE SMTP submit — no internal retry loop — and returns
-// the provider Message-ID. This is the entry point for the River outbound worker
-// (internal/outboundsend), which owns the retry envelope: River reschedules the
-// next attempt per the worker's NextRetry, so the relay must NOT loop (a loop here
-// would hide the envelope from river_job and make each Work() run up to ~6.5 min).
-// Classify the returned error with IsTransientSMTPError — transient (4xx/throttle)
-// → let River retry; permanent (5xx/validation) → fail the message terminally.
-func (r *SMTPRelay) SendOnce(envelopeFrom string, recipients []string, message []byte) (string, error) {
-	return r.SendOnceContext(context.Background(), envelopeFrom, recipients, message)
-}
-
-// SendOnceContext is SendOnce with caller cancellation propagated into the
-// SMTP dial/command path. River workers use it so remotely cancelling a running
-// job can stop provider I/O promptly.
-func (r *SMTPRelay) SendOnceContext(ctx context.Context, envelopeFrom string, recipients []string, message []byte) (string, error) {
-	if !r.Configured() {
-		return "", fmt.Errorf("outbound SMTP relay not configured")
-	}
-	return r.sendOnceContext(ctx, envelopeFrom, recipients, message)
-}
+// The relay exposes no socket-opening method. Every provider call is made by
+// the ProviderSubmitter in this package through sendOnceContext, after the
+// caller's authorization token has been redeemed; there is no in-process
+// retry loop either, because a retry is a new charged attempt that only the
+// sending-protection gate may allocate. The tracked guard test
+// (provider_authorization_guard_test.go) keeps it that way.
 
 // IsTransientSMTPError reports whether err is a retryable SMTP failure (4xx /
 // throttle) vs a permanent one. Exported so the River worker's deliverer can set

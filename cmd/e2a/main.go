@@ -121,6 +121,7 @@ func main() {
 	flag.IntVar(&spFlags.activeBillingContract, "active-billing-contract", -1, "verified active billing contract level")
 	flag.StringVar(&spFlags.rollbackBillingDigest, "rollback-billing-digest", "", "verified rollback billing image digest")
 	flag.IntVar(&spFlags.rollbackBillingContract, "rollback-billing-contract", -1, "verified rollback billing contract level")
+	flag.BoolVar(&spFlags.reconcile, "reconcile-legacy-sending-jobs", false, "stamp a sending operation reference onto every pending provider-submitting job enqueued without one (cancelling orphans whose source row is gone), print counts, then exit; nonzero unless every job was decided")
 	flag.BoolVar(&spFlags.capabilities, "print-capabilities", false, "print the machine-readable capability marker (contract level, policy source, operator commitments), then exit")
 	flag.StringVar(&spFlags.reason, "reason", "", "nonblank reason recorded in the audit row of a sending-protection mutation")
 	flag.Parse()
@@ -365,6 +366,9 @@ func main() {
 	})
 	outboundJobs := outboundSending.jobs
 	registrars = append(registrars, outboundJobs)
+	// Platform mail the API sends itself (public feedback) crosses the same
+	// seam with tokens from the same gate.
+	sendingGate, providerSubmitter := outboundSending.gate, outboundSending.submitter
 	registrars = append(registrars, sendramp.NewMaintenanceJobs(rampStore))
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job
 	// per queue+state (docs/observability.md).
@@ -389,10 +393,17 @@ func main() {
 	// later via SetDeliverer — mirrors inbound's late-bound Processor. Gated on the
 	// same relay+public-URL config as the notifier itself; when unconfigured, no jobs
 	// register and the hold takes the plain path (no notification).
-	var notifyJobs *hitlnotify.Jobs
 	notifierEnabled := cfg.OutboundSMTP.FromDomain != "" && cfg.HTTP.PublicURL != ""
-	if notifierEnabled {
-		notifyJobs = hitlnotify.NewJobs(store)
+	notification := newNotificationJobs(notificationDeps{
+		store:          store,
+		pool:           pool,
+		gate:           sendingGate,
+		metrics:        metrics,
+		hitlEnabled:    notifierEnabled,
+		webhookEnabled: cfg.OutboundSMTP.FromDomain != "",
+	})
+	notifyJobs := notification.hitl
+	if notifyJobs != nil {
 		registrars = append(registrars, notifyJobs)
 	}
 
@@ -405,9 +416,8 @@ func main() {
 	// (generic dashboard copy instead of a link). When unconfigured, no jobs
 	// register and the sweep transitions state without notifications
 	// (pre-feature behavior).
-	var webhookNotifyJobs *webhooknotify.Jobs
-	if cfg.OutboundSMTP.FromDomain != "" {
-		webhookNotifyJobs = webhooknotify.NewJobs(store).WithMetrics(metrics)
+	webhookNotifyJobs := notification.webhook
+	if webhookNotifyJobs != nil {
 		registrars = append(registrars, webhookNotifyJobs)
 	}
 
@@ -697,7 +707,7 @@ func main() {
 		// unreachable in practice — kept as a defensive guard against future drift.
 		log.Printf("[hitl] notifier disabled: notification job pipeline not registered")
 	} else {
-		notifier := hitlnotify.New(store, smtpRelay, approvalSigner, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
+		notifier := hitlnotify.New(store, providerSubmitter, approvalSigner, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
 		// Late-bind the concrete Deliverer onto the registered NotifyWorker (which
 		// has been running since jobsClient.Start; jobs enqueued before this bind
 		// simply retry) and give the hold path its accept-tx enqueuer. The HTTP
@@ -718,7 +728,7 @@ func main() {
 	// a BYODKIM custom from-address domain is signed here or not at all.
 	// Fail-open — no stored key (self-host default) sends unsigned.
 	if webhookNotifyJobs != nil {
-		whNotifier := webhooknotify.New(store, smtpRelay, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
+		whNotifier := webhooknotify.New(store, providerSubmitter, cfg.OutboundSMTP.FromDomain, cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).WithDKIM(store)
 		webhookNotifyJobs.SetDeliverer(whNotifier)
 		log.Printf("[webhook-notify] enabled (from=%s)", whNotifier.FromAddress())
 	} else {
@@ -833,6 +843,7 @@ func main() {
 	// The outbound accept-tx enqueuer is mandatory: DeliverOutbound always
 	// persists+enqueues and returns accepted before provider submission.
 	api.SetOutboundEnqueuer(outboundJobs)
+	outboundSending.armAPI(api)
 	// Slices 6 + 7: customer-facing events API needs the raw pool to
 	// query webhook_events and write webhook_subscriber_deliveries on
 	// replay. Kept as a separate setter so a future refactor can route

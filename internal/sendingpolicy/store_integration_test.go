@@ -172,8 +172,8 @@ func (f *fixture) webhook(userID string) string {
 	id := fmt.Sprintf("wh_gate_%d", messageSeq+1000)
 	messageSeq++
 	if _, err := f.pool.Exec(f.ctx,
-		`INSERT INTO webhooks (id, user_id, url, signing_secret, events)
-		 VALUES ($1, $2, $3, $4, ARRAY['message.received'])`,
+		`INSERT INTO webhooks (id, user_id, url, signing_secret, events, enabled, auto_disabled_at)
+		 VALUES ($1, $2, $3, $4, ARRAY['message.received'], false, now())`,
 		id, userID, "https://hook.example.test/"+id, "secret",
 	); err != nil {
 		f.t.Fatalf("insert webhook: %v", err)
@@ -421,7 +421,7 @@ func TestSharedMailboxAndNotificationsShareOneAccountCounter(t *testing.T) {
 	var hookRef sendingpolicy.OperationRef
 	f.inTx(func(tx pgx.Tx) error {
 		var err error
-		hookRef, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(hook))
+		hookRef, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(hook, sendingpolicy.WebhookHealthKindDisabled))
 		return err
 	})
 	d := f.authorize(g, hookRef)
@@ -1125,4 +1125,100 @@ func TestReputationClassCannotBecomeCheaperAfterPreparation(t *testing.T) {
 	if d := f.authorize(g, sharedRef); !d.Allow {
 		t.Fatalf("tightening in the safe direction must still send: %q", d.Reason)
 	}
+}
+
+// TestNotificationOperationsAreKeyedBySource: preparing the same held
+// message or the same webhook health episode twice yields ONE operation, so
+// an enqueue and a later legacy resolve (or two resolvers racing) cannot mint
+// a second operation that nothing settles; a different episode is a
+// different operation; an episode the sweep never stamped has nothing to
+// authorize.
+func TestNotificationOperationsAreKeyedBySource(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	user := f.user("standard")
+	agent := f.agent(user)
+	held := f.pendingMessage(agent, "relay")
+
+	var first, second sendingpolicy.OperationRef
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		first, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewHITLNotificationRef(held))
+		return err
+	})
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		second, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewHITLNotificationRef(held))
+		return err
+	})
+	if first.ID() != sendingpolicy.HITLNotificationOperationID(held) || first.ID() != second.ID() {
+		t.Fatalf("hitl operation ids = %q / %q, want both %q", first.ID(), second.ID(), sendingpolicy.HITLNotificationOperationID(held))
+	}
+
+	hook := f.webhook(user)
+	var episode time.Time
+	if err := f.pool.QueryRow(f.ctx, `SELECT auto_disabled_at FROM webhooks WHERE id = $1`, hook).Scan(&episode); err != nil {
+		t.Fatal(err)
+	}
+	var disabled1, disabled2 sendingpolicy.OperationRef
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		disabled1, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(hook, sendingpolicy.WebhookHealthKindDisabled))
+		return err
+	})
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		disabled2, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(hook, sendingpolicy.WebhookHealthKindDisabled))
+		return err
+	})
+	want := sendingpolicy.WebhookHealthOperationID(hook, sendingpolicy.WebhookHealthKindDisabled, episode)
+	if disabled1.ID() != want || disabled2.ID() != want {
+		t.Fatalf("webhook operation ids = %q / %q, want both %q", disabled1.ID(), disabled2.ID(), want)
+	}
+
+	// No warning episode was ever stamped: nothing to authorize.
+	err := f.tryTx(func(tx pgx.Tx) error {
+		_, err := g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(hook, sendingpolicy.WebhookHealthKindWarning))
+		return err
+	})
+	if !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("unstamped warning episode: err = %v, want ErrSourceUnavailable", err)
+	}
+	err = f.tryTx(func(tx pgx.Tx) error {
+		_, err := g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(hook, "bogus"))
+		return err
+	})
+	if !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("unknown kind: err = %v, want ErrSourceUnavailable", err)
+	}
+
+	// A later episode (the webhook recovered and was disabled again) is a
+	// new operation.
+	if _, err := f.pool.Exec(f.ctx, `UPDATE webhooks SET auto_disabled_at = auto_disabled_at + interval '1 hour' WHERE id = $1`, hook); err != nil {
+		t.Fatal(err)
+	}
+	var disabled3 sendingpolicy.OperationRef
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		disabled3, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(hook, sendingpolicy.WebhookHealthKindDisabled))
+		return err
+	})
+	if disabled3.ID() == disabled1.ID() {
+		t.Fatalf("a new episode must be a new operation, got %q twice", disabled3.ID())
+	}
+}
+
+// tryTx runs fn in a transaction that is rolled back on error and returns
+// fn's error, for the paths a fixture expects to be refused.
+func (f *fixture) tryTx(fn func(tx pgx.Tx) error) error {
+	f.t.Helper()
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		f.t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(f.ctx)
 }

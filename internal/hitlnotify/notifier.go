@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"html"
-	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -26,6 +25,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 // notifyLocalPart is the default local-part of the notification sender
@@ -50,9 +50,9 @@ const tokenGraceAfterTTL = 10 * time.Minute
 // call NotifyPendingApproval from the HITL gate right after the pending
 // row is written. Errors are logged, never returned upstream.
 type Notifier struct {
-	store  *identity.Store
-	relay  *outbound.SMTPRelay
-	signer *approvaltoken.Signer
+	store     *identity.Store
+	submitter *outbound.ProviderSubmitter
+	signer    *approvaltoken.Signer
 	// fromAddress is the resolved sender: notifications.from_address when
 	// set, else notifyLocalPart on fromDomain.
 	fromAddress string
@@ -80,7 +80,7 @@ type Notifier struct {
 // distinct and separately filterable. Resolution deliberately mirrors
 // webhooknotify.New line for line; it is a copy rather than a shared helper,
 // so changing one means changing the other.
-func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken.Signer, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
+func New(store *identity.Store, submitter *outbound.ProviderSubmitter, signer *approvaltoken.Signer, fromDomain, fromAddress, replyTo, publicURL string) *Notifier {
 	addr := strings.TrimSpace(fromAddress)
 	if addr == "" {
 		addr = fmt.Sprintf("%s@%s", notifyLocalPart, fromDomain)
@@ -91,7 +91,7 @@ func New(store *identity.Store, relay *outbound.SMTPRelay, signer *approvaltoken
 	}
 	return &Notifier{
 		store:       store,
-		relay:       relay,
+		submitter:   submitter,
 		signer:      signer,
 		fromAddress: addr,
 		fromDomain:  msgIDDomain,
@@ -110,26 +110,36 @@ func (n *Notifier) WithDKIM(lookup outbound.DKIMKeyLookup) *Notifier {
 }
 
 // NotifyPendingApproval composes and sends the notification email for a held
-// message, submitting once (SendOnce). It is the compose+send core the River
-// NotifyWorker drives via Deliver; the returned error is classified there into
-// retry/permanent/outage.
-func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Message, agent *identity.AgentIdentity) error {
+// message with an already-authorized attempt: Compose then Submit in one call,
+// for callers that hold the token up front (tests, the reconciler drill). The
+// worker calls the two phases itself so the token is consumed last.
+func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Message, agent *identity.AgentIdentity, auth sendingpolicy.ProviderAuthorization) error {
 	if n == nil {
 		return nil
 	}
+	env, err := n.compose(ctx, msg, agent)
+	if err != nil {
+		return err
+	}
+	return n.submit(ctx, env, auth)
+}
+
+// compose builds the approval email: owner lookup, magic-link tokens, MIME,
+// deterministic Message-ID and DKIM. It touches no provider.
+func (n *Notifier) compose(ctx context.Context, msg *identity.Message, agent *identity.AgentIdentity) (outbound.Envelope, error) {
 	if msg == nil || agent == nil {
-		return fmt.Errorf("notify: msg or agent is nil")
+		return outbound.Envelope{}, fmt.Errorf("notify: msg or agent is nil")
 	}
 	if msg.ApprovalExpiresAt == nil {
-		return fmt.Errorf("notify: approval_expires_at is nil on msg %s", msg.ID)
+		return outbound.Envelope{}, fmt.Errorf("notify: approval_expires_at is nil on msg %s", msg.ID)
 	}
 
 	owner, err := n.store.GetUserByID(ctx, agent.UserID)
 	if err != nil {
-		return fmt.Errorf("notify: lookup owner: %w", err)
+		return outbound.Envelope{}, fmt.Errorf("notify: lookup owner: %w", err)
 	}
 	if owner.Email == "" {
-		return fmt.Errorf("notify: owner %s has no email on record", owner.ID)
+		return outbound.Envelope{}, fmt.Errorf("notify: owner %s has no email on record", owner.ID)
 	}
 
 	tokenExp := msg.ApprovalExpiresAt.Add(tokenGraceAfterTTL)
@@ -142,11 +152,11 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 
 	approveTok, err := signFn(approvaltoken.ActionApprove)
 	if err != nil {
-		return fmt.Errorf("notify: sign approve token: %w", err)
+		return outbound.Envelope{}, fmt.Errorf("notify: sign approve token: %w", err)
 	}
 	rejectTok, err := signFn(approvaltoken.ActionReject)
 	if err != nil {
-		return fmt.Errorf("notify: sign reject token: %w", err)
+		return outbound.Envelope{}, fmt.Errorf("notify: sign reject token: %w", err)
 	}
 
 	subject := fmt.Sprintf("[e2a] approve outbound from %s: %s",
@@ -183,7 +193,7 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 		"",           // no conversation_id
 	)
 	if err != nil {
-		return fmt.Errorf("notify: compose: %w", err)
+		return outbound.Envelope{}, fmt.Errorf("notify: compose: %w", err)
 	}
 
 	// Prepend a DETERMINISTIC Message-ID so a re-sent notification collapses at
@@ -225,32 +235,56 @@ func (n *Notifier) NotifyPendingApproval(ctx context.Context, msg *identity.Mess
 		message = signed
 	}
 
-	// SendOnce, not Send: this runs inside a River job, so River (not the relay's
-	// in-process loop) owns retries. The %w keeps the SMTP error classifiable by
-	// Deliver via internal/outbound's IsPermanentSMTPError / IsConnectionError.
-	if _, err := n.relay.SendOnce(fromAddr, []string{owner.Email}, message); err != nil {
+	return outbound.Envelope{From: fromAddr, Recipients: []string{owner.Email}, Message: message}, nil
+}
+
+// submit is the one authorized submission: the submitter redeems the token
+// immediately before the socket opens and settles the provider's answer;
+// River (not the relay's in-process loop) owns retries, each as a fresh
+// attempt. The %w keeps the SMTP error classifiable via internal/outbound's
+// IsPermanentSMTPError / IsConnectionError.
+func (n *Notifier) submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) error {
+	if _, err := n.submitter.SubmitOnce(ctx, auth, env); err != nil {
 		return fmt.Errorf("notify: smtp send: %w", err)
 	}
-
-	log.Printf("[hitl-notify] sent approval email: msg=%s owner=%s agent=%s",
-		msg.ID, owner.ID, agent.ID)
 	return nil
 }
 
-// Deliver composes and sends the approval email for one held message, classifying
-// the result for the River NotifyWorker: a 5xx / validation reject is Permanent
-// (no retry), an unreachable relay is an Outage (snooze), everything else retries.
-// Implements hitlnotify.Deliverer. The classifiers key on the SMTP code / net
-// error preserved through NotifyPendingApproval's %w wrapping.
-func (n *Notifier) Deliver(ctx context.Context, pn *identity.PendingNotify) DeliverOutcome {
-	if err := n.NotifyPendingApproval(ctx, pn.Message, pn.Agent); err != nil {
-		return DeliverOutcome{
-			Err:       err,
-			Permanent: outbound.IsPermanentSMTPError(err),
-			Outage:    outbound.IsConnectionError(err),
-		}
+// Compose implements Deliverer: the provider-free half, classified like a
+// send so the worker treats a permanent compose failure the same way.
+func (n *Notifier) Compose(ctx context.Context, pn *identity.PendingNotify) (outbound.Envelope, DeliverOutcome) {
+	if n == nil {
+		return outbound.Envelope{}, DeliverOutcome{Err: fmt.Errorf("notify: notifier is nil")}
+	}
+	if pn == nil {
+		return outbound.Envelope{}, DeliverOutcome{Err: fmt.Errorf("notify: nothing to compose"), Permanent: true}
+	}
+	env, err := n.compose(ctx, pn.Message, pn.Agent)
+	if err != nil {
+		return outbound.Envelope{}, classify(err)
+	}
+	return env, DeliverOutcome{}
+}
+
+// Submit implements Deliverer: one authorized submission, classified for the
+// River NotifyWorker — a 5xx / validation reject is Permanent (no retry), an
+// unreachable relay is an Outage (snooze), everything else retries.
+func (n *Notifier) Submit(ctx context.Context, env outbound.Envelope, auth sendingpolicy.ProviderAuthorization) DeliverOutcome {
+	if n == nil {
+		return DeliverOutcome{Err: fmt.Errorf("notify: notifier is nil")}
+	}
+	if err := n.submit(ctx, env, auth); err != nil {
+		return classify(err)
 	}
 	return DeliverOutcome{}
+}
+
+func classify(err error) DeliverOutcome {
+	return DeliverOutcome{
+		Err:       err,
+		Permanent: outbound.IsPermanentSMTPError(err),
+		Outage:    outbound.IsConnectionError(err),
+	}
 }
 
 func (n *Notifier) magicURL(path, token string) string {

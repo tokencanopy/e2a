@@ -24,6 +24,7 @@ type sendingProtectionFlags struct {
 	register     bool
 	attest       bool
 	capabilities bool
+	reconcile    bool
 
 	expectedGeneration int64
 	expectedPolicySHA  string
@@ -40,12 +41,12 @@ type sendingProtectionFlags struct {
 }
 
 func (f *sendingProtectionFlags) commandRequested() bool {
-	return f.inspect || f.activate || f.register || f.attest || f.capabilities
+	return f.inspect || f.activate || f.register || f.attest || f.capabilities || f.reconcile
 }
 
 func (f *sendingProtectionFlags) selectedCount() int {
 	n := 0
-	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities} {
+	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile} {
 		if set {
 			n++
 		}
@@ -105,6 +106,8 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 		return runRuntimeAttest(ctx, module, f, stdout)
 	case f.capabilities:
 		return runPrintCapabilities(source, secrets, stdout)
+	case f.reconcile:
+		return runReconcileLegacySendingJobs(ctx, pool, sendingpolicy.NewGate(pool, secrets, source, policy), stdout)
 	}
 	return errors.New("no sending-protection command selected")
 }

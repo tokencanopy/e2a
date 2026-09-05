@@ -8,10 +8,12 @@ import (
 
 	"github.com/riverqueue/river"
 
+	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil/testdb"
+	"github.com/tokencanopy/e2a/internal/usage"
 )
 
 // TestSendingPolicyWiring builds the production outbound composition from
@@ -74,5 +76,52 @@ func TestSendingPolicyWiring(t *testing.T) {
 	// against the real database, which is what the worker will do.
 	if _, err := composed.gate.LookupOperation(context.Background(), "op_wiring_probe"); err == nil {
 		t.Fatal("a never-prepared operation resolved")
+	}
+}
+
+// TestNotificationAndPlatformMailWiring pins the three composition-root
+// edges the AST closure guard cannot see: both notification bundles hold the
+// gate (so their enqueues prepare operations and their workers authorize),
+// and the API holds the submitter + gate for public feedback. Dropping any
+// of them fails closed at runtime with an opaque "authorization required"
+// error; this is where it fails loudly instead.
+func TestNotificationAndPlatformMailWiring(t *testing.T) {
+	pool := testdb.TestDB(t)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: "relay.invalid", Port: 587, FromDomain: "test.e2a.dev"})
+	composed := newOutboundSending(outboundSendingDeps{
+		pool:    pool,
+		relay:   relay,
+		secrets: sendingpolicy.Secrets{},
+		source:  sendingpolicy.PolicySourceConfig,
+		policy:  sendingpolicy.DisabledPolicy(),
+	})
+
+	n := newNotificationJobs(notificationDeps{pool: pool, gate: composed.gate, hitlEnabled: true, webhookEnabled: true})
+	if n.hitl == nil || n.hitl.Gate() != composed.gate {
+		t.Fatal("hitl notification bundle does not hold the composed gate")
+	}
+	if n.webhook == nil || n.webhook.Gate() != composed.gate {
+		t.Fatal("webhook notification bundle does not hold the composed gate")
+	}
+	// The registered workers are what run; they must carry the gate too.
+	if w := n.hitl.NotifyWorker(); w == nil || w.Gate() != composed.gate {
+		t.Fatal("hitl notify worker registered without the gate")
+	}
+	if w := n.webhook.NotifyWorker(); w == nil || w.Gate() != composed.gate {
+		t.Fatal("webhook notify worker registered without the gate")
+	}
+
+	off := newNotificationJobs(notificationDeps{pool: pool, gate: composed.gate})
+	if off.hitl != nil || off.webhook != nil {
+		t.Fatal("unconfigured notifications must register nothing")
+	}
+
+	api := agent.NewAPI(nil, nil, relay, nil, usage.NewNoopUsageTracker(), "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	if api.ProviderSubmitterWired() {
+		t.Fatal("a fresh API must not claim a submitter")
+	}
+	composed.armAPI(api)
+	if !api.ProviderSubmitterWired() {
+		t.Fatal("armAPI did not hand the API the submitter and gate")
 	}
 }

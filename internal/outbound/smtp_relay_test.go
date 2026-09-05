@@ -12,7 +12,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/config"
 )
 
-func TestSMTPRelaySendWithContextCancelsHangingServer(t *testing.T) {
+func TestSMTPRelayCancelsHangingServer(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -40,24 +40,24 @@ func TestSMTPRelaySendWithContextCancelsHangingServer(t *testing.T) {
 	defer cancel()
 
 	started := time.Now()
-	_, err = relay.SendWithContext(ctx, "noreply@example.com", []string{"feedback@example.com"}, []byte("Subject: test\r\n\r\nbody"))
+	_, err = relay.sendOnceContext(ctx, "noreply@example.com", []string{"feedback@example.com"}, []byte("Subject: test\r\n\r\nbody"))
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("SendWithContext error = %v, want context deadline exceeded", err)
+		t.Fatalf("sendOnceContext error = %v, want context deadline exceeded", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("SendWithContext returned after %s, want cancellation within 1s", elapsed)
+		t.Fatalf("sendOnceContext returned after %s, want cancellation within 1s", elapsed)
 	}
 }
 
-func TestSMTPRelaySendOnceContextHonorsCancellation(t *testing.T) {
+func TestSMTPRelayHonorsCancellation(t *testing.T) {
 	relay := NewSMTPRelay(&config.OutboundSMTPConfig{Host: "127.0.0.1", Port: 1})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := relay.SendOnceContext(ctx, "noreply@example.com",
+	_, err := relay.sendOnceContext(ctx, "noreply@example.com",
 		[]string{"recipient@example.com"}, []byte("Subject: test\r\n\r\nbody"))
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("SendOnceContext error = %v, want context canceled", err)
+		t.Fatalf("sendOnceContext error = %v, want context canceled", err)
 	}
 }
 

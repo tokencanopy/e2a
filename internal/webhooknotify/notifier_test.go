@@ -9,6 +9,8 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/dkim"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
 type stubStore struct {
@@ -33,9 +35,14 @@ type captureRelay struct {
 	err     error
 }
 
-func (r *captureRelay) SendOnce(from string, to []string, msg []byte) (string, error) {
-	r.from, r.to, r.message = from, to, msg
-	return "queued-id", r.err
+// SubmitOnce satisfies the notifier's submitter seam: it captures the envelope
+// the notifier hands over and returns the scripted error.
+func (r *captureRelay) SubmitOnce(_ context.Context, _ sendingpolicy.ProviderAuthorization, env outbound.Envelope) (outbound.ProviderResult, error) {
+	r.from, r.to, r.message = env.From, env.Recipients, env.Message
+	if r.err != nil {
+		return outbound.ProviderResult{}, r.err
+	}
+	return outbound.ProviderResult{ProviderMessageID: "queued-id"}, nil
 }
 
 func testWebhook() *identity.Webhook {
@@ -63,7 +70,7 @@ func TestNotifier_DisabledEmailContent(t *testing.T) {
 	relay := &captureRelay{}
 	n := New(okStore(), relay, "send.example.com", "", "", "https://app.example.com")
 
-	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{})
 	if out.Err != nil {
 		t.Fatalf("Deliver: %v", out.Err)
 	}
@@ -111,7 +118,7 @@ func TestNotifier_WarningEmailContent(t *testing.T) {
 	wh.Enabled = true
 	wh.AutoDisabledAt = nil
 	wh.AutoDisableReason = ""
-	out := n.Deliver(context.Background(), wh, KindWarning)
+	out := n.Deliver(context.Background(), wh, KindWarning, sendingpolicy.ProviderAuthorization{})
 	if out.Err != nil {
 		t.Fatalf("Deliver: %v", out.Err)
 	}
@@ -140,7 +147,7 @@ func TestNotifier_ConfiguredFromAddress(t *testing.T) {
 	if got := n.FromAddress(); got != "support@corp.example" {
 		t.Fatalf("FromAddress = %q", got)
 	}
-	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{})
 	if out.Err != nil {
 		t.Fatalf("Deliver: %v", out.Err)
 	}
@@ -172,7 +179,7 @@ func TestNotifier_ConfiguredReplyTo(t *testing.T) {
 	relay := &captureRelay{}
 	n := New(okStore(), relay, "send.example.com", "support@send.example.com", "support@agents.example.com", "")
 
-	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{}); out.Err != nil {
 		t.Fatalf("Deliver: %v", out.Err)
 	}
 	msg := string(relay.message)
@@ -192,7 +199,7 @@ func TestNotifier_NoOwnerEmailIsPermanent(t *testing.T) {
 	st.owner = &identity.User{ID: "user_1", Email: ""}
 	n := New(st, &captureRelay{}, "send.example.com", "", "", "")
 
-	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{})
 	if out.Err == nil {
 		t.Fatal("expected an error for a missing owner email")
 	}
@@ -206,7 +213,7 @@ func TestNotifier_TransientStoreErrorIsRetryable(t *testing.T) {
 	st.statsErr = errors.New("db blip")
 	n := New(st, &captureRelay{}, "send.example.com", "", "", "")
 
-	out := n.Deliver(context.Background(), testWebhook(), KindDisabled)
+	out := n.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{})
 	if out.Err == nil {
 		t.Fatal("expected an error")
 	}
@@ -244,7 +251,7 @@ func TestNotifier_SignsWithDKIMWhenKeyExists(t *testing.T) {
 	relay := &captureRelay{}
 	n := New(okStore(), relay, "send.example.com", "support@corp.example", "", "").WithDKIM(lookup)
 
-	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{}); out.Err != nil {
 		t.Fatalf("Deliver: %v", out.Err)
 	}
 	msg := string(relay.message)
@@ -264,7 +271,7 @@ func TestNotifier_SendsUnsignedWhenNoDKIMKey(t *testing.T) {
 	relay := &captureRelay{}
 	n := New(okStore(), relay, "send.example.com", "", "", "").WithDKIM(lookup)
 
-	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+	if out := n.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{}); out.Err != nil {
 		t.Fatalf("Deliver must succeed unsigned: %v", out.Err)
 	}
 	if strings.Contains(string(relay.message), "DKIM-Signature:") {
@@ -273,7 +280,7 @@ func TestNotifier_SendsUnsignedWhenNoDKIMKey(t *testing.T) {
 	// And with no lookup wired at all (zero-config self-host).
 	relay2 := &captureRelay{}
 	n2 := New(okStore(), relay2, "send.example.com", "", "", "")
-	if out := n2.Deliver(context.Background(), testWebhook(), KindDisabled); out.Err != nil {
+	if out := n2.Deliver(context.Background(), testWebhook(), KindDisabled, sendingpolicy.ProviderAuthorization{}); out.Err != nil {
 		t.Fatalf("Deliver must succeed without a DKIM lookup: %v", out.Err)
 	}
 }
@@ -288,7 +295,7 @@ func TestNotifier_ReasonIsHTMLEscaped(t *testing.T) {
 
 	wh := testWebhook()
 	wh.AutoDisableReason = ""
-	if out := n.Deliver(context.Background(), wh, KindDisabled); out.Err != nil {
+	if out := n.Deliver(context.Background(), wh, KindDisabled, sendingpolicy.ProviderAuthorization{}); out.Err != nil {
 		t.Fatalf("Deliver: %v", out.Err)
 	}
 	// The text/plain part may carry the raw string (harmless in plain

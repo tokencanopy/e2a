@@ -122,9 +122,10 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	// disabled policy (pass-through admission, every attempt still durable)
 	// and the authorized submitter that refuses to dial without its token.
 	sendingGate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	providerSubmitter := outbound.NewProviderSubmitter(smtpRelay, sendingGate)
 	outboundJobs := outboundsend.NewJobs(
 		outboundSendStore,
-		agent.NewOutboundDeliverer(outbound.NewProviderSubmitter(smtpRelay, sendingGate)),
+		agent.NewOutboundDeliverer(providerSubmitter),
 		pool,
 	).WithGate(sendingGate)
 	jobsClient, err := jobs.New(pool, jobs.Config{OutboundWorkers: 1}, outboundJobs)
@@ -137,6 +138,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 
 	router := mux.NewRouter()
 	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	api.SetProviderSubmitter(providerSubmitter, sendingGate)
 	api.SetIdempotencyStore(idempotencyStore)
 	api.SetEnforcer(enforcer)
 	api.SetUsageStore(usageStore)

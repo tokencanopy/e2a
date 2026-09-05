@@ -292,3 +292,63 @@ respectively. An account pause has no clock and starts no hold, but a deadline
 already running keeps running. Terminal reconciliation is settlement-only: an
 evidence-settled row also settles the attempt that dialed
 (`Gate.SettleOperation`).
+
+## Addendum (2026-09-05): every provider call is an authorized attempt (B7)
+
+Slice B7 closed the seam B5 opened. `outbound.SMTPRelay` no longer exports a
+send method: the only way to open a socket to the provider is
+`ProviderSubmitter.SubmitOnce` with a `sendingpolicy.ProviderAuthorization`,
+and `internal/outbound`'s tracked-closure test parses every production file
+to keep it that way (no `net/smtp` import and no call to the relay's socket
+core outside the named exceptions). The paths that used to bypass the gate now
+cross it:
+
+- **HITL approval notifications** (`internal/hitlnotify`) and **webhook health
+  notices** (`internal/webhooknotify`): the enqueue prepares a
+  `customer_notification` operation in the same transaction as the source
+  row (`PrepareNotificationTx`, charged to the triggering account, shared
+  reputation class) and stamps it on the job. The operation id is derived
+  from the source — `op_hitl_<message id>` for an approval request,
+  `op_wh_<kind>_<webhook id>_<episode>` for a health notice, where the
+  episode is the `warn_notified_at` / `auto_disabled_at` stamp the sweep
+  wrote in the same transaction — so preparing the same source twice yields
+  one operation, and the worker cancels a job whose reference is a derived
+  id for any other source (the binding the message worker enforces). A
+  reference of any other shape — migration 113 stamped adopted notify jobs
+  with `op_<md5>` — is a pre-derivation reference for the job's own source:
+  the worker re-resolves it through the same Prepare path and replaces it
+  once (`jobs.SetJobArg`), so an upgrade that crosses v1.8.7 drains its
+  backlog instead of cancelling it. The worker
+  order is compose → Reserve → early hold → ConsumeAttempt → authorized
+  submit: every fallible, provider-free step (owner lookup, token signing,
+  MIME, DKIM) runs before an ordinal is charged, and the token is consumed
+  immediately before the socket opens. A job from a pre-floor slot resolves
+  its operation at fire time and stamps it once (`jobs.StampJobArg`); with a
+  source-derived id a repeat resolve is harmless. A health notice older than
+  seven days is dropped rather than left snoozing behind a pause.
+- **Public feedback mail** (`POST /api/feedback`): the operation is keyed by
+  a server-minted submission id and its envelope is the configured notify
+  set, never the request, so the form cannot become a relay. No queue owns
+  this path, so its bounded in-request retry loop is the whole envelope and
+  every physical attempt is its own charged ordinal; a definite rejection and
+  a lost acceptance both stop the loop.
+
+Operators cutting over a slot with a queued backlog run
+`e2a -reconcile-legacy-sending-jobs`: it stamps an operation onto every
+pending `outbound_send` / `hitl_notify` / `webhook_notify` job that has none
+or a pre-derivation one, through exactly the Prepare path its enqueue would
+have used, cancels the
+ones whose source row is gone, and exits nonzero unless every scanned job was
+decided. Each job is re-read under its row lock inside its own transaction,
+so one a worker claimed after the scan is skipped and left to that worker;
+a paused account's message job is also left unstamped for the worker's hold
+path. The workers resolve legacy jobs themselves, so the command is a
+convenience for a clean cutover, not a prerequisite.
+
+Two consequences worth knowing. Notification and feedback mail now cross the
+same submitter as customer mail, so it carries `X-SES-CONFIGURATION-SET`
+and SES publishes delivery feedback for it; none of it correlates to a
+message row, and the SNS consumer acks it as unknown (a log line, no
+suppression). And the closure guard fences `net/smtp` and the SES v2 SDK
+import; a send through some other HTTP provider API would be a new
+dependency, which is where review catches it.

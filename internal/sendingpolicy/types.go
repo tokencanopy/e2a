@@ -348,6 +348,60 @@ const (
 type NotificationRef struct {
 	source NotificationSource
 	id     string
+	// kind is the webhook health episode kind (WebhookHealthKindWarning or
+	// WebhookHealthKindDisabled); empty for every other source.
+	kind string
+}
+
+// Source exposes the notification source, for tests and logging.
+func (r NotificationRef) Source() NotificationSource { return r.source }
+
+// SourceID exposes the source row id.
+func (r NotificationRef) SourceID() string { return r.id }
+
+// Kind exposes the webhook health episode kind; empty for other sources.
+func (r NotificationRef) Kind() string { return r.kind }
+
+// Webhook health episode kinds. They mirror the notification job's own
+// vocabulary; the notify package asserts the two agree.
+const (
+	WebhookHealthKindWarning  = "warning"
+	WebhookHealthKindDisabled = "disabled"
+)
+
+// HITLNotificationOperationID is the operation id of the approval request
+// for one held message. Deriving it from the message makes
+// PrepareNotificationTx idempotent per hold and lets the worker bind a
+// job's reference to its source the way the message worker does.
+func HITLNotificationOperationID(messageID string) string {
+	return hitlOperationPrefix + messageID
+}
+
+const (
+	hitlOperationPrefix          = "op_hitl_"
+	webhookHealthOperationPrefix = "op_wh_"
+)
+
+// IsHITLNotificationOperationID reports whether an id has the source-derived
+// shape above. An id of any other shape — migration 113 stamped adopted
+// notify jobs with `op_<md5>` — is a pre-derivation reference: its source is
+// still the job's own, so a worker re-derives rather than refuses it.
+func IsHITLNotificationOperationID(id string) bool {
+	return strings.HasPrefix(id, hitlOperationPrefix)
+}
+
+// IsWebhookHealthOperationID reports whether an id has the episode-derived
+// shape; see IsHITLNotificationOperationID for what any other shape means.
+func IsWebhookHealthOperationID(id string) bool {
+	return strings.HasPrefix(id, webhookHealthOperationPrefix)
+}
+
+// WebhookHealthOperationID is the operation id of one webhook health
+// episode: the kind plus the timestamp the sweep stamped when it flipped
+// the state (warn_notified_at or auto_disabled_at). A webhook that recovers
+// and fails again is a new episode with a new operation.
+func WebhookHealthOperationID(webhookID, kind string, episode time.Time) string {
+	return fmt.Sprintf("%s%s_%s_%d", webhookHealthOperationPrefix, kind, webhookID, episode.UTC().UnixMicro())
 }
 
 // NewHITLNotificationRef references a pending outbound message whose approval
@@ -358,10 +412,13 @@ func NewHITLNotificationRef(messageID string) NotificationRef {
 	return NotificationRef{source: NotificationHITLMessage, id: messageID}
 }
 
-// NewWebhookHealthNotificationRef references a webhook whose health episode is
-// being reported to its owner.
-func NewWebhookHealthNotificationRef(webhookID string) NotificationRef {
-	return NotificationRef{source: NotificationWebhookHealth, id: webhookID}
+// NewWebhookHealthNotificationRef references a webhook whose health episode
+// of the given kind (WebhookHealthKindWarning / WebhookHealthKindDisabled) is
+// being reported to its owner. PrepareNotificationTx reads the episode's
+// timestamp from the locked webhook row; an unknown kind or an episode the
+// sweep never stamped is ErrSourceUnavailable.
+func NewWebhookHealthNotificationRef(webhookID, kind string) NotificationRef {
+	return NotificationRef{source: NotificationWebhookHealth, id: webhookID, kind: kind}
 }
 
 // ProtectionNoticeRef names one already-committed notice event and audience.
@@ -524,12 +581,13 @@ func (a ProviderAuthorization) Attempt() AttemptRef { return a.attempt }
 // Purpose exposes the derived purpose, for metrics.
 func (a ProviderAuthorization) Purpose() Purpose { return a.purpose }
 
-// AuthorizedRecipients returns a defensive copy of the exact final envelope.
-//
-// Only the protection notifier uses it: that path is the one caller that does
-// not already know its recipient, because the address is resolved under lock at
-// final authorization and deliberately never persisted in plaintext. Every
-// other caller composed its own envelope and must not re-derive one here.
+// AuthorizedRecipients is the normalized recipient set this token permits,
+// in canonical order. The protection notifier and public feedback compose
+// their envelope from it — their recipients are configuration the gate
+// already resolved, never a customer-controlled list. Every other caller
+// composed its own envelope from the source row and hands that to the seam,
+// which proves it names exactly these mailboxes (ValidateEnvelope) before it
+// dials; a mismatch there fails closed rather than being re-derived here.
 func (a ProviderAuthorization) AuthorizedRecipients() []string {
 	out := make([]string, len(a.recipients))
 	copy(out, a.recipients)

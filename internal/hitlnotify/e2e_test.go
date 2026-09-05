@@ -13,6 +13,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
 
@@ -34,7 +35,8 @@ func TestEndToEnd_AcceptTxThroughRiverToSMTP(t *testing.T) {
 		Host: smtpAddr.Host, Port: smtpAddr.Port, FromDomain: "notify.test",
 	})
 	signer := approvaltoken.NewSigner("hitl-notify-e2e-secret")
-	notifier := hitlnotify.New(store, relay, signer, "notify.test", "", "", "https://app.example.test")
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	notifier := hitlnotify.New(store, outbound.NewProviderSubmitter(relay, gate), signer, "notify.test", "", "", "https://app.example.test")
 
 	// Seed a verified HITL agent + owner.
 	user, err := store.CreateOrGetUser(ctx, "owner-e2e@reviewer.test", "Owner", "google-notify-e2e")
@@ -54,7 +56,7 @@ func TestEndToEnd_AcceptTxThroughRiverToSMTP(t *testing.T) {
 	}
 
 	// Build the integration on a real client and bind the concrete Notifier.
-	j := hitlnotify.NewJobs(store)
+	j := hitlnotify.NewJobs(store).WithGate(gate, pool)
 	client, err := jobs.New(pool, jobs.Config{}, j)
 	if err != nil {
 		t.Fatalf("jobs.New: %v", err)

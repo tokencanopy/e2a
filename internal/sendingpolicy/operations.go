@@ -281,17 +281,40 @@ func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref Notif
 		return OperationRef{}, ErrSourceUnavailable
 	}
 
-	var userID string
+	var userID, operationID string
 	var err error
 	switch ref.source {
 	case NotificationHITLMessage:
 		userID, err = lockHITLSourceOwner(ctx, tx, ref.id)
+		operationID = HITLNotificationOperationID(ref.id)
 	case NotificationWebhookHealth:
+		// The operation is keyed by the episode the sweep stamped in the
+		// same transaction that enqueues the notice, so preparing the same
+		// episode twice (an enqueue and a later legacy resolve, or two
+		// resolvers racing) yields one operation, and a job whose reference
+		// names another episode is detectably stale.
+		var warnedAt, disabledAt *time.Time
 		err = tx.QueryRow(ctx,
-			`SELECT user_id FROM webhooks WHERE id = $1 FOR UPDATE`, ref.id,
-		).Scan(&userID)
+			`SELECT user_id, warn_notified_at, auto_disabled_at FROM webhooks WHERE id = $1 FOR UPDATE`, ref.id,
+		).Scan(&userID, &warnedAt, &disabledAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = ErrSourceUnavailable
+		}
+		if err == nil {
+			var episode *time.Time
+			switch ref.kind {
+			case WebhookHealthKindWarning:
+				episode = warnedAt
+			case WebhookHealthKindDisabled:
+				episode = disabledAt
+			}
+			if episode == nil {
+				// Unknown kind, or an episode the sweep never stamped:
+				// there is no notice to send, so there is nothing to
+				// authorize.
+				return OperationRef{}, ErrSourceUnavailable
+			}
+			operationID = WebhookHealthOperationID(ref.id, ref.kind, *episode)
 		}
 	default:
 		return OperationRef{}, ErrSourceUnavailable
@@ -308,7 +331,7 @@ func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref Notif
 	}
 
 	row, err := insertOperation(ctx, tx, operationRow{
-		OperationID:      randomID("op_"),
+		OperationID:      operationID,
 		SourceAccountRef: &userID,
 		PolicySubjectRef: userID,
 		Purpose:          PurposeCustomerNotification,

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +39,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/piguard"
 	"github.com/tokencanopy/e2a/internal/ratelimit"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhook"
@@ -178,7 +181,12 @@ type API struct {
 	// identically to a wire roundtrip of the same message.
 	inboundScreen *piguard.Engine
 	smtpRelay     *outbound.SMTPRelay
-	userAuth      *auth.UserAuth
+	// submitter and gate are the authorized provider seam for platform mail
+	// this API sends itself (public feedback). Wired via SetProviderSubmitter;
+	// unset means the platform cannot send feedback mail.
+	submitter *outbound.ProviderSubmitter
+	gate      sendingpolicy.Gate
+	userAuth  *auth.UserAuth
 	// oidcAuth wires optional, generic OpenID Connect browser login. Nil means
 	// both OIDC routes are absent; it is independent of legacy Google login.
 	oidcAuth   *auth.OIDCAuth
@@ -1629,6 +1637,17 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	return &OutboundResult{MessageID: accepted.ID, Status: acceptStatus, ScheduledAt: scheduledAt, SentAs: comp.SentAs, Method: comp.Method}, nil
 }
 
+// SetProviderSubmitter wires the authorized provider seam and the gate that
+// issues its tokens, for the platform mail this API sends on its own behalf.
+func (a *API) SetProviderSubmitter(submitter *outbound.ProviderSubmitter, gate sendingpolicy.Gate) {
+	a.submitter = submitter
+	a.gate = gate
+}
+
+// ProviderSubmitterWired reports whether the platform-mail seam is armed, for
+// the composition root's wiring test.
+func (a *API) ProviderSubmitterWired() bool { return a.submitter != nil && a.gate != nil }
+
 // SendTestCore accepts (or HITL-holds) a platform test email to the agent's
 // own address. HTTP-free; shared by the legacy handler and the v1 layer. The
 // caller has already authed, resolved + owned the agent, domain-verified,
@@ -1925,7 +1944,7 @@ func (a *API) handleFeedback(w http.ResponseWriter, r *http.Request) {
 // notification reaches them directly; compose-layer header sanitization
 // neutralizes any CR/LF in that user-controlled value.
 func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, submitterEmail, ghNote string, to, cc []string) error {
-	if a.smtpRelay == nil || !a.smtpRelay.Configured() || a.fromDomain == "" {
+	if a.submitter == nil || a.gate == nil || a.smtpRelay == nil || !a.smtpRelay.Configured() || a.fromDomain == "" {
 		return fmt.Errorf("outbound SMTP relay not configured")
 	}
 
@@ -1951,12 +1970,95 @@ func (a *API) sendFeedbackEmail(ctx context.Context, title, category, message, s
 	rcpts = append(rcpts, to...)
 	rcpts = append(rcpts, cc...)
 
-	// Send (not SendOnce) — no job queue owns retries for this path, so the
-	// relay's own transient-4xx backoff is the only retry envelope.
-	if _, err := a.smtpRelay.SendWithContext(ctx, from, rcpts, raw); err != nil {
-		return fmt.Errorf("smtp send: %w", err)
+	// No job queue owns retries for this path, so the request's bounded
+	// retry loop is the whole envelope — and every physical attempt is its
+	// own charged ordinal: Reserve, ConsumeAttempt, one authorized submit.
+	// The operation is keyed by a server-minted submission id and its
+	// envelope is configuration, never the request, so the form cannot
+	// become an open relay however it is retried. What goes on the wire is
+	// the token's canonical recipient set: the configured TO/CC lists may
+	// overlap or differ in case, and the seam refuses an envelope whose raw
+	// count disagrees with its normalized one.
+	submissionID, err := feedbackSubmissionID()
+	if err != nil {
+		return err
 	}
-	return nil
+	ref, err := a.gate.PreparePublicFeedback(ctx, sendingpolicy.NewPublicFeedbackRef(submissionID, rcpts))
+	if err != nil {
+		return fmt.Errorf("prepare feedback operation: %w", err)
+	}
+	var last error
+	for attempt := 0; attempt < feedbackSendAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return errors.Join(ctx.Err(), last)
+			case <-time.After(feedbackRetryBackoff[attempt-1]):
+			}
+		}
+		early, attemptRef, err := a.gate.Reserve(ctx, ref)
+		if err != nil {
+			return fmt.Errorf("reserve feedback attempt: %w", err)
+		}
+		if !early.Allow {
+			return fmt.Errorf("feedback send held by sending policy: %s", early.Reason)
+		}
+		decision, auth, err := a.gate.ConsumeAttempt(ctx, attemptRef)
+		if err != nil {
+			// The ordinal is reserved and nothing will Reserve it again on
+			// this path (the request ends here), so give its units back
+			// rather than leave them charged until midnight. Best effort:
+			// the gate's day-scoped expiry is the backstop.
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), feedbackReleaseTimeout)
+			cerr := a.gate.CancelAttempt(releaseCtx, attemptRef)
+			cancel()
+			if cerr != nil {
+				log.Printf("[feedback] release reserved attempt after authorize error: %v", cerr)
+			}
+			return fmt.Errorf("authorize feedback attempt: %w", err)
+		}
+		if !decision.Allow || auth == nil {
+			return fmt.Errorf("feedback send held by sending policy: %s", decision.Reason)
+		}
+		_, err = a.submitter.SubmitOnce(ctx, *auth, outbound.Envelope{From: from, Recipients: auth.AuthorizedRecipients(), Message: raw})
+		if err == nil {
+			return nil
+		}
+		last = err
+		if outbound.IsPermanentSMTPError(err) || errors.Is(err, outbound.ErrProviderAcceptanceUnknown) {
+			// Definite rejection: retrying resends nothing. Acceptance unknown:
+			// the provider may hold the message, and a retry would be a
+			// duplicate copy of platform mail nobody asked for twice.
+			break
+		}
+	}
+	return fmt.Errorf("smtp send: %w", last)
+}
+
+// feedbackSendAttempts bounds the physical submissions one feedback request
+// may make; feedbackRetryBackoff paces them. The sleeps total six of the ten
+// seconds feedbackEmailTimeout allows, so all four attempts fit only when
+// the relay answers quickly (a refused connection, a fast 4xx); a relay that
+// hangs consumes the budget on its first attempt and the deadline exit
+// reports that attempt's error. Each attempt is a distinct charged ordinal
+// on the feedback operation.
+const feedbackSendAttempts = 4
+
+var feedbackRetryBackoff = []time.Duration{time.Second, 2 * time.Second, 3 * time.Second}
+
+// feedbackReleaseTimeout bounds the best-effort release of a reserved
+// attempt after an authorize error, so a database that is already failing
+// cannot park the handler goroutine.
+const feedbackReleaseTimeout = 2 * time.Second
+
+// feedbackSubmissionID mints the server-side identity one feedback request's
+// operation is keyed by.
+func feedbackSubmissionID() (string, error) {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("feedback submission id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // splitFeedbackAddrs parses a comma-separated address list from env config,
