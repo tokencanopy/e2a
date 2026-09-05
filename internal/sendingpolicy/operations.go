@@ -172,6 +172,17 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 	// Agent before message, matching migration 113 and the irreversible
 	// deletion path: deletion locks an agent and then its messages, so taking
 	// them in the other order here would deadlock against a concurrent purge.
+	//
+	// FOR NO KEY UPDATE, not FOR UPDATE. This runs inside the accept
+	// transaction AFTER the message insert, and every concurrent insert of a
+	// message for the same agent holds a FOR KEY SHARE lock on the agent row
+	// through its foreign key. FOR UPDATE conflicts with KEY SHARE, so two
+	// parallel sends deadlocked: each held its own insert's share lock plus
+	// the account_usage row its storage trigger took, and each waited for
+	// the other's agent lock (seen as SQLSTATE 40P01 on staging, v1.9.0).
+	// NO KEY UPDATE still serializes gate callers against each other and
+	// against any update or delete of the agent, which is all the ordering
+	// this needs, and it does not conflict with a foreign-key share.
 	var agentID string
 	err := tx.QueryRow(ctx,
 		`SELECT agent_id FROM messages WHERE id = $1 AND direction = 'outbound'`, messageID,
@@ -185,7 +196,7 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 
 	var userID string
 	err = tx.QueryRow(ctx,
-		`SELECT user_id FROM agent_identities WHERE id = $1 FOR UPDATE`, agentID,
+		`SELECT user_id FROM agent_identities WHERE id = $1 FOR NO KEY UPDATE`, agentID,
 	).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", OperationRef{}, ErrSourceUnavailable
@@ -295,7 +306,7 @@ func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref Notif
 		// names another episode is detectably stale.
 		var warnedAt, disabledAt *time.Time
 		err = tx.QueryRow(ctx,
-			`SELECT user_id, warn_notified_at, auto_disabled_at FROM webhooks WHERE id = $1 FOR UPDATE`, ref.id,
+			`SELECT user_id, warn_notified_at, auto_disabled_at FROM webhooks WHERE id = $1 FOR NO KEY UPDATE`, ref.id,
 		).Scan(&userID, &warnedAt, &disabledAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = ErrSourceUnavailable
@@ -358,7 +369,10 @@ func lockHITLSourceOwner(ctx context.Context, tx pgx.Tx, messageID string) (stri
 
 	var userID string
 	err = tx.QueryRow(ctx,
-		`SELECT user_id FROM agent_identities WHERE id = $1 FOR UPDATE`, agentID,
+		// NO KEY UPDATE for the same reason as PrepareExternalTx: the hold's
+		// accept transaction inserted the message first, and concurrent
+		// inserts hold the agent row FOR KEY SHARE.
+		`SELECT user_id FROM agent_identities WHERE id = $1 FOR NO KEY UPDATE`, agentID,
 	).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrSourceUnavailable
