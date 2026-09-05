@@ -42,6 +42,8 @@ func TestCatalogIsExhaustive(t *testing.T) {
 		{ReasonSubmissionProviderRejected, StageSubmission, OutcomeFailed, false},
 		{ReasonSubmissionLocalRetriesExhausted, StageSubmission, OutcomeFailed, true},
 		{ReasonSubmissionCancelled, StageSubmission, OutcomeFailed, false},
+		{ReasonSubmissionPolicyBudgetExpired, StageSubmission, OutcomeFailed, true},
+		{ReasonSubmissionSendingSetupExpired, StageSubmission, OutcomeFailed, true},
 		{ReasonDeliveryRecipientServerAccepted, StageDelivery, OutcomeDelivered, false},
 		{ReasonDeliveryTemporaryDelay, StageDelivery, OutcomeDeferred, true},
 		{ReasonDeliveryPermanentBounce, StageDelivery, OutcomeBounced, false},
@@ -51,7 +53,7 @@ func TestCatalogIsExhaustive(t *testing.T) {
 	}
 
 	catalog := Catalog()
-	if got, want := len(catalog), 30; got != want {
+	if got, want := len(catalog), 32; got != want {
 		t.Fatalf("Catalog() length = %d, want %d", got, want)
 	}
 	seen := make(map[ReasonCode]bool, len(tests))
@@ -93,7 +95,7 @@ func TestCatalogRejectsUnknownAndCannotBeMutated(t *testing.T) {
 	if !ok || got != (Definition{Stage: StageAccepted, Outcome: OutcomeAccepted}) {
 		t.Fatalf("caller mutation changed canonical lookup: %+v, %v", got, ok)
 	}
-	if got := len(Catalog()); got != 30 {
+	if got := len(Catalog()); got != 32 {
 		t.Fatalf("caller mutation changed canonical catalog length to %d", got)
 	}
 }
