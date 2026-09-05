@@ -33,6 +33,8 @@ type Gate interface {
 	DeferAttempt(context.Context, AttemptRef) error
 	CancelAttempt(context.Context, AttemptRef) error
 	SettleProvider(context.Context, ProviderSettlement) error
+	SettleOperation(context.Context, OperationRef, SettlementOutcome, string) error
+	LookupOperation(context.Context, string) (OperationRef, error)
 }
 
 var _ Gate = (*Module)(nil)
@@ -1809,6 +1811,55 @@ func (m *Module) SettleProvider(ctx context.Context, settlement ProviderSettleme
 	if settlement.Attempt.IsZero() {
 		return ErrSourceUnavailable
 	}
+	return m.settle(ctx, settlement.Attempt.operationID, settlement.Attempt.attempt, settlement)
+}
+
+// LookupOperation recovers a reference to an operation that already exists.
+//
+// This is not a constructor: it returns a reference only for a durable
+// operation row, and the reference carries an id and advisory fields exactly
+// as a deserialized River argument does — every Gate method reloads the row
+// under lock, so recovering a reference grants nothing. It exists for the
+// reconciler, which learns of provider evidence by message id long after the
+// worker and its token are gone.
+func (m *Module) LookupOperation(ctx context.Context, operationID string) (OperationRef, error) {
+	if strings.TrimSpace(operationID) == "" {
+		return OperationRef{}, ErrSourceUnavailable
+	}
+	var row operationRow
+	err := m.pool.QueryRow(ctx, `
+		SELECT operation_id, source_account_ref, policy_subject_ref, purpose, shared_reputation
+		  FROM sending_provider_operations
+		 WHERE operation_id = $1`, operationID,
+	).Scan(&row.OperationID, &row.SourceAccountRef, &row.PolicySubjectRef, &row.Purpose, &row.Shared)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OperationRef{}, ErrSourceUnavailable
+	}
+	if err != nil {
+		return OperationRef{}, fmt.Errorf("sendingpolicy: lookup operation: %w", err)
+	}
+	return row.ref(), nil
+}
+
+// SettleOperation applies a delayed authoritative provider outcome to the
+// attempt of an operation that most recently opened a socket.
+//
+// It exists for the two callers that hold evidence but no token: the worker
+// that finds provider-accept evidence already recorded on a row it is about to
+// re-drive, and the terminal reconciler settling a stranded row from that same
+// evidence. Neither can name an ordinal — the token that could is gone with the
+// process that held it — but both know which OPERATION the evidence belongs to,
+// and the only attempt evidence can describe is the latest one that dialed.
+func (m *Module) SettleOperation(ctx context.Context, ref OperationRef, outcome SettlementOutcome, providerMessageID string) error {
+	if ref.IsZero() {
+		return ErrSourceUnavailable
+	}
+	return m.settle(ctx, ref.id, 0, ProviderSettlement{Outcome: outcome, ProviderMessageID: providerMessageID})
+}
+
+// settle is the shared settlement body. attempt 0 means "the latest attempt
+// whose provider call started", resolved under the operation lock.
+func (m *Module) settle(ctx context.Context, operationID string, attempt int, settlement ProviderSettlement) error {
 	if !settlement.Outcome.valid() {
 		return fmt.Errorf("sendingpolicy: unsupported settlement outcome %q", settlement.Outcome)
 	}
@@ -1819,11 +1870,24 @@ func (m *Module) SettleProvider(ctx context.Context, settlement ProviderSettleme
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	op, err := lockOperation(ctx, tx, settlement.Attempt.operationID)
+	op, err := lockOperation(ctx, tx, operationID)
 	if err != nil {
 		return err
 	}
-	stored, err := lockReservation(ctx, tx, settlement.Attempt.operationID, settlement.Attempt.attempt)
+	if attempt == 0 {
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(MAX(submission_attempt), 0)
+			  FROM sending_budget_reservations
+			 WHERE operation_id = $1 AND call_state = 'started'`, operationID,
+		).Scan(&attempt); err != nil {
+			return fmt.Errorf("sendingpolicy: find started attempt: %w", err)
+		}
+		if attempt == 0 {
+			return ErrAttemptStale
+		}
+	}
+	settlement.Attempt = AttemptRef{operationID: operationID, attempt: attempt}
+	stored, err := lockReservation(ctx, tx, operationID, attempt)
 	if err != nil {
 		return err
 	}

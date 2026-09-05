@@ -269,3 +269,72 @@ func TestProviderTokenSettlementComparesNormalizedProviderMessageID(t *testing.T
 		t.Fatalf("different id err = %v, want ErrProviderMessageIDConflict", err)
 	}
 }
+
+// TestProviderTokenSettleOperationTargetsTheLatestDialedAttempt: evidence that
+// arrives without a token settles the most recent attempt that opened a
+// socket — not a later ordinal that was only reserved, and nothing at all when
+// no attempt ever dialed.
+func TestProviderTokenSettleOperationTargetsTheLatestDialedAttempt(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	ref, attempt := f.prepareAndReserve(g, agent, 1)
+
+	err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses-early")
+	if !errors.Is(err, sendingpolicy.ErrAttemptStale) {
+		t.Fatalf("settle before any dial err = %v, want ErrAttemptStale", err)
+	}
+
+	_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || auth == nil {
+		t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+	if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	// The worker died after the socket opened; a later execution re-reserved
+	// ordinal two but never consumed it. Delayed evidence belongs to ordinal one.
+	if _, next, err := g.Reserve(f.ctx, ref); err != nil || next.Attempt() != 2 {
+		t.Fatalf("re-reserve: attempt=%v err=%v", next, err)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "<ses-late@us-east-2.amazonses.com>"); err != nil {
+		t.Fatalf("settle by operation: %v", err)
+	}
+	if got := f.providerMessageID(ref.ID(), 1); got == nil || *got != "ses-late" {
+		t.Fatalf("attempt one bound = %v, want ses-late", got)
+	}
+	var bound int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM sending_feedback_correlations
+		 WHERE operation_id = $1 AND provider_message_id IS NOT NULL`, ref.ID()).Scan(&bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound != 1 {
+		t.Fatalf("%d attempts carry a provider id, want exactly the dialed one", bound)
+	}
+	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
+		Attempt: auth.Attempt(), Outcome: sendingpolicy.SettlementProviderAccepted, ProviderMessageID: "ses-late",
+	}); err != nil {
+		t.Fatalf("replay by token: %v", err)
+	}
+}
+
+// TestProviderTokenLookupOperationResolvesOnlyDurableOperations: a reference
+// can be recovered for an operation that exists, and for nothing else.
+func TestProviderTokenLookupOperationResolvesOnlyDurableOperations(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	_, ref := f.prepareMessage(g, f.message(agent, "own_address", 1))
+
+	got, err := g.LookupOperation(f.ctx, ref.ID())
+	if err != nil || got.ID() != ref.ID() || got.Purpose() != sendingpolicy.PurposeCustomerMessage {
+		t.Fatalf("lookup = %+v err=%v, want the prepared operation", got, err)
+	}
+	if _, err := g.LookupOperation(f.ctx, "msg_never_prepared"); !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("lookup of an unknown operation err = %v, want ErrSourceUnavailable", err)
+	}
+	if _, err := g.LookupOperation(f.ctx, ""); !errors.Is(err, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("lookup of an empty id err = %v, want ErrSourceUnavailable", err)
+	}
+}
