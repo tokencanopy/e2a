@@ -407,9 +407,7 @@ func TestSettlementIsTheOnlyThingThatAdvancesTheRamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
-		t.Fatalf("authorize: auth=%v err=%v", auth, err)
-	}
+	f.consumeAndRedeem(g, attempt)
 
 	// Authorized but unsettled: the day has not qualified.
 	if _, days, ok := f.rampScope(user, domain); !ok || days != 0 {
@@ -454,9 +452,7 @@ func TestPermanentRejectionReleasesRampCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
-		t.Fatalf("authorize: auth=%v err=%v", auth, err)
-	}
+	f.consumeAndRedeem(g, attempt)
 	if reserved, _, _ := f.domainCounter(user, domain); reserved != 10 {
 		t.Fatalf("ramp reserved = %d, want 10", reserved)
 	}
@@ -636,9 +632,7 @@ func TestFreePlanCanQualifyStageOneButNotStageTwo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
-		t.Fatalf("authorize: auth=%v err=%v", auth, err)
-	}
+	f.consumeAndRedeem(g, attempt)
 	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
 		Attempt: attempt, Outcome: sendingpolicy.SettlementProviderAccepted,
 	}); err != nil {
@@ -689,9 +683,7 @@ func TestFreePlanCanQualifyStageOneButNotStageTwo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stage two reserve: %v", err)
 	}
-	if d, auth, err := g.ConsumeAttempt(f.ctx, stageTwo); err != nil || auth == nil {
-		t.Fatalf("stage two authorize: decision=%+v auth=%v err=%v", d, auth, err)
-	}
+	f.consumeAndRedeem(g, stageTwo)
 	if err := g.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{
 		Attempt: stageTwo, Outcome: sendingpolicy.SettlementProviderAccepted,
 	}); err != nil {
@@ -824,9 +816,7 @@ func TestCancelCannotRefundRampUnitsAnEarlierAttemptSpent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if _, auth, err := g.ConsumeAttempt(f.ctx, first); err != nil || auth == nil {
-		t.Fatalf("authorize attempt one: auth=%v err=%v", auth, err)
-	}
+	f.consumeAndRedeem(g, first)
 	if reserved, _, _ := f.domainCounter(user, domain); reserved != 100 {
 		t.Fatalf("ramp reserved = %d after authorization, want 100", reserved)
 	}
@@ -1311,9 +1301,7 @@ func TestDelayedAcceptanceCreditsTheAttemptsOwnDay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if _, auth, err := g.ConsumeAttempt(f.ctx, attempt); err != nil || auth == nil {
-		t.Fatalf("authorize: auth=%v err=%v", auth, err)
-	}
+	f.consumeAndRedeem(g, attempt)
 	// Age the ramp ledger so the attempt reads as three days old.
 	for _, stmt := range []string{
 		`UPDATE domain_send_counters SET day = day - 3`,
@@ -1531,4 +1519,19 @@ func probeRowLock(t *testing.T, f *fixture, query string, args []any) error {
 	defer func() { _ = tx.Rollback(f.ctx) }()
 	_, err = tx.Exec(f.ctx, query, args...)
 	return err
+}
+
+// consumeAndRedeem runs final authorization and then redeems the token, the
+// way the SMTP adapter does immediately before it dials. Settlement reports
+// what the provider did, so it is only meaningful for an attempt that opened
+// the socket; every test that settles must have redeemed first.
+func (f *fixture) consumeAndRedeem(g sendingpolicy.Gate, attempt sendingpolicy.AttemptRef) {
+	f.t.Helper()
+	_, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || auth == nil {
+		f.t.Fatalf("authorize: auth=%v err=%v", auth, err)
+	}
+	if err := g.RedeemProviderCall(f.ctx, *auth); err != nil {
+		f.t.Fatalf("redeem: %v", err)
+	}
 }
