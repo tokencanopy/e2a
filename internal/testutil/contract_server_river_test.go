@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/tokencanopy/e2a/internal/testutil/testdb"
 )
 
 const (
@@ -113,7 +114,7 @@ func requireReachableContractTestDB(t *testing.T) string {
 		contractDBReachabilityTimeout,
 		contractDBPreparationTimeout,
 		func(ctx context.Context) error {
-			probe, err := pgxpool.New(ctx, baseTestDBURL())
+			probe, err := pgxpool.New(ctx, testdb.BaseTestDBURL())
 			if err != nil {
 				return err
 			}

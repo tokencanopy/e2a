@@ -18,6 +18,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/relay"
+	"github.com/tokencanopy/e2a/internal/testutil/testdb"
 	"github.com/tokencanopy/e2a/internal/unsubscribe"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhook"
@@ -281,7 +282,7 @@ func (s *ContractServer) Close(ctx context.Context) error {
 		firstErr = err
 	}
 	s.WSHub.Close()
-	if err := truncateAll(ctx, s.DBPool); err != nil && firstErr == nil {
+	if err := testdb.Truncate(ctx, s.DBPool); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	s.DBPool.Close()
