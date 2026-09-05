@@ -1231,31 +1231,36 @@ func (f *fixture) tryTx(fn func(tx pgx.Tx) error) error {
 // insert waits on the first's account_usage row while the first's prepare
 // waits on the second's key share — SQLSTATE 40P01. The gate's NO KEY UPDATE
 // lock lets the first prepare proceed.
+//
+// The interleaving is forced, not timed: B reports its backend pid and A
+// waits until pg_stat_activity shows that backend blocked on a lock before
+// preparing, so the test cannot pass vacuously by A finishing first.
 func TestPrepareDoesNotDeadlockAgainstConcurrentInsert(t *testing.T) {
-	for name, prepare := range map[string]func(g sendingpolicy.Gate, tx pgx.Tx, messageID string) error{
-		"external": func(g sendingpolicy.Gate, tx pgx.Tx, messageID string) error {
+	cases := []struct {
+		name    string
+		status  string
+		prepare func(g sendingpolicy.Gate, tx pgx.Tx, messageID string) error
+	}{
+		{"external", "sent", func(g sendingpolicy.Gate, tx pgx.Tx, messageID string) error {
 			_, _, err := g.PrepareExternalTx(context.Background(), tx, messageID)
 			return err
-		},
-		"hitl notification": func(g sendingpolicy.Gate, tx pgx.Tx, messageID string) error {
+		}},
+		{"hitl notification", "pending_review", func(g sendingpolicy.Gate, tx pgx.Tx, messageID string) error {
 			_, err := g.PrepareNotificationTx(context.Background(), tx, sendingpolicy.NewHITLNotificationRef(messageID))
 			return err
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			g := f.gate(sendingpolicy.DisabledPolicy())
 			user := f.user("standard")
 			agent := f.agent(user)
-			status := "sent"
-			if name == "hitl notification" {
-				status = "pending_review"
-			}
 			insert := func(tx pgx.Tx, id string) error {
 				_, err := tx.Exec(f.ctx,
 					`INSERT INTO messages (id, agent_id, direction, to_recipients, sent_as, status, body_text)
 					 VALUES ($1, $2, 'outbound', ARRAY['rcpt@example.test'], 'relay', $3, 'x')`,
-					id, agent, status)
+					id, agent, tc.status)
 				return err
 			}
 
@@ -1270,6 +1275,7 @@ func TestPrepareDoesNotDeadlockAgainstConcurrentInsert(t *testing.T) {
 
 			// B inserts concurrently: it takes its key share on the agent, then
 			// its storage-trigger upsert blocks on A's account_usage row.
+			bPID := make(chan int, 1)
 			bDone := make(chan error, 1)
 			go func() {
 				txB, err := f.pool.Begin(f.ctx)
@@ -1278,19 +1284,49 @@ func TestPrepareDoesNotDeadlockAgainstConcurrentInsert(t *testing.T) {
 					return
 				}
 				defer func() { _ = txB.Rollback(f.ctx) }()
+				var pid int
+				if err := txB.QueryRow(f.ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+					bDone <- err
+					return
+				}
+				bPID <- pid
 				if err := insert(txB, "msg_lock_b"); err != nil {
 					bDone <- fmt.Errorf("insert B: %w", err)
 					return
 				}
-				if err := prepare(g, txB, "msg_lock_b"); err != nil {
+				if err := tc.prepare(g, txB, "msg_lock_b"); err != nil {
 					bDone <- fmt.Errorf("prepare B: %w", err)
 					return
 				}
 				bDone <- txB.Commit(f.ctx)
 			}()
-			time.Sleep(300 * time.Millisecond) // let B reach its blocked insert
 
-			if err := prepare(g, txA, "msg_lock_a"); err != nil {
+			var pid int
+			select {
+			case pid = <-bPID:
+			case err := <-bDone:
+				t.Fatalf("B ended before starting: %v", err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("B never reported its backend")
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				var blocked bool
+				if err := f.pool.QueryRow(f.ctx,
+					`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')`, pid,
+				).Scan(&blocked); err != nil {
+					t.Fatal(err)
+				}
+				if blocked {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("B never blocked on A's insert; the interleaving this test needs did not happen")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			if err := tc.prepare(g, txA, "msg_lock_a"); err != nil {
 				t.Fatalf("prepare A must not deadlock against B's in-flight insert: %v", err)
 			}
 			if err := txA.Commit(f.ctx); err != nil {

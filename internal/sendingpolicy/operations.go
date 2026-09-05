@@ -169,9 +169,12 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 		return "", OperationRef{}, ErrSourceUnavailable
 	}
 
-	// Agent before message, matching migration 113 and the irreversible
-	// deletion path: deletion locks an agent and then its messages, so taking
-	// them in the other order here would deadlock against a concurrent purge.
+	// Within this function: agent before message, matching migration 113 and
+	// the irreversible deletion path (which locks an agent and then its
+	// messages). The enclosing accept transaction may already hold a message
+	// row — an approval updates the held message first, a reply locks its
+	// parent — so the order is a property of this function, not a guarantee
+	// about every caller.
 	//
 	// FOR NO KEY UPDATE, not FOR UPDATE. This runs inside the accept
 	// transaction AFTER the message insert, and every concurrent insert of a
