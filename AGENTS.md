@@ -408,6 +408,19 @@ manually on every API change even though the template won't remind you.
   bundled drive-by cleanup. CI must be green.
 - **Coverage floors** only move up (see Testing strategy).
 - **Postgres**: local dev runs on port **5433** (not 5432) via docker compose.
+- **Row locks in multi-statement transactions**: an `INSERT` holds
+  `FOR KEY SHARE` on every row it references by foreign key until commit, and
+  `FOR UPDATE` conflicts with that. So a `SELECT … FOR UPDATE` on a parent row
+  taken *after* inserting a child in the same transaction deadlocks against a
+  concurrent insert for the same parent (v1.9.0: the accept transaction
+  inserted the message, then the gate locked the agent `FOR UPDATE`; two
+  parallel sends → SQLSTATE 40P01). Lock the parent `FOR NO KEY UPDATE`
+  (excludes updates, deletes and other lockers, coexists with key shares), or
+  lock it before the insert. The accept transaction's full lock order is in
+  `docs/design/async-message-pipeline.md`; any new lock on that path must be
+  checked against it, and any parallel-write path needs a concurrency test
+  (see `TestPrepareDoesNotDeadlockAgainstConcurrentInsert` for the
+  deterministic two-transaction shape).
 - The Mailpit service in `docker-compose.yaml` is local-dev only — production
   deployments must drop it and point `E2A_OUTBOUND_SMTP_*` at a real relay.
 
