@@ -8,6 +8,10 @@
  *     secondary account, seeded with tiny plan caps. Scenarios that assert
  *     quota enforcement run as that account and skip without it (a deployed
  *     staging target has no capped account to offer).
+ *   E2A_TEST_OVERCAP_API_KEY: optional; key for the contract server's third
+ *     account, seeded already over its plan caps. The scenario proving the
+ *     402 envelope's `current` field runs as that account and skips without
+ *     it (a deployed staging target has no over-cap account to offer).
  *
  * The runner drives the server over raw HTTP (a thin scenario interpreter,
  * not the ergonomic client) plus {@link WSListener} for WebSocket steps.
@@ -38,22 +42,34 @@ const SEED = seedEnabled();
 // runner is pointed at a deployed server, which has no such account.
 const CAPPED_API_KEY = process.env.E2A_TEST_CAPPED_API_KEY;
 
+// The contract server's over-cap-account key (see the header). Absent when
+// the runner is pointed at a deployed server, which has no such account.
+const OVERCAP_API_KEY = process.env.E2A_TEST_OVERCAP_API_KEY;
+
 /**
- * True when the scenario authenticates as the capped account anywhere.
+ * True when the scenario authenticates as `placeholder`'s account anywhere.
  *
  * Inspects auth_override VALUES specifically. Stringifying the whole scenario
- * looks equivalent and is not: the scenario's own description mentions
- * {capped_api_key} in prose, so a blob match stays true even if every
+ * looks equivalent and is not: the scenario's own description mentions the
+ * placeholder in prose, so a blob match stays true even if every
  * auth_override is switched back to the primary account — exactly the
  * regression this is meant to detect.
  */
-function scenarioNeedsCappedAccount(sc: Scenario): boolean {
+function scenarioUsesPlaceholder(sc: Scenario, placeholder: string): boolean {
   const overrides = [
     sc.auth_override,
     ...(sc.steps ?? []).map((s) => s.auth_override),
     ...(sc.cleanup ?? []).map((s) => s.auth_override),
   ];
-  return overrides.some((o) => typeof o === "string" && o.includes("{capped_api_key}"));
+  return overrides.some((o) => typeof o === "string" && o.includes(placeholder));
+}
+
+function scenarioNeedsCappedAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{capped_api_key}");
+}
+
+function scenarioNeedsOverCapAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{overcap_api_key}");
 }
 
 it("parses the generated message lifecycle page contract", () => {
@@ -831,6 +847,7 @@ class Runner {
     // Only bind when present: scenarios needing it are skipped otherwise, so a
     // silently-empty bearer token can never reach the wire as a confusing 401.
     if (CAPPED_API_KEY) this.vars.capped_api_key = CAPPED_API_KEY;
+    if (OVERCAP_API_KEY) this.vars.overcap_api_key = OVERCAP_API_KEY;
     this.api = new RawApi(apiKey, baseUrl);
     this.seeder = SEED ? new Seeder(baseUrl, apiKey) : null;
   }
@@ -1249,15 +1266,16 @@ describe.skipIf(!baseUrl || !apiKey)("Contract scenarios", () => {
   for (const sc of scenarios) {
     // Store-dependent scenarios run when SEED supplies their preconditions over
     // the API; otherwise they skip. Account-global scenarios skip regardless.
-    // Quota scenarios need the capped account; without its key there is no way
-    // to reach a cap on a live server, so they skip. The Go runner owns the
-    // contract server in-process and always has it, and the always-on shape
-    // test below fails if the scenario is ever deleted or defanged — so a skip
-    // here can never quietly become zero coverage.
+    // Quota scenarios need the capped or over-cap account; without its key
+    // there is no way to reach a cap on a live server, so they skip. The Go
+    // runner owns the contract server in-process and always has it, and the
+    // always-on shape test below fails if the scenario is ever deleted or
+    // defanged, so a skip here can never quietly become zero coverage.
     const skip =
       ACCOUNT_GLOBAL.has(sc.name) ||
       (scenarioNeedsStore(sc) && !SEED) ||
-      (scenarioNeedsCappedAccount(sc) && !CAPPED_API_KEY);
+      (scenarioNeedsCappedAccount(sc) && !CAPPED_API_KEY) ||
+      (scenarioNeedsOverCapAccount(sc) && !OVERCAP_API_KEY);
 
     (skip ? it.skip : it)(
       sc.name,
