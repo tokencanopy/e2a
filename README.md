@@ -7,59 +7,42 @@
 
 ### The open-source email API for applications and AI agents.
 
-### Send transactional email from any product, give agents real two-way inboxes, and keep people in control.
+Send transactional email and give agents real two-way inboxes, with people in control.
 
-Use e2a as a hosted service or run the Apache-2.0 stack yourself. Built for developers, agent-native teams, and businesses adding email to products and workflows.
+<a href="https://e2a.dev"><img src="assets/hosted-cta.svg" width="320" height="56" alt="Try hosted e2a — start free"></a>
 
-Receive inbound over **webhook · WebSocket · REST · MCP**. Send through an **HTTP API**. Inbound mail includes structured **SPF · DKIM · DMARC** evidence.
+**[Try hosted e2a — start free →](https://e2a.dev)**
 
-<sub>A [Token Canopy](https://tokencanopy.com) product</sub>
+We run the email infrastructure. You connect your app or agent.
 
-[![Tests](https://github.com/tokencanopy/e2a/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/test.yml)
-[![Build image](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml)
-[![License](https://img.shields.io/github/license/tokencanopy/e2a)](LICENSE)
-[![npm @e2a/sdk](https://img.shields.io/npm/v/%40e2a%2Fsdk?label=%40e2a%2Fsdk)](https://www.npmjs.com/package/@e2a/sdk)
-[![PyPI e2a](https://img.shields.io/pypi/v/e2a)](https://pypi.org/project/e2a/)
-[![MCP Toplist](https://img.shields.io/badge/MCP%20Toplist-Top%201%25-4F46FF)](https://mcptoplist.com/server/dev.e2a%2Fmcp-server)
-[![Release](https://img.shields.io/github/v/release/tokencanopy/e2a?label=release&color=2ea44f)](https://github.com/tokencanopy/e2a/releases/latest)
+[Self-host with Docker](#self-host-docker) · [Documentation](#api) · [Agent quickstart](#quickstart) · [Examples](#working-examples)
 
-**`/v1` is now generally available** — shipped in [**v1.5.0**](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0).
-
-[Hosted (e2a.dev)](https://e2a.dev) · [Transactional email API](https://e2a.dev/transactional-email-api) · [Agent quickstart](#quickstart) · [Examples](#working-examples) · [Concepts](#concepts) · [API](#api) · [SDKs](#sdks) · [MCP](#mcp-server) · [Deploy](#deployment) · [FAQ](#faq)
-
-<a href="https://www.producthunt.com/products/e2a-open-source-email-api-for-agents?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-e2a-open-source-email-api-for-agents" target="_blank" rel="noopener noreferrer"><img alt="e2a, the open-source email API for AI agents | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"></a>
+<sub>A [Token Canopy](https://tokencanopy.com) product · Apache 2.0</sub>
 
 </div>
 
----
+**Using a coding agent? Paste this prompt into its chat:**
 
-> [!IMPORTANT]
-> **The core `/v1` API and SDKs are stable and generally available (GA) as of [v1.5.0](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0): no breaking changes within `/v1`.** That tag is the compatibility baseline — every later release is audited against it. A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, delivery metrics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; where only specific *values* of a stable field are beta (the `scheduled` send status, the screening/review-hold event types, the `blocked_by_policy` error code), the field carries `x-experimental-values` naming exactly those values. Everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
+```text
+Connect this coding agent to hosted e2a MCP at https://api.e2a.dev/mcp and help me sign in via browser OAuth.
+```
 
-e2a is the **open-source email API for applications and AI agents**. Any product can send transactional email over HTTP, TypeScript, or Python; agent-native systems can also use real two-way inboxes. Inbound mail arrives with structured SPF, DKIM, and DMARC evidence, and outbound mail can use an optional human-in-the-loop approval gate. Use the hosted service or run the Apache-2.0 stack yourself. No AI agent or agent framework is required for application-triggered sending.
+Supports coding agents with remote MCP and browser OAuth. [Client setup guide](https://e2a.dev/setup.md).
 
-**Four ways to plug an agent in:**
+<a id="use-it"></a>
 
-- **MCP** — point any MCP-aware runtime at the hosted server (`https://api.e2a.dev/mcp`) and your agent gets an inbox toolset (`list_messages`, `send_message`, `reply_to_message`, …). The fastest path for agent frameworks. → [MCP server](#mcp-server)
-- **SDKs** — TypeScript (`@e2a/sdk`) and Python (`e2a`) clients with one-call webhook verification and a WebSocket `listen()` stream. → [SDKs](#sdks)
-- **Raw delivery** — subscribe a **webhook**, open a **WebSocket**, or **poll** the REST API directly. → [Delivery channels](#delivery-channels)
-- **CLI** — `e2a listen` bridges inbound mail to a local HTTP handler (including an OpenAI Responses auto-reply mode). → [CLI](#cli)
+## Choose how to start
 
-What you get on top of bare SMTP:
+- **Hosted — recommended for getting started.** Sign up at [e2a.dev](https://e2a.dev). Includes the shared `agents.e2a.dev` domain for instant slug-based onboarding (no DNS setup), a dashboard, the hosted MCP server, and managed deliverability.
+- **Self-host — run your own infrastructure.** See [Self-host (Docker)](#self-host-docker) and [Deployment](#deployment). Nearly every feature works the same (content screening is currently self-host-only — see the [note below](#content-screening)); the shared-domain slug shortcut just needs you to point a mail domain at your relay and set `shared_domain` in `config.yaml`.
 
-- **Authenticated inbound identity** — normalized SPF, DKIM, and DMARC evidence, with an explicit aligned DMARC verdict
-- **No public URL required** — WebSocket, REST polling, and MCP all work from a laptop or behind a firewall
-- **Outbound API** — agents send to other agents (SMTP relay) or humans (upstream SMTP, e.g. SES, Resend)
-- **Human in the loop** — opt-in approval gate that holds outbound mail until a reviewer approves via dashboard, magic-link email, the MCP tools, or the API
-- **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening). *Available on self-hosted deployments; not yet enabled on the hosted service.*
-- **Email reply topology** — standards-compliant reply headers plus optional beta `thread_id` metadata on message reads; caller-owned `conversation_id` remains application correlation
-- **Email templates (beta)** — reusable `{{variable}}` templates rendered server-side at send time, plus a pre-built starter catalog → [docs/templates.md](docs/templates.md)
-- **Contacts & outreach (beta)** — account-level contact identity (CRUD + bulk import with safe reversal) and per-agent outreach state with server-derived reply/delivery facts, plus the `contact.due` due-queue notification event → [docs/api.md](docs/api.md#contacts--outreach-v1contacts-v1agentsemailcontacts-beta)
-- **Scheduled sending (beta)** — `send_at` on send/reply/forward defers submission up to 90 days ahead; a scheduled send is durable acceptance (`status=scheduled`) and can be canceled by trashing the message before submission
+For application email, start with the [transactional email guide](https://e2a.dev/transactional-email-api). For coding agents, use the prompt above or the setup instructions below.
 
 ## Quickstart
 
-The fastest path is to give your AI agent an inbox directly. Install the e2a plugin — it registers the hosted [MCP server](#mcp-server) and an operate-well skill, so your agent can send, receive, reply in-thread, and hold mail for review out of the box. On first tool use it runs an OAuth flow in your browser — no API key to paste.
+### Connect your agent to hosted e2a
+
+Give your AI agent an inbox directly. Install the e2a plugin — it registers the hosted [MCP server](#mcp-server) and an operate-well skill, so your agent can send, receive, reply in-thread, and hold mail for review out of the box. On first tool use it runs an OAuth flow in your browser — no API key to paste.
 
 **Claude Code**
 
@@ -88,12 +71,42 @@ Then launch `codex`, run `/plugins`, and install **e2a**.
 
 **Other MCP clients** (Zed, Goose, Windsurf, Claude Desktop, raw `mcp.json`) — point straight at `https://api.e2a.dev/mcp`; ready-to-paste configs are in [plugins/e2a/clients/](plugins/e2a/clients). See [plugins/e2a/README.md](plugins/e2a/README.md) for the full per-client guide.
 
-## Use it
+<div align="center">
 
-You can either use the hosted instance or self-host.
+[![Tests](https://github.com/tokencanopy/e2a/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/test.yml)
+[![Build image](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml/badge.svg?branch=main)](https://github.com/tokencanopy/e2a/actions/workflows/build-image.yml)
+[![License](https://img.shields.io/github/license/tokencanopy/e2a)](LICENSE)
+[![npm @e2a/sdk](https://img.shields.io/npm/v/%40e2a%2Fsdk?label=%40e2a%2Fsdk)](https://www.npmjs.com/package/@e2a/sdk)
+[![PyPI e2a](https://img.shields.io/pypi/v/e2a)](https://pypi.org/project/e2a/)
+[![MCP Toplist](https://img.shields.io/badge/MCP%20Toplist-Top%201%25-4F46FF)](https://mcptoplist.com/server/dev.e2a%2Fmcp-server)
+[![Release](https://img.shields.io/github/v/release/tokencanopy/e2a?label=release&color=2ea44f)](https://github.com/tokencanopy/e2a/releases/latest)
 
-- **Hosted** — sign up at [e2a.dev](https://e2a.dev). Includes the shared `agents.e2a.dev` domain for instant slug-based onboarding (no DNS setup), a dashboard, the hosted MCP server, and managed deliverability.
-- **Self-host** — see [Self-host (Docker)](#self-host-docker) and [Deployment](#deployment). Nearly every feature works the same (content screening is currently self-host-only — see the [note below](#content-screening)); the shared-domain slug shortcut just needs you to point a mail domain at your relay and set `shared_domain` in `config.yaml`.
+<a href="https://www.producthunt.com/products/e2a-open-source-email-api-for-agents?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-e2a-open-source-email-api-for-agents" target="_blank" rel="noopener noreferrer"><img alt="e2a, the open-source email API for AI agents | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1145559&theme=light&t=1778615217650"></a>
+
+</div>
+
+## What e2a provides
+
+e2a is the **open-source email API for applications and AI agents**. Any product can send transactional email over HTTP, TypeScript, or Python; agent-native systems can also use real two-way inboxes. Inbound mail arrives with structured SPF, DKIM, and DMARC evidence, and outbound mail can use an optional human-in-the-loop approval gate. Use the hosted service or run the Apache-2.0 stack yourself. No AI agent or agent framework is required for application-triggered sending.
+
+**Four ways to plug an agent in:**
+
+- **MCP** — point any MCP-aware runtime at the hosted server (`https://api.e2a.dev/mcp`) and your agent gets an inbox toolset (`list_messages`, `send_message`, `reply_to_message`, …). The fastest path for agent frameworks. → [MCP server](#mcp-server)
+- **SDKs** — TypeScript (`@e2a/sdk`) and Python (`e2a`) clients with one-call webhook verification and a WebSocket `listen()` stream. → [SDKs](#sdks)
+- **Raw delivery** — subscribe a **webhook**, open a **WebSocket**, or **poll** the REST API directly. → [Delivery channels](#delivery-channels)
+- **CLI** — `e2a listen` bridges inbound mail to a local HTTP handler (including an OpenAI Responses auto-reply mode). → [CLI](#cli)
+
+What you get on top of bare SMTP:
+
+- **Authenticated inbound identity** — normalized SPF, DKIM, and DMARC evidence, with an explicit aligned DMARC verdict
+- **No public URL required** — WebSocket, REST polling, and MCP all work from a laptop or behind a firewall
+- **Outbound API** — agents send to other agents (SMTP relay) or humans (upstream SMTP, e.g. SES, Resend)
+- **Human in the loop** — opt-in approval gate that holds outbound mail until a reviewer approves via dashboard, magic-link email, the MCP tools, or the API
+- **Inbound threat screening** — opt-in content scan flags **prompt-injection** payloads (hidden HTML, Unicode-tag smuggling, encoded text) — and, with the LLM detector, **phishing** — then routes each message to *allow · review · block*, feeding the same review queue as HITL → [Content screening](#content-screening). *Available on self-hosted deployments; not yet enabled on the hosted service.*
+- **Email reply topology** — standards-compliant reply headers plus optional beta `thread_id` metadata on message reads; caller-owned `conversation_id` remains application correlation
+- **Email templates (beta)** — reusable `{{variable}}` templates rendered server-side at send time, plus a pre-built starter catalog → [docs/templates.md](docs/templates.md)
+- **Contacts & outreach (beta)** — account-level contact identity (CRUD + bulk import with safe reversal) and per-agent outreach state with server-derived reply/delivery facts, plus the `contact.due` due-queue notification event → [docs/api.md](docs/api.md#contacts--outreach-v1contacts-v1agentsemailcontacts-beta)
+- **Scheduled sending (beta)** — `send_at` on send/reply/forward defers submission up to 90 days ahead; a scheduled send is durable acceptance (`status=scheduled`) and can be canceled by trashing the message before submission
 
 ## What you can build
 
@@ -278,6 +291,9 @@ Reviewers can approve or reject via:
 Enable review holds on an agent via `PUT /v1/agents/{email}/protection`: set the outbound gate action to `review` (or turn on the content scan), plus the hold TTL (`holds.ttl_seconds`) and its expiry behavior (`holds.on_expiry` = `approve` or `reject`). Posture lives entirely on the protection sub-resource.
 
 ## API
+
+> [!IMPORTANT]
+> **The core `/v1` API and SDKs are stable and generally available (GA) as of [v1.5.0](https://github.com/tokencanopy/e2a/releases/tag/v1.5.0): no breaking changes within `/v1`.** That tag is the compatibility baseline — every later release is audited against it. A small, explicitly enumerated surface is still **beta** and may change before it is declared stable — contacts & outreach, scheduled sending (`send_at`), email templates & starter templates, the reviews (HITL) queue, agent protection config, agent-scoped suppressions, managed unsubscribe, message lifecycle diagnostics, delivery metrics, and the `thread_id` message-read field. Beta surface is marked `x-stability-level: beta` in the OpenAPI spec and `(beta)` in the docs; where only specific *values* of a stable field are beta (the `scheduled` send status, the screening/review-hold event types, the `blocked_by_policy` error code), the field carries `x-experimental-values` naming exactly those values. Everything else is covered by the GA freeze. See the full matrix in [docs/api.md → Stability: GA and beta surface](docs/api.md#stability-ga-and-beta-surface). Existing `v1.0.x` application/cherry-pick tags predate the API freeze and are not `/v1` compatibility baselines.
 
 All endpoints are under `/v1` unless noted. Auth is `Authorization: Bearer <api_key>` except for `/api/health`, `/v1/info`, `/api/feedback`, and the HITL magic-link routes. Path parameters containing `@` (agent emails) must be URL-encoded.
 
