@@ -99,8 +99,8 @@ func TestDBURL() string {
 const maxPostgresIdentifier = 63
 
 // derivedDBSuffix derives the database-name suffix beneath the configured base:
-// a per-WORKSPACE component plus a per-PACKAGE component, or "" when the process
-// is not a test binary or sharing is forced.
+// a per-WORKSPACE component plus a per-PACKAGE component, or "" when sharing
+// is forced.
 //
 // Two dimensions, because per-package alone was not enough. It stops packages in
 // ONE run from truncating each other, but every checkout computed the same names,
@@ -110,6 +110,13 @@ const maxPostgresIdentifier = 63
 // callers who do not know about each other. Deriving from the module root path
 // makes the isolation structural: two checkouts cannot collide even when nobody
 // configures anything.
+//
+// Derived for every binary, not only `go test` ones: a plain binary built from
+// this module (cmd/e2a-contract-server is the one that calls into the test
+// harness) previously fell through to the base URL verbatim, so two contract
+// server processes on one machine shared and truncated each other's database.
+// os.Args[0] for a non-test binary is just its own name (no ".test" suffix),
+// which still yields a distinct, stable per-binary component.
 //
 // Name length: <base>_ws<8>_pkg_<package> runs ~40 chars for this repo's longest
 // package names, well inside Postgres's 63-byte identifier limit. A much longer
@@ -121,9 +128,6 @@ func derivedDBSuffix() string {
 		return ""
 	}
 	bin := filepath.Base(os.Args[0])
-	if !strings.HasSuffix(bin, ".test") {
-		return ""
-	}
 	name := strings.ToLower(strings.TrimSuffix(bin, ".test"))
 	sanitized := make([]rune, 0, len(name))
 	for _, r := range name {
