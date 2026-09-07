@@ -50,6 +50,7 @@
   "list_outreach_contacts",
   "list_pending_messages",
   "list_reviews",
+  "list_scheduled_messages",
   "list_starter_templates",
   "list_suppressions",
   "list_templates",

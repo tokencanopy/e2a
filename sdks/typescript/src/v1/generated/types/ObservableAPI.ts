@@ -98,6 +98,7 @@ import { PageEventView } from '../models/PageEventView.js';
 import { PageMessageLifecycleTransition } from '../models/PageMessageLifecycleTransition.js';
 import { PageMessageSummaryView } from '../models/PageMessageSummaryView.js';
 import { PageReviewView } from '../models/PageReviewView.js';
+import { PageScheduledMessageView } from '../models/PageScheduledMessageView.js';
 import { PageStarterTemplateView } from '../models/PageStarterTemplateView.js';
 import { PageSuppressionView } from '../models/PageSuppressionView.js';
 import { PageTemplateSummaryView } from '../models/PageTemplateSummaryView.js';
@@ -131,6 +132,7 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { ScheduledMessageView } from '../models/ScheduledMessageView.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
@@ -2489,6 +2491,60 @@ export class ObservableReviewsApi {
      */
     public rejectReview(id: string, rejectRequest: RejectRequest, _options?: ConfigurationOptions): Observable<RejectResultView> {
         return this.rejectReviewWithHttpInfo(id, rejectRequest, _options).pipe(map((apiResponse: HttpInfo<RejectResultView>) => apiResponse.data));
+    }
+
+}
+
+import { ScheduledApiRequestFactory, ScheduledApiResponseProcessor} from "../apis/ScheduledApi.js";
+export class ObservableScheduledApi {
+    private requestFactory: ScheduledApiRequestFactory;
+    private responseProcessor: ScheduledApiResponseProcessor;
+    private configuration: Configuration;
+
+    public constructor(
+        configuration: Configuration,
+        requestFactory?: ScheduledApiRequestFactory,
+        responseProcessor?: ScheduledApiResponseProcessor
+    ) {
+        this.configuration = configuration;
+        this.requestFactory = requestFactory || new ScheduledApiRequestFactory(configuration);
+        this.responseProcessor = responseProcessor || new ScheduledApiResponseProcessor();
+    }
+
+    /**
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * List messages awaiting a scheduled send (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listScheduledMessagesWithHttpInfo(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<HttpInfo<PageScheduledMessageView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.listScheduledMessages(cursor, limit, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.listScheduledMessagesWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * The scheduled-send queue: every outbound message accepted and awaiting its scheduled send, across the account\'s inboxes, soonest-first. Includes overdue-but-pending sends — a scheduled_at in the past means the send is still queued but its fire time has passed (e.g. deferred by the daily send cap), shown here rather than hidden until it fires. Account-scoped credentials only. Disjoint from GET /v1/reviews — held drafts are not yet accepted and appear there instead. Beta: scheduled sending is unstable — its shape may change before it is declared stable.
+     * List messages awaiting a scheduled send (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listScheduledMessages(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<PageScheduledMessageView> {
+        return this.listScheduledMessagesWithHttpInfo(cursor, limit, _options).pipe(map((apiResponse: HttpInfo<PageScheduledMessageView>) => apiResponse.data));
     }
 
 }

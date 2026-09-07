@@ -111,6 +111,7 @@ func cursorBindingServer(t *testing.T) *httptest.Server {
 	templates := cursorRows("tpl", "", 3)
 	apiKeys := cursorRows("apk", "", 3)
 	reviews := cursorRows("rvw", "", 3)
+	scheduled := cursorRows("sch", "", 3)
 	events := cursorRows("evt", "", 3)
 	supps := cursorRows("sup", "@x.com", 3)
 	contacts := cursorRows("cnt", "", 3)
@@ -167,6 +168,19 @@ func cursorBindingServer(t *testing.T) *httptest.Server {
 					ID: r.id, AgentID: "support@acme.dev", Direction: "inbound",
 					Sender: "s@x.com", To: []string{"support@acme.dev"},
 					Subject: "held", Status: "pending_review", CreatedAt: r.at,
+				})
+			}
+			return out, nil
+		},
+		ListScheduled: func(_ context.Context, _ string, limit int, at time.Time, id string) ([]identity.ScheduledListItem, error) {
+			out := []identity.ScheduledListItem{}
+			for _, r := range page(scheduled, limit, at, id) {
+				sa := r.at
+				out = append(out, identity.ScheduledListItem{
+					ID: r.id, AgentID: "support@acme.dev", Direction: "outbound",
+					Sender: "support@acme.dev", To: []string{"cust@x.com"},
+					Subject: "scheduled", DeliveryStatus: "accepted",
+					CreatedAt: r.at, ScheduledAt: &sa,
 				})
 			}
 			return out, nil
@@ -286,6 +300,7 @@ var cursorBoundEndpoints = []struct {
 	{"templates", "/v1/templates?limit=1", "/v1/templates?limit=1"},
 	{"api_keys", "/v1/account/api-keys?limit=1", "/v1/account/api-keys?limit=1"},
 	{"reviews", "/v1/reviews?limit=1", "/v1/reviews?limit=1"},
+	{"scheduled", "/v1/scheduled-messages?limit=1", "/v1/scheduled-messages?limit=1"},
 	{"events", "/v1/events?limit=1", "/v1/events?limit=1"},
 	{"account_suppressions", "/v1/account/suppressions?limit=1", "/v1/account/suppressions?limit=1"},
 	{"contacts", "/v1/contacts?limit=1", "/v1/contacts?limit=1"},
