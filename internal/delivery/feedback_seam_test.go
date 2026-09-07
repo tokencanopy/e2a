@@ -204,8 +204,18 @@ func TestPurgedMessageRepairsThroughTheSeam(t *testing.T) {
 	if len(p.repairs) != 1 || len(p.repairs[0]) != 1 || p.repairs[0][0].Address != "bob@example.test" {
 		t.Fatalf("repairs = %v, want the one address", p.repairs)
 	}
-	if len(*events) != 0 {
-		t.Fatalf("a repair with no message must announce nothing, got %v", *events)
+	// It announces: a row appearing in the customer's suppression list with
+	// no event is the state/notification desync the message-backed path
+	// exists to avoid. The payload carries no message id, which the event
+	// schema documents as present only when still known.
+	if len(*events) != 1 || (*events)[0].eventType != EventSuppressionAdded {
+		t.Fatalf("a repaired suppression must be announced, got %v", *events)
+	}
+	if (*events)[0].messageID != "" {
+		t.Fatalf("a repair has no message to reference, got %q", (*events)[0].messageID)
+	}
+	if (*events)[0].userID != "usr_1" {
+		t.Fatalf("event user = %q, want the account the seam resolved", (*events)[0].userID)
 	}
 }
 

@@ -232,17 +232,47 @@ func ParseSESNotification(messageBody []byte) (*Event, error) {
 	return ev, nil
 }
 
-func norm(addr string) string { return strings.ToLower(strings.TrimSpace(addr)) }
-
-// normMailbox extracts the addr-spec before normalizing, so "Bob
-// <b@x.test>" and "<b@x.test>" both reduce to the bare address the
-// authorization signed. Falls back to plain normalization when the value
-// does not parse.
-func normMailbox(addr string) string {
-	if parsed, err := mail.ParseAddress(strings.TrimSpace(addr)); err == nil {
-		return norm(parsed.Address)
+// norm reduces a provider-reported address to the bare, lower-cased
+// addr-spec the rest of the system stores and signs.
+//
+// It is deliberately the ONE normalizer for provider feedback: the detector
+// matches a recipient against the HMAC of the address authorization signed,
+// while the live path writes the same address into the customer's
+// suppression list. If the two disagreed, a decorated value would credit
+// the detector under the real address while suppressing a literal
+// "Bob <bob@x.test>" the customer can never send to and never clear.
+//
+// SES reports a bounced recipient from the DSN's Final-Recipient field,
+// which per RFC 3464 may carry an address-type prefix ("rfc822; bob@x.test")
+// and, in the wild, angle brackets or a display name.
+func norm(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if semi := strings.IndexByte(addr, ';'); semi >= 0 {
+		if prefix := strings.TrimSpace(addr[:semi]); isAddressType(prefix) {
+			addr = strings.TrimSpace(addr[semi+1:])
+		}
 	}
-	return norm(strings.Trim(strings.TrimSpace(addr), "<>"))
+	if parsed, err := mail.ParseAddress(addr); err == nil {
+		return strings.ToLower(strings.TrimSpace(parsed.Address))
+	}
+	return strings.ToLower(strings.Trim(addr, "<>"))
+}
+
+// isAddressType reports whether s is a DSN address-type token (letters,
+// digits and dashes) rather than part of an address. Only such a prefix is
+// stripped, so a local part containing a semicolon is left alone.
+func isAddressType(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // maxE2AMessageIDLen bounds a plausible e2a message id ("msg_" + 32 hex chars
@@ -295,22 +325,15 @@ func (ev *Event) FeedbackFor() ProviderFeedback {
 	seen := map[string]bool{}
 	var recipients []string
 	for _, r := range ev.Recipients {
-		// Addr-spec extraction, not just lower+trim: SES reports a bounced
-		// recipient from the DSN's Final-Recipient, which can arrive with
-		// angle brackets or a display name. The authorized envelope was
-		// signed as a bare address, so a decorated value would silently
-		// fail the HMAC match and lose both the accounting and the
-		// suppression repair.
-		a := normMailbox(r.Address)
+		a := norm(r.Address)
 		if a == "" || seen[a] {
 			continue
 		}
 		seen[a] = true
 		recipients = append(recipients, a)
 	}
-	// Deterministic order: the processor upserts per recipient, and two
-	// concurrent notifications touching the same rows in provider order
-	// could otherwise deadlock.
+	// Deterministic order, so a failure is reproducible and two runs over
+	// the same event report repairs in the same sequence.
 	sort.Strings(recipients)
 	return ProviderFeedback{
 		ProviderEventID:      ev.ProviderEventID,

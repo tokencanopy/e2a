@@ -276,7 +276,7 @@ func (m *Module) ProcessProviderFeedback(ctx context.Context, fb delivery.Provid
 			})
 		}
 	}
-	if unmatched > 0 {
+	if unmatched > 0 && firstTime {
 		// A systematic mismatch (a normalization divergence, a rotated key)
 		// would otherwise be invisible: the detector would simply see
 		// nothing and read as healthy.
@@ -306,12 +306,18 @@ func (m *Module) RepairSuppressions(ctx context.Context, accountRef string, repa
 
 	// The account must still exist: a suppression is customer state, and
 	// the row carries a foreign key to the user.
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, accountRef).Scan(&exists); err != nil {
-		return fmt.Errorf("sendingpolicy: check account for repair: %w", err)
-	}
-	if !exists {
+	// FOR KEY SHARE, not a bare EXISTS: the suppression rows carry a foreign
+	// key to this user, so a deletion committing between the check and the
+	// upsert would turn a no-op into a constraint violation. The key share
+	// blocks that delete for the length of this transaction and is exactly
+	// what the insert would take anyway.
+	var live string
+	err = tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR KEY SHARE`, accountRef).Scan(&live)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sendingpolicy: check account for repair: %w", err)
 	}
 	for _, r := range repairs {
 		if _, err := suppressionsync.UpsertTx(ctx, tx, "supp_"+randomSuffix(), accountRef,
@@ -503,9 +509,11 @@ func (m *Module) VerifyKeyringCoverage(ctx context.Context) error {
 		return nil
 	}
 	held := m.secrets.Keyring.Versions()
-	// Bounded by construction: ask only whether a retained row exists under
-	// a version outside the keyring, and stop at the first one. The scan
-	// cannot be made to walk the whole table.
+	// One question, first answer wins. A violation stops at the first row;
+	// proving the healthy case is inherently a full pass over the retained
+	// rows, which no index can serve for a "not in this set" predicate.
+	// That cost is boot-only, and the alternative — starting blind — is
+	// the failure this gate exists to prevent.
 	var missing *int
 	err := m.pool.QueryRow(ctx, `
 		SELECT r.hmac_key_version
@@ -521,15 +529,6 @@ func (m *Module) VerifyKeyringCoverage(ctx context.Context) error {
 		return fmt.Errorf("sendingpolicy: read retained key versions: %w", err)
 	}
 	return fmt.Errorf("sendingpolicy: retained feedback rows are signed under HMAC key version %d, which this keyring (versions %v) does not hold; keep the old key until those rows expire, then remove it", *missing, held)
-}
-
-func hasVersion(k *Keyring, v int) bool {
-	for _, have := range k.Versions() {
-		if have == v {
-			return true
-		}
-	}
-	return false
 }
 
 // FeedbackGCStats reports what one retention pass removed.
@@ -582,6 +581,9 @@ func (m *Module) GCFeedback(ctx context.Context, now time.Time, windowDays int) 
 // deployment actually runs (the database singleton when the source is the
 // database, the validated config otherwise).
 func (m *Module) EffectiveDetectorWindowDays(ctx context.Context) (int, error) {
+	if m.source != PolicySourceDatabase {
+		return m.configPolicy.DetectorWindowDays, nil
+	}
 	tx, err := m.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("sendingpolicy: begin policy read: %w", err)
