@@ -4,6 +4,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
@@ -97,4 +98,19 @@ func newNotificationJobs(d notificationDeps) notificationJobs {
 // itself (public feedback).
 func (s outboundSending) armAPI(api *agent.API) {
 	api.SetProviderSubmitter(s.submitter, s.gate)
+}
+
+// armDeliveryConsumer installs the deletion-resistant accounting seam on the
+// SES feedback consumer. Without it the consumer still acks and still runs
+// the message lifecycle, so the omission is silent: provider evidence for a
+// purged message is simply dropped and the detector reads as healthy.
+func (s outboundSending) armDeliveryConsumer(c *delivery.Consumer) *delivery.Consumer {
+	return c.WithFeedbackProcessor(s.module)
+}
+
+// feedbackMaintenance is the retention janitor for feedback provenance and
+// daily outcome aggregates. Unregistered, nothing enforces the
+// post-deletion horizon.
+func (s outboundSending) feedbackMaintenance() *sendingpolicy.MaintenanceJobs {
+	return sendingpolicy.NewMaintenanceJobs(s.module)
 }

@@ -27,6 +27,13 @@ type FeedbackMaintenanceWorker struct {
 	module *Module
 }
 
+// NewFeedbackMaintenanceWorker builds the retention worker over a module.
+// Exported so the janitor — the one component here that DELETES evidence —
+// can be driven directly by a test rather than only through River.
+func NewFeedbackMaintenanceWorker(module *Module) *FeedbackMaintenanceWorker {
+	return &FeedbackMaintenanceWorker{module: module}
+}
+
 func (w *FeedbackMaintenanceWorker) Work(ctx context.Context, _ *river.Job[FeedbackMaintenanceArgs]) error {
 	// The EFFECTIVE policy, not the config file: on a database-source
 	// deployment an operator who widened the detector window would

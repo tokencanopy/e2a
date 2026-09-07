@@ -163,6 +163,12 @@ func (c *Consumer) WithFeedbackProcessor(p FeedbackProcessor) *Consumer {
 	return c
 }
 
+// FeedbackProcessorWired reports whether the accounting seam is installed.
+// Without it every notification is still acked and the lifecycle half still
+// runs, so a missing processor is invisible at runtime — the detector just
+// never sees anything. The composition root's test asserts this.
+func (c *Consumer) FeedbackProcessorWired() bool { return c.feedback != nil }
+
 // NewConsumer builds the consumer. fire may be nil (no events).
 func NewConsumer(store Store, fire Firer, finalizers ...ProviderAcceptanceFinalizer) *Consumer {
 	consumer := &Consumer{store: store, fire: fire}

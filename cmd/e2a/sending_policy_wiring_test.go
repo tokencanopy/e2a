@@ -10,6 +10,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/testutil/testdb"
@@ -126,5 +127,41 @@ func TestNotificationAndPlatformMailWiring(t *testing.T) {
 	composed.armAPI(api)
 	if !api.ProviderSubmitterWired() {
 		t.Fatal("armAPI did not hand the API the submitter and gate")
+	}
+}
+
+// TestFeedbackAccountingWiring pins the two composition-root edges that are
+// invisible at runtime when they are missing. A delivery consumer without
+// the accounting seam still acks every SES notification and still runs the
+// message lifecycle, so nothing fails — the detector simply never receives
+// evidence. An unregistered retention janitor never enforces the
+// post-deletion horizon, so provenance accumulates forever. Both are one
+// line in main.go, and neither has any other test.
+func TestFeedbackAccountingWiring(t *testing.T) {
+	pool := testdb.TestDB(t)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: "relay.invalid", Port: 587, FromDomain: "test.e2a.dev"})
+	composed := newOutboundSending(outboundSendingDeps{
+		pool:    pool,
+		relay:   relay,
+		secrets: sendingpolicy.Secrets{},
+		source:  sendingpolicy.PolicySourceConfig,
+		policy:  sendingpolicy.DisabledPolicy(),
+	})
+
+	bare := delivery.NewConsumer(nil, nil)
+	if bare.FeedbackProcessorWired() {
+		t.Fatal("a bare consumer must not claim an accounting seam")
+	}
+	if armed := composed.armDeliveryConsumer(bare); !armed.FeedbackProcessorWired() {
+		t.Fatal("the composition root did not install the feedback processor on the delivery consumer")
+	}
+
+	janitor := composed.feedbackMaintenance()
+	if janitor == nil {
+		t.Fatal("no feedback retention janitor composed")
+	}
+	periodics := janitor.RegisterJobs(river.NewWorkers())
+	if len(periodics) != 1 {
+		t.Fatalf("retention periodics = %d, want 1", len(periodics))
 	}
 }
