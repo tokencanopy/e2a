@@ -79,7 +79,7 @@ The fork workflow above is the expected path for everyone else.
 
 | Tool | Version | Why |
 |---|---|---|
-| Go | 1.25 | backend |
+| Go | 1.26 | backend |
 | Node | 18+ (CI tests on 22) | CLI, TypeScript SDK, MCP server, web dashboard |
 | Python | 3.9+ | Python SDK |
 | Docker (Desktop or engine) | any recent | local Postgres + Mailpit |
