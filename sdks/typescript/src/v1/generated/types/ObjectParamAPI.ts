@@ -1628,6 +1628,7 @@ export class ObjectDomainsApi {
     }
 
     /**
+     * Registering a domain the account already owns is idempotent: it returns the existing row (still 201) and does not count against the domain cap. Registering a domain owned by a different account is a 409 domain_taken conflict.
      * Register a domain
      * @param param the request object
      */
@@ -1636,6 +1637,7 @@ export class ObjectDomainsApi {
     }
 
     /**
+     * Registering a domain the account already owns is idempotent: it returns the existing row (still 201) and does not count against the domain cap. Registering a domain owned by a different account is a 409 domain_taken conflict.
      * Register a domain
      * @param param the request object
      */

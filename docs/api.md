@@ -582,7 +582,10 @@ of `deleted: true`. Domain deletion adds the durable, open-set
 Custom sending/receiving domains and their DNS verification.
 
 - `GET /v1/domains`, `POST /v1/domains` — list / register (returns required MX +
-  TXT records and the DKIM selector/key).
+  TXT records and the DKIM selector/key). Registering a domain the account
+  already owns is idempotent: it returns the existing row (still 201) and
+  does not count against the domain cap. A different account's claim is a
+  409 `domain_taken` conflict.
 - `GET /v1/domains/{domain}`, `DELETE /v1/domains/{domain}?confirm=DELETE` —
   fetch / delete (delete deprovisions the sending identity; irreversible).
   The deletion receipt's open `sending_teardown` value is the DNS-release
