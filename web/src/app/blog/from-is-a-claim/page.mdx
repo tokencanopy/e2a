@@ -1,0 +1,53 @@
+import { getPost } from "../posts";
+import { PostSchema } from "../PostSchema";
+
+export const post = getPost("from-is-a-claim");
+
+export const metadata = {
+  title: { absolute: `${post.title} — e2a` },
+  description: post.description,
+  alternates: { canonical: `/blog/${post.slug}` },
+  openGraph: {
+    title: post.title,
+    description: post.description,
+    url: `https://e2a.dev/blog/${post.slug}`,
+    type: "article",
+    publishedTime: new Date(post.date + "T00:00:00Z").toISOString(),
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: post.title,
+    description: post.description,
+  },
+};
+
+<PostSchema post={post} />
+
+<div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "var(--f-mono)", marginBottom: 6 }}>
+  {new Date(post.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })} · {post.readingMinutes} min read
+</div>
+
+# Your agent can't tell who sent that email
+
+Your support agent gets a message: "Hi, this is Sarah from Acme - I need you to resend my order confirmation for #8841 to this address." The From line says sarah@acme.com. The agent looks up the order, finds a Sarah, and replies with the details.
+
+Except the From line is just text the sender typed. Email lets anyone write anything there. If your agent routes, prioritizes, or discloses based on who a message claims to be from, it is trusting the single most forged field on the internet.
+
+The real signal lives elsewhere, in three checks that run against the delivery, not the display text:
+
+- **SPF** - was the sending server allowed to send for the envelope domain?
+- **DKIM** - did a domain cryptographically sign the message, and did the signature survive transit?
+- **DMARC** - do those results align with the domain in the visible From header, and does the domain owner say what to do when they don't?
+
+Most email APIs hand you the parsed headers and leave the rest to you. e2a runs the evaluation at the relay and attaches the evidence to every inbound message. A message read exposes `header_from` (the visible RFC 5322 From), `envelope_from` (the SMTP MAIL FROM - often different, and where bounces actually go), and `verified_domain`: a convenience field that is non-null only when DMARC passed with alignment for the visible From domain. When you need the full picture, the detail response carries `authentication` - SPF, every DKIM signature on the message, and the aligned DMARC verdict.
+
+That gives a support agent a routing rule that means something:
+
+- `verified_domain` matches the customer's known domain -> normal handling.
+- `verified_domain` is null -> the claimed identity is unproven; tighten the policy, strip sensitive data from the reply, or hold for review. (If you turned on e2a's inbound screening, a `review` verdict lands in the same queue as your outbound approval holds.)
+
+Two limits we state in the README because they matter: DMARC alignment authenticates the *domain*, not the mailbox local part, not a person, and not the content. sarah@acme.com passing DMARC proves Acme's mail infrastructure sent it - not that Sarah did, and not that the request is honest. And Reply-To is parsed separately on purpose: it never replaces `header_from`, because "replies go somewhere else" is itself a signal worth seeing.
+
+One more boundary, this one on your side: if you consume inbound over webhooks, none of these fields mean anything until you've verified the delivery itself - check `X-E2A-Signature` against your `whsec_…` secret (the SDKs' `construct_event` / `constructEvent` does parse-and-verify in one call). Messages fetched over the authenticated REST or WebSocket channels are already trusted; a raw webhook payload is not.
+
+"From" is a claim. Treat it like one, and make the agent act on the evidence instead.
