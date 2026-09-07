@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -82,6 +83,16 @@ const (
 	subtypeOnTenantSuppressionList  = "OnTenantSuppressionList"
 )
 
+// isSuppressionListSubtype matches the two subtypes case-insensitively, the
+// same way the bounce type is compared: a case variant from the provider
+// must not turn an excluded suppression-list bounce into a hard bounce and
+// inflate the numerator that pauses accounts.
+func isSuppressionListSubtype(sub string) bool {
+	sub = strings.TrimSpace(sub)
+	return strings.EqualFold(sub, subtypeOnAccountSuppressionList) ||
+		strings.EqualFold(sub, subtypeOnTenantSuppressionList)
+}
+
 // Derivation is a bucket plus whether the event should repair the local
 // suppression list and, if so, under which source.
 type Derivation struct {
@@ -102,8 +113,7 @@ func DeriveBucket(kind delivery.EventKind, bounceType, bounceSubType, complaintS
 	case delivery.KindDelivery:
 		return Derivation{Bucket: BucketDelivered}
 	case delivery.KindBounce:
-		switch strings.TrimSpace(bounceSubType) {
-		case subtypeOnAccountSuppressionList, subtypeOnTenantSuppressionList:
+		if isSuppressionListSubtype(bounceSubType) {
 			return Derivation{Bucket: BucketNone, Repair: true, Source: suppressionsync.SourceBounce}
 		}
 		if strings.EqualFold(strings.TrimSpace(bounceType), "permanent") {
@@ -114,8 +124,7 @@ func DeriveBucket(kind delivery.EventKind, bounceType, bounceSubType, complaintS
 		// eligible hard bounce.
 		return Derivation{Bucket: BucketTerminalOther}
 	case delivery.KindComplaint:
-		switch strings.TrimSpace(complaintSubType) {
-		case subtypeOnAccountSuppressionList, subtypeOnTenantSuppressionList:
+		if isSuppressionListSubtype(complaintSubType) {
 			return Derivation{Bucket: BucketNone, Repair: true, Source: suppressionsync.SourceComplaint}
 		}
 		return Derivation{Bucket: BucketComplaint, Repair: true, Source: suppressionsync.SourceComplaint}
@@ -146,7 +155,12 @@ type feedbackRecipient struct {
 	day        *time.Time
 }
 
-// ProcessProviderFeedback implements delivery.FeedbackProcessor.
+// ProcessProviderFeedback implements delivery.FeedbackProcessor: it moves
+// detector evidence for one signed notification and reports the account
+// suppressions that notification proves. It deliberately writes NO
+// suppression itself — the live message path owns that row when a message
+// survives, and the consumer applies the repair through RepairSuppressions
+// only when none does.
 func (m *Module) ProcessProviderFeedback(ctx context.Context, fb delivery.ProviderFeedback) (delivery.FeedbackResult, error) {
 	if strings.TrimSpace(fb.ProviderEventID) == "" {
 		return delivery.FeedbackResult{}, errors.New("sendingpolicy: provider event id is required")
@@ -170,8 +184,11 @@ func (m *Module) ProcessProviderFeedback(ctx context.Context, fb delivery.Provid
 	}
 	result := delivery.FeedbackResult{Correlated: true}
 
-	// One row per provider event id: a redelivered notification is a zero
-	// delta even after the customer message is gone.
+	// One row per provider event id. A redelivered notification does not
+	// move evidence again — though the evidence rules are themselves
+	// idempotent for a replay, since a replayed event can only ever tie its
+	// own rank. Repairs are still reported below, so a retry whose live
+	// half failed after this commit can still finish its work.
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO sending_feedback_events (provider_event_id, correlation_id, provider_occurred_at, expires_at)
 		VALUES ($1, $2, $3, $4)
@@ -180,19 +197,22 @@ func (m *Module) ProcessProviderFeedback(ctx context.Context, fb delivery.Provid
 	if err != nil {
 		return delivery.FeedbackResult{}, fmt.Errorf("sendingpolicy: record feedback event: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		result.Duplicate = true
-		if err := tx.Commit(ctx); err != nil {
-			return delivery.FeedbackResult{}, fmt.Errorf("sendingpolicy: commit feedback: %w", err)
-		}
-		return result, nil
-	}
+	firstTime := tag.RowsAffected() == 1
+	result.Duplicate = !firstTime
 
 	derived := DeriveBucket(fb.Kind, fb.BounceType, fb.BounceSubType, fb.ComplaintSubType)
 
 	// Lock the account control row when the account still exists: it holds
 	// the epoch the new evidence is assigned to, and the pause transition
 	// (B9) takes the same lock, so an epoch cannot move under this write.
+	//
+	// Lock order note: this transaction takes the control row and then the
+	// account's aggregate row (a users foreign key). Account deletion takes
+	// the users row first and cascades into the control row, so the two can
+	// deadlock. Postgres aborts one; this side is an SNS retry, and a
+	// delete that wins leaves the lookup below returning no rows, which is
+	// the provenance-only path. Deletion is rare and operator-initiated, so
+	// the exposure is one retried notification.
 	accountExists := false
 	var accountID string
 	var epoch int64
@@ -222,6 +242,7 @@ func (m *Module) ProcessProviderFeedback(ctx context.Context, fb delivery.Provid
 	now := m.now().UTC()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 
+	unmatched := 0
 	for _, addr := range fb.Recipients {
 		addr = strings.ToLower(strings.TrimSpace(addr))
 		if addr == "" {
@@ -229,33 +250,76 @@ func (m *Module) ProcessProviderFeedback(ctx context.Context, fb delivery.Provid
 		}
 		row, matched := m.matchRecipient(rows, addr)
 		if !matched {
-			// Not in the authorized envelope: no accounting, no suppression.
-			// A mismatched recipient on a signed event is either a provider
+			// Not in the authorized envelope: no accounting, no repair. A
+			// mismatched recipient on a signed event is either a provider
 			// quirk or forged input; either way it proves nothing about an
-			// address this account sent to.
+			// address this account sent to. Counted, never logged with the
+			// address itself.
+			unmatched++
 			continue
 		}
-
-		if err := m.applyEvidence(ctx, tx, corr, row, derived.Bucket, fb, accountExists, accountID, epoch, today); err != nil {
-			return delivery.FeedbackResult{}, err
-		}
-
-		if derived.Repair && accountExists {
-			up, err := suppressionsync.UpsertTx(ctx, tx, "supp_"+randomSuffix(), accountID, addr,
-				repairReason(fb, derived), derived.Source, "")
-			if err != nil {
+		if firstTime {
+			if err := m.applyEvidence(ctx, tx, corr, row, derived.Bucket, fb, accountExists, accountID, epoch, today); err != nil {
 				return delivery.FeedbackResult{}, err
 			}
-			result.Suppressions = append(result.Suppressions, delivery.FeedbackSuppression{
-				Address: addr, ID: up.ID, Source: derived.Source, Reason: repairReason(fb, derived), Inserted: up.Inserted,
+		}
+		// Repair is reported for CUSTOMER MESSAGES only. Platform mail this
+		// account merely triggered — an approval notice, a webhook health
+		// warning — is addressed to the account owner, and a bounce on it
+		// suppressing that address account-wide would block the customer's
+		// own sends to it: a new customer-visible effect the pre-B8 path
+		// never had. Those purposes still feed the detector above, which is
+		// what the spec requires of them.
+		if derived.Repair && accountExists && corr.purpose == PurposeCustomerMessage {
+			result.RepairNeeded = append(result.RepairNeeded, delivery.FeedbackRepair{
+				Address: addr, Source: derived.Source, Reason: repairReason(fb, derived),
 			})
 		}
+	}
+	if unmatched > 0 {
+		// A systematic mismatch (a normalization divergence, a rotated key)
+		// would otherwise be invisible: the detector would simply see
+		// nothing and read as healthy.
+		log.Printf("[sendingpolicy:feedback] %d recipient(s) on event %s did not match correlation %s's authorized envelope",
+			unmatched, fb.ProviderEventID, corr.id)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return delivery.FeedbackResult{}, fmt.Errorf("sendingpolicy: commit feedback: %w", err)
 	}
 	return result, nil
+}
+
+// RepairSuppressions writes the account-wide suppressions a signed event
+// proved, for the case where no live message row can own them. Upserts go
+// through suppressionsync, so a row re-proven here advances its generation
+// and clears a pending removal.
+func (m *Module) RepairSuppressions(ctx context.Context, accountRef string, repairs []delivery.FeedbackRepair) error {
+	if strings.TrimSpace(accountRef) == "" || len(repairs) == 0 {
+		return nil
+	}
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("sendingpolicy: begin suppression repair: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The account must still exist: a suppression is customer state, and
+	// the row carries a foreign key to the user.
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, accountRef).Scan(&exists); err != nil {
+		return fmt.Errorf("sendingpolicy: check account for repair: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	for _, r := range repairs {
+		if _, err := suppressionsync.UpsertTx(ctx, tx, "supp_"+randomSuffix(), accountRef,
+			strings.ToLower(strings.TrimSpace(r.Address)), r.Reason, r.Source, ""); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // lookupCorrelation resolves the retained row by provider message id first
@@ -278,7 +342,12 @@ func lookupCorrelation(ctx context.Context, tx pgx.Tx, providerMessageID, attemp
 		return c, true, nil
 	}
 	if id := NormalizeProviderMessageID(providerMessageID); id != "" {
-		c, ok, err := scan(tx.QueryRow(ctx, cols+`WHERE provider_message_id = $1 LIMIT 1`, id))
+		// provider_message_id is not unique (a re-driven send can bind a new
+		// id to a new attempt), so order deterministically and prefer a row
+		// that is still retained over one already past its horizon.
+		c, ok, err := scan(tx.QueryRow(ctx, cols+`WHERE provider_message_id = $1
+			ORDER BY (expires_at IS NULL OR expires_at > now()) DESC, created_at DESC, correlation_id
+			LIMIT 1`, id))
 		if err != nil || ok {
 			return c, ok, err
 		}
@@ -423,34 +492,35 @@ func randomSuffix() string { return strings.TrimPrefix(randomID("x_"), "x_") }
 // row was signed under a key version this process does not hold. Feedback
 // for those rows could never be matched, which would leave the detector
 // silently blind; refusing to start is the alert.
+//
+// A deployment with NO keyring configured is not checked: it signs nothing
+// and matches nothing by design (self-host with every control disabled), and
+// bricking such a server over rows an earlier configuration wrote would turn
+// a disabled feature into an outage. Removing a key version while it is
+// still in use is the case this guards.
 func (m *Module) VerifyKeyringCoverage(ctx context.Context) error {
-	rows, err := m.pool.Query(ctx, `
-		SELECT DISTINCT r.hmac_key_version
+	if m.secrets.Keyring == nil {
+		return nil
+	}
+	held := m.secrets.Keyring.Versions()
+	// Bounded by construction: ask only whether a retained row exists under
+	// a version outside the keyring, and stop at the first one. The scan
+	// cannot be made to walk the whole table.
+	var missing *int
+	err := m.pool.QueryRow(ctx, `
+		SELECT r.hmac_key_version
 		  FROM sending_feedback_recipients r
 		  JOIN sending_feedback_correlations c ON c.correlation_id = r.correlation_id
-		 WHERE c.expires_at IS NULL OR c.expires_at > now()
-		 ORDER BY 1`)
+		 WHERE NOT (r.hmac_key_version = ANY($1::int[]))
+		   AND (c.expires_at IS NULL OR c.expires_at > now())
+		 LIMIT 1`, held).Scan(&missing)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("sendingpolicy: read retained key versions: %w", err)
 	}
-	defer rows.Close()
-	var missing []int
-	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
-			return err
-		}
-		if m.secrets.Keyring == nil || !hasVersion(m.secrets.Keyring, v) {
-			missing = append(missing, v)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("sendingpolicy: retained feedback rows are signed under HMAC key version(s) %v this keyring does not hold; the keyring must stay a superset until those rows expire", missing)
-	}
-	return nil
+	return fmt.Errorf("sendingpolicy: retained feedback rows are signed under HMAC key version %d, which this keyring (versions %v) does not hold; keep the old key until those rows expire, then remove it", *missing, held)
 }
 
 func hasVersion(k *Keyring, v int) bool {
@@ -506,4 +576,23 @@ func (m *Module) GCFeedback(ctx context.Context, now time.Time, windowDays int) 
 	}
 	st.Outcomes = tag.RowsAffected()
 	return st, nil
+}
+
+// EffectiveDetectorWindowDays reads the detector window from the policy this
+// deployment actually runs (the database singleton when the source is the
+// database, the validated config otherwise).
+func (m *Module) EffectiveDetectorWindowDays(ctx context.Context) (int, error) {
+	tx, err := m.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("sendingpolicy: begin policy read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	policy, err := m.effectivePolicy(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("sendingpolicy: commit policy read: %w", err)
+	}
+	return policy.DetectorWindowDays, nil
 }

@@ -28,7 +28,15 @@ type FeedbackMaintenanceWorker struct {
 }
 
 func (w *FeedbackMaintenanceWorker) Work(ctx context.Context, _ *river.Job[FeedbackMaintenanceArgs]) error {
-	st, err := w.module.GCFeedback(ctx, w.module.now(), w.module.configPolicy.DetectorWindowDays)
+	// The EFFECTIVE policy, not the config file: on a database-source
+	// deployment an operator who widened the detector window would
+	// otherwise get a janitor that keeps deleting daily outcomes at the old
+	// width, silently shrinking the evidence the detector sums.
+	window, err := w.module.EffectiveDetectorWindowDays(ctx)
+	if err != nil {
+		return err
+	}
+	st, err := w.module.GCFeedback(ctx, w.module.now(), window)
 	if err != nil {
 		return err
 	}

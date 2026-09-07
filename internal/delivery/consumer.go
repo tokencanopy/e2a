@@ -218,6 +218,17 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 		}
 	}
 	if !found {
+		// No live message can own a suppression for this event, but the
+		// retained provenance may still prove one — this is the purged /
+		// deleted-message case B8 exists for. The account-wide repair is
+		// applied here, outside any message transaction, and announces
+		// nothing: there is no message for an event to reference.
+		if c.feedback != nil && accounted.AccountRef != "" && len(accounted.RepairNeeded) > 0 {
+			if err := c.feedback.RepairSuppressions(ctx, accounted.AccountRef, accounted.RepairNeeded); err != nil {
+				return fmt.Errorf("suppression repair: %w", err)
+			}
+			log.Printf("[delivery] SES %s repaired %d suppression(s) for a message that no longer exists", ev.Kind, len(accounted.RepairNeeded))
+		}
 		if len(ev.Recipients) == 0 {
 			return nil
 		}
@@ -294,22 +305,16 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 					source = suppressionSourceCompl
 					suppressionReason = messagelifecycle.ReasonSuppressionComplaintApplied
 				}
-				// The accounting seam may already have upserted this
-				// suppression (it repairs the list from the signed
-				// recipient whenever the account exists). Its verdict on
-				// whether the row was NEW is what decides the event, so a
-				// second upsert here cannot turn a genuine insert into a
-				// silent refresh.
-				var suppressionID string
-				var added bool
-				if s, ok := accounted.SuppressionFor(r.Address); ok {
-					suppressionID, added = s.ID, s.Inserted
-				} else {
-					var err error
-					suppressionID, added, err = c.store.AddSuppressionTx(ctx, tx, m.UserID, r.Address, r.Detail, source, m.MessageID)
-					if err != nil {
-						return err
-					}
+				// The live message owns the customer-visible row: it is the
+				// only writer that knows the source message id and the
+				// diagnostic the suppression API returns, and its insert
+				// must share this transaction with the event that
+				// announces it. The accounting seam deliberately does not
+				// write it here (see the !found branch below, which is the
+				// only case where no message can own the repair).
+				suppressionID, added, err := c.store.AddSuppressionTx(ctx, tx, m.UserID, r.Address, r.Detail, source, m.MessageID)
+				if err != nil {
+					return err
 				}
 				if added {
 					suppressionTransition, err := c.store.AppendLifecycleTx(ctx, tx, messagelifecycle.AppendInput{MessageID: m.MessageID, DedupeKey: fmt.Sprintf("suppression:feedback:%s:%s:%s", suppressionID, m.MessageID, r.Address), Direction: "outbound", Recipient: r.Address, ReasonCode: suppressionReason, Evidence: map[string]any{"suppression_scope": "account", "suppression_source": source}, CorrelationIDs: feedbackCorrelations(ev), OccurredAt: ev.OccurredAt})
