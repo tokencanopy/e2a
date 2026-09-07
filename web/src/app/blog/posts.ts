@@ -113,6 +113,15 @@ export const posts: Post[] = [
     author: "e2a",
     readingMinutes: 3,
   },
+  {
+    slug: "inbound-prompt-injection",
+    title: "Anyone in the world can put text in front of your agent's model for the price of an email",
+    description:
+      "Inbound email is untrusted input the whole internet can write - and a prime indirect prompt-injection vector for agents that act on what they read. How e2a screens message content (heuristics + optional LLM detector, allow / review / block, fail-safe to review) before your agent ever sees it.",
+    date: "2026-09-06",
+    author: "e2a",
+    readingMinutes: 3,
+  },
 ];
 
 export function getPost(slug: string): Post | undefined {
