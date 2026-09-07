@@ -516,7 +516,11 @@ func TestEqualRankProvenanceTieBreak(t *testing.T) {
 	rcpt := []string{"tie@example.test"}
 	msg := f.messageTo(agent, "relay", rcpt)
 	_, corrID, sesID := f.authorizedSend(g, msg, rcpt)
-	base := time.Now().UTC().Add(-time.Hour)
+	// Microsecond precision, because that is what timestamptz stores: a
+	// nanosecond-granular Go clock (Linux) would round-trip to a different
+	// value than the one asserted, while a microsecond-granular one (macOS)
+	// would not — the test must not depend on which host runs it.
+	base := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
 
 	send := func(id string, at time.Time) {
 		t.Helper()
