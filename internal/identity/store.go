@@ -2254,6 +2254,28 @@ func (s *Store) CreateAgentWithLimit(ctx context.Context, agentEmail, domain, na
 	}
 	defer tx.Rollback(ctx)
 
+	a, err := s.CreateAgentWithLimitTx(ctx, tx, agentEmail, domain, name, userID, maxAgents)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// CreateAgentWithLimitTx is CreateAgentWithLimit for a caller-owned
+// transaction: the advisory lock, count check and INSERT all run on tx,
+// and the caller commits (or rolls back). Used by the OAuth auto-provision
+// path so the cap check and the authorization-code insert (in
+// oauth_auth_codes) commit or roll back together, the same reason
+// CreateAgentTx exists alongside CreateAgent. maxAgents <= 0 means
+// unlimited (no lock taken, matching CreateAgentWithLimit).
+func (s *Store) CreateAgentWithLimitTx(ctx context.Context, tx pgx.Tx, agentEmail, domain, name, userID string, maxAgents int) (*AgentIdentity, error) {
+	if maxAgents <= 0 {
+		return createAgent(ctx, tx, agentEmail, domain, name, userID)
+	}
+
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 2))`, userID); err != nil {
 		return nil, err
 	}
@@ -2275,14 +2297,7 @@ func (s *Store) CreateAgentWithLimit(ctx context.Context, agentEmail, domain, na
 		return nil, &AgentLimitExceededError{Limit: maxAgents, Current: count}
 	}
 
-	a, err := createAgent(ctx, tx, agentEmail, domain, name, userID)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return a, nil
+	return createAgent(ctx, tx, agentEmail, domain, name, userID)
 }
 
 // agentExecutor is the subset of pgxpool.Pool + pgx.Tx that
