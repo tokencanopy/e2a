@@ -46,6 +46,9 @@ func TestSendingPolicyWiring(t *testing.T) {
 	if got := composed.submitter.SESConfigurationSet(); got != "e2a-delivery-test" {
 		t.Fatalf("submitter configuration set = %q, want the deployment's — delivery feedback must stay on", got)
 	}
+	if composed.module == nil || sendingpolicy.Gate(composed.module) != composed.gate {
+		t.Fatal("the concrete module (feedback processor, keyring coverage, retention janitor) is not the composed gate")
+	}
 	if composed.jobs.Gate() != composed.gate {
 		t.Fatal("the jobs bundle does not hold the composed gate")
 	}

@@ -74,6 +74,13 @@ type Event struct {
 	// bounceSubType (e.g. General, NoEmail, MailboxFull).
 	BounceType    string
 	BounceSubType string
+	// ComplaintSubType is the raw SES complaintSubType (Complaint events
+	// only; empty otherwise). A suppression-list value means SES did not
+	// deliver, which the detector must not count as a genuine complaint.
+	ComplaintSubType string
+	// AttemptCorrelationID is the ProviderAttemptHeader SES echoed back from
+	// the submitted headers: the deletion-resistant correlation fallback.
+	AttemptCorrelationID string
 }
 
 // sesNotification is the SES event JSON carried in the SNS Message field.
@@ -108,6 +115,7 @@ type sesNotification struct {
 			EmailAddress string `json:"emailAddress"`
 		} `json:"complainedRecipients"`
 		ComplaintFeedbackType string `json:"complaintFeedbackType"`
+		ComplaintSubType      string `json:"complaintSubType"`
 	} `json:"complaint"`
 	Delivery *struct {
 		Recipients []string `json:"recipients"`
@@ -141,11 +149,15 @@ func ParseSESNotification(messageBody []byte) (*Event, error) {
 	}
 	ev := &Event{SESMessageID: n.Mail.MessageID}
 	for _, h := range n.Mail.Headers {
-		if strings.EqualFold(h.Name, MessageIDHeader) {
+		switch {
+		case strings.EqualFold(h.Name, MessageIDHeader) && ev.E2AMessageID == "":
 			// Defensive trim: the marker is stamped bare, but tolerate an
 			// angle-bracketed echo.
 			ev.E2AMessageID = strings.Trim(strings.TrimSpace(h.Value), "<>")
-			break
+		case strings.EqualFold(h.Name, ProviderAttemptHeader) && ev.AttemptCorrelationID == "":
+			if v := strings.TrimSpace(h.Value); validAttemptCorrelationID(v) {
+				ev.AttemptCorrelationID = v
+			}
 		}
 	}
 
@@ -178,6 +190,7 @@ func ParseSESNotification(messageBody []byte) (*Event, error) {
 	case "Complaint":
 		ev.Kind = KindComplaint
 		if n.Complaint != nil {
+			ev.ComplaintSubType = n.Complaint.ComplaintSubType
 			for _, r := range n.Complaint.ComplainedRecipients {
 				ev.Recipients = append(ev.Recipients, RecipientOutcome{
 					Address: norm(r.EmailAddress), Status: StatusComplained,
@@ -241,6 +254,52 @@ func validE2AMessageID(s string) bool {
 		}
 	}
 	return true
+}
+
+// validAttemptCorrelationID reports whether s is shaped like the attempt
+// marker the adapter stamps (`cor_` + hex). Same rationale as
+// validE2AMessageID: the value came off a signed notification but originated
+// in a header block, so it is shape-checked before it becomes a lookup key.
+func validAttemptCorrelationID(s string) bool {
+	const prefix = "cor_"
+	if !strings.HasPrefix(s, prefix) || len(s) <= len(prefix) || len(s) > maxE2AMessageIDLen {
+		return false
+	}
+	for _, r := range s[len(prefix):] {
+		switch {
+		case r >= 'a' && r <= 'f', r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// FeedbackFor reduces a parsed event to the processor's input: every
+// recipient the notification named, normalized and deduplicated, plus the
+// two correlation keys and the retained subtypes.
+func (ev *Event) FeedbackFor() ProviderFeedback {
+	seen := map[string]bool{}
+	var recipients []string
+	for _, r := range ev.Recipients {
+		a := norm(r.Address)
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		recipients = append(recipients, a)
+	}
+	return ProviderFeedback{
+		ProviderEventID:      ev.ProviderEventID,
+		OccurredAt:           ev.OccurredAt,
+		Kind:                 ev.Kind,
+		BounceType:           ev.BounceType,
+		BounceSubType:        ev.BounceSubType,
+		ComplaintSubType:     ev.ComplaintSubType,
+		ProviderMessageID:    ev.SESMessageID,
+		AttemptCorrelationID: ev.AttemptCorrelationID,
+		Recipients:           recipients,
+	}
 }
 
 // normalizeBounceType maps SES's bounceType (Permanent | Transient |

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
+	"github.com/tokencanopy/e2a/internal/suppressionsync"
 )
 
 // OutboundSendClaimStaleWindow exceeds River's one-minute worker timeout and
@@ -1078,24 +1079,16 @@ func (s *Store) AddSuppression(ctx context.Context, userID, address, reason, sou
 	return added, err
 }
 
+// AddSuppressionTx upserts through suppressionsync: an existing row keeps its
+// reason and source but advances sync_generation and clears removal_pending,
+// so a suppression re-proven by feedback defeats a stale pending removal.
+// added reports a genuine insert.
 func (s *Store) AddSuppressionTx(ctx context.Context, tx pgx.Tx, userID, address, reason, source, sourceMessageID string) (string, bool, error) {
-	id := "supp_" + generateID()
-	tag, err := tx.Exec(ctx,
-		`INSERT INTO suppressions (id, user_id, address, reason, source, source_message_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 ON CONFLICT (user_id, address) DO NOTHING`,
-		id, userID, NormalizeEmail(address), reason, source, nullIfEmpty(sourceMessageID),
-	)
+	up, err := suppressionsync.UpsertTx(ctx, tx, "supp_"+generateID(), userID, NormalizeEmail(address), reason, source, sourceMessageID)
 	if err != nil {
 		return "", false, err
 	}
-	if tag.RowsAffected() == 0 {
-		if err := tx.QueryRow(ctx, `SELECT id FROM suppressions WHERE user_id=$1 AND address=$2`, userID, NormalizeEmail(address)).Scan(&id); err != nil {
-			return "", false, err
-		}
-		return id, false, nil
-	}
-	return id, true, nil
+	return up.ID, up.Inserted, nil
 }
 
 // SuppressedAddresses returns the subset of addrs that are suppressed for the

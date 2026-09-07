@@ -150,6 +150,17 @@ type Consumer struct {
 	store              Store
 	fire               Firer
 	finalizeAcceptance ProviderAcceptanceFinalizer
+	// feedback is the deletion-resistant accounting seam (B8). It runs
+	// before any live-message lookup, in its own transaction, so provider
+	// evidence for a purged message still lands; nil means no accounting
+	// (self-host with the policy module absent).
+	feedback FeedbackProcessor
+}
+
+// WithFeedbackProcessor installs the deletion-resistant accounting seam.
+func (c *Consumer) WithFeedbackProcessor(p FeedbackProcessor) *Consumer {
+	c.feedback = p
+	return c
 }
 
 // NewConsumer builds the consumer. fire may be nil (no events).
@@ -175,6 +186,21 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 	if ev.OccurredAt.IsZero() {
 		return fmt.Errorf("provider event timestamp is required")
 	}
+	// Deletion-resistant accounting first, and on its own: it must not
+	// depend on a surviving message, agent, or user row, and a failure here
+	// must make the provider retry rather than let the lifecycle path below
+	// consume the notification. Its event-id dedupe makes that retry a zero
+	// delta, and the lifecycle path has its own dedupe keys, so the two
+	// halves committing independently is safe in both orders.
+	var accounted FeedbackResult
+	if c.feedback != nil {
+		var err error
+		accounted, err = c.feedback.ProcessProviderFeedback(ctx, ev.FeedbackFor())
+		if err != nil {
+			return fmt.Errorf("provider feedback accounting: %w", err)
+		}
+	}
+
 	m, found, err := c.store.CorrelateBySESMessageID(ctx, ev.SESMessageID)
 	if err != nil {
 		return err
@@ -268,9 +294,22 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 					source = suppressionSourceCompl
 					suppressionReason = messagelifecycle.ReasonSuppressionComplaintApplied
 				}
-				suppressionID, added, err := c.store.AddSuppressionTx(ctx, tx, m.UserID, r.Address, r.Detail, source, m.MessageID)
-				if err != nil {
-					return err
+				// The accounting seam may already have upserted this
+				// suppression (it repairs the list from the signed
+				// recipient whenever the account exists). Its verdict on
+				// whether the row was NEW is what decides the event, so a
+				// second upsert here cannot turn a genuine insert into a
+				// silent refresh.
+				var suppressionID string
+				var added bool
+				if s, ok := accounted.SuppressionFor(r.Address); ok {
+					suppressionID, added = s.ID, s.Inserted
+				} else {
+					var err error
+					suppressionID, added, err = c.store.AddSuppressionTx(ctx, tx, m.UserID, r.Address, r.Detail, source, m.MessageID)
+					if err != nil {
+						return err
+					}
 				}
 				if added {
 					suppressionTransition, err := c.store.AppendLifecycleTx(ctx, tx, messagelifecycle.AppendInput{MessageID: m.MessageID, DedupeKey: fmt.Sprintf("suppression:feedback:%s:%s:%s", suppressionID, m.MessageID, r.Address), Direction: "outbound", Recipient: r.Address, ReasonCode: suppressionReason, Evidence: map[string]any{"suppression_scope": "account", "suppression_source": source}, CorrelationIDs: feedbackCorrelations(ev), OccurredAt: ev.OccurredAt})

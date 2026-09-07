@@ -576,6 +576,9 @@ type Store struct {
 	// surface for topology resolution and lazy legacy adoption. Optional so
 	// stores in tests and embedded deployments remain inert by default.
 	threadIdentityMetrics ThreadIdentityMetrics
+	// feedbackRetentionOverride is the policy-supplied post-deletion horizon
+	// for retained feedback provenance; zero means DefaultFeedbackRetention.
+	feedbackRetentionOverride time.Duration
 }
 
 // OutboundJobCanceller is the narrow River cancellation surface identity needs

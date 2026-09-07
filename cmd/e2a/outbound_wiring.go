@@ -32,6 +32,9 @@ type outboundSending struct {
 	gate      sendingpolicy.Gate
 	submitter *outbound.ProviderSubmitter
 	jobs      *outboundsend.Jobs
+	// module is the concrete gate: the deletion-resistant feedback processor,
+	// the keyring coverage check, and the retention janitor hang off it.
+	module *sendingpolicy.Module
 }
 
 // newOutboundSending is the ONE composition root for provider-bound customer
@@ -50,7 +53,8 @@ func newOutboundSending(d outboundSendingDeps) outboundSending {
 		WithGate(gate).
 		WithMetrics(d.metrics).
 		WithRateGate(d.rate)
-	return outboundSending{gate: gate, submitter: submitter, jobs: jobs}
+	module, _ := gate.(*sendingpolicy.Module)
+	return outboundSending{gate: gate, submitter: submitter, jobs: jobs, module: module}
 }
 
 // notificationDeps is what the notification composition needs: the same gate
