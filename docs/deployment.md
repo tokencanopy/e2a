@@ -28,6 +28,7 @@ Copy `config.example.yaml` to `config.yaml` and fill in values, or set the envir
 | `E2A_OIDC_CLIENT_SECRET` | if OIDC enabled | Confidential client secret |
 | `E2A_OIDC_REDIRECT_URL` | if OIDC enabled | Registered absolute callback URL |
 | `E2A_OIDC_USER_ID_CLAIM` | if OIDC enabled | ID-token claim naming an existing `users.id` — OIDC login never provisions new users |
+| `E2A_OIDC_LOGOUT_URL` | no | Optional fixed upstream logout URL to redirect to after local logout (absolute `http(s)` URL, no query/fragment) |
 | `E2A_PROVISIONING_ENABLED` | no (default off) | Internal-only. Turns on `POST /api/internal/users/provision`, which lets an external control plane create users idempotently ahead of their first sign-in (see below) |
 | `E2A_PROVISIONING_SECRET` | if provisioning enabled | Internal-only, env-only. Shared HMAC key the control plane signs provisioning request bodies with (`X-E2A-Internal-Signature`); must match on both ends. Production requires ≥32 bytes — generate with `openssl rand -hex 32` |
 | `E2A_DELEGATED_ENABLED` | no (default off) | Turns on delegated access-token verification (RFC 9068 `at+jwt`) so an external control plane can call `/v1` on behalf of its signed-in humans (see below). The rest of the policy — `issuer_url`, `audience`, `authorized_party`, `required_scope`, `allowed_algorithms`, `max_token_lifetime_seconds`, `clock_skew_seconds`, `required_claims`, `forbidden_claims` — is non-secret and lives in the `delegated:` block of `config.yaml`; there is no shared key |
