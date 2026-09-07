@@ -227,6 +227,33 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 			if err := c.feedback.RepairSuppressions(ctx, accounted.AccountRef, accounted.RepairNeeded); err != nil {
 				return fmt.Errorf("suppression repair: %w", err)
 			}
+			// Announce it. A row appearing in the customer's suppression
+			// list with no event is the same state/notification desync the
+			// message-backed path deliberately avoids; the payload's
+			// message id is documented as present only when still known,
+			// which is exactly this case. Keyed on the provider event, so a
+			// redelivery dedupes at the outbox and a retry after a failure
+			// here still ends with one event.
+			if c.fire != nil {
+				if err := c.store.WithTx(ctx, func(tx pgx.Tx) error {
+					for _, rep := range accounted.RepairNeeded {
+						if err := c.fire(ctx, tx, FiredEvent{
+							UserID: accounted.AccountRef,
+							Type:   EventSuppressionAdded,
+							Data: eventpayload.DomainSuppressionAddedData{
+								Address: rep.Address, Source: rep.Source, Reason: rep.Reason,
+							},
+							DedupKey:   "provider-feedback:" + ev.ProviderEventID + ":" + rep.Address + ":" + EventSuppressionAdded,
+							OccurredAt: ev.OccurredAt,
+						}); err != nil {
+							return err
+						}
+					}
+					return nil
+				}); err != nil {
+					return fmt.Errorf("announce repaired suppression: %w", err)
+				}
+			}
 			log.Printf("[delivery] SES %s repaired %d suppression(s) for a message that no longer exists", ev.Kind, len(accounted.RepairNeeded))
 		}
 		if len(ev.Recipients) == 0 {

@@ -564,3 +564,65 @@ func TestSuppressionRepairRequiresALiveAccount(t *testing.T) {
 		t.Fatal("repair wrote a suppression for a nonexistent account")
 	}
 }
+
+// TestNotificationFeedbackAccountsButDoesNotRepair: a bounce on platform
+// mail the account merely triggered — an approval notice — still feeds the
+// detector on the shared path, because the spec counts customer-triggered
+// notifications. It must NOT suppress the address, which is the account
+// owner's own: doing so would block the customer's sends to it, an effect
+// the pre-B8 path never had.
+func TestNotificationFeedbackAccountsButDoesNotRepair(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(sendingpolicy.DisabledPolicy())
+	module := sendingpolicy.NewModule(f.pool, f.secrets())
+	user := f.user("standard")
+	agent := f.agent(user)
+	held := f.pendingMessage(agent, "own_address")
+
+	var ref sendingpolicy.OperationRef
+	f.inTx(func(tx pgx.Tx) error {
+		var err error
+		ref, err = g.PrepareNotificationTx(f.ctx, tx, sendingpolicy.NewHITLNotificationRef(held))
+		return err
+	})
+	_, attempt, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || token == nil {
+		t.Fatalf("consume notification: %v", err)
+	}
+	owner := token.AuthorizedRecipients()
+	headers, err := token.ValidateEnvelope(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := module.ProcessProviderFeedback(f.ctx, delivery.ProviderFeedback{
+		ProviderEventID: "notify-hb", OccurredAt: time.Now().UTC(), Kind: delivery.KindBounce,
+		BounceType: "permanent", BounceSubType: "General",
+		AttemptCorrelationID: headers.AttemptCorrelationID, Recipients: owner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Correlated || res.AccountRef != user {
+		t.Fatalf("notification feedback must attribute to the triggering account: %+v", res)
+	}
+	if len(res.RepairNeeded) != 0 {
+		t.Fatalf("platform mail must not suppress the owner's address: %+v", res.RepairNeeded)
+	}
+	// It still counts, on the shared path.
+	if c := f.outcomes(user)[todayKey(1, true)]; c != [4]int{0, 0, 1, 0} {
+		t.Fatalf("notification bounce must feed the detector: %v", c)
+	}
+	f.repair(module, res)
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM suppressions WHERE user_id = $1`, user).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("suppressions created for platform mail: %d", n)
+	}
+}
