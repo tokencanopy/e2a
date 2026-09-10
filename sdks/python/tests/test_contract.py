@@ -7,6 +7,10 @@ Runs against a live test server. Requires env vars:
     account, seeded with tiny plan caps. Scenarios asserting quota enforcement
     run as that account and skip without it (a deployed staging target has no
     capped account to offer).
+  E2A_TEST_OVERCAP_API_KEY: optional; key for the contract server's third
+    account, seeded already over its plan caps. The scenario proving the 402
+    envelope's `current` field runs as that account and skips without it (a
+    deployed staging target has no over-cap account to offer).
 
 The runner drives the server over raw HTTP (a thin scenario interpreter, not
 the ergonomic client):
@@ -47,6 +51,7 @@ from e2a.v1.generated.models import PageMessageLifecycleTransition
 BASE_URL = os.environ.get("E2A_TEST_BASE_URL", "")
 API_KEY = os.environ.get("E2A_TEST_API_KEY", "")
 CAPPED_API_KEY = os.environ.get("E2A_TEST_CAPPED_API_KEY", "")
+OVERCAP_API_KEY = os.environ.get("E2A_TEST_OVERCAP_API_KEY", "")
 
 # tests/test_contract.py -> sdks/python/tests/ -> sdks/python/ -> sdks/ -> repo root
 SCENARIOS_PATH = Path(__file__).resolve().parents[3] / "tests" / "contract" / "scenarios.yaml"
@@ -136,13 +141,11 @@ def values_equal(json_val: Any, yaml_val: Any) -> bool:
 STORE_ACTIONS = {"inject_message", "verify_and_retry"}
 
 CAPPED_KEY_PLACEHOLDER = "{capped_api_key}"
+OVERCAP_KEY_PLACEHOLDER = "{overcap_api_key}"
 
 
-def scenario_needs_capped_account(sc: dict[str, Any]) -> bool:
-    """True when the scenario authenticates as the capped-plan account.
-
-    Those scenarios need a cap they can actually reach, which only the contract
-    server's seeded secondary account provides.
+def _scenario_uses_placeholder(sc: dict[str, Any], placeholder: str) -> bool:
+    """True when the scenario's auth_override anywhere names `placeholder`.
 
     Inspects auth_override VALUES specifically. Dumping the whole scenario and
     substring-matching looks equivalent and is not: the scenario's own
@@ -156,9 +159,25 @@ def scenario_needs_capped_account(sc: dict[str, Any]) -> bool:
         for step in sc.get(key) or []:
             if isinstance(step, dict):
                 overrides.append(step.get("auth_override"))
-    return any(
-        isinstance(o, str) and CAPPED_KEY_PLACEHOLDER in o for o in overrides
-    )
+    return any(isinstance(o, str) and placeholder in o for o in overrides)
+
+
+def scenario_needs_capped_account(sc: dict[str, Any]) -> bool:
+    """True when the scenario authenticates as the capped-plan account.
+
+    Those scenarios need a cap they can actually reach, which only the contract
+    server's seeded secondary account provides.
+    """
+    return _scenario_uses_placeholder(sc, CAPPED_KEY_PLACEHOLDER)
+
+
+def scenario_needs_overcap_account(sc: dict[str, Any]) -> bool:
+    """True when the scenario authenticates as the over-cap account.
+
+    Those scenarios need an account already over its plan caps, which only the
+    contract server's seeded third account provides.
+    """
+    return _scenario_uses_placeholder(sc, OVERCAP_KEY_PLACEHOLDER)
 
 
 def scenario_needs_store(sc: dict[str, Any]) -> bool:
@@ -193,6 +212,8 @@ class Runner:
         # empty bearer token can never reach the wire as a confusing 401.
         if CAPPED_API_KEY:
             self.vars["capped_api_key"] = CAPPED_API_KEY
+        if OVERCAP_API_KEY:
+            self.vars["overcap_api_key"] = OVERCAP_API_KEY
         self._http = httpx.Client(base_url=base_url, timeout=30)
 
     def close(self):
@@ -1179,6 +1200,8 @@ def test_contract_scenario(scenario):
     # runs everywhere, so this skip cannot silently become zero coverage.
     if scenario_needs_capped_account(scenario) and not CAPPED_API_KEY:
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_CAPPED_API_KEY")
+    if scenario_needs_overcap_account(scenario) and not OVERCAP_API_KEY:
+        pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_OVERCAP_API_KEY")
 
     runner = Runner(BASE_URL, API_KEY, scenario)
     try:
