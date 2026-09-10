@@ -427,12 +427,16 @@ except Exception:print("")')"
 
     echo "# python interpreter resolution (Windows/Git Bash python3 shim):"
     ( fakebin=/tmp/tether-selftest-fakepy; rm -rf "$fakebin"; mkdir -p "$fakebin"
-      real_py="$(command -v python3)"
+      real_py="$(T_PYTHON='' t_python -c 'import sys; print(sys.executable)' 2>/dev/null)"
       # Mirrors the Microsoft Store App Installer redirector shim: on PATH
       # (so `command -v python3` succeeds) but exits non-zero with no output
       # on every invocation.
       printf '#!/usr/bin/env bash\nexit 49\n' > "$fakebin/python3"; chmod +x "$fakebin/python3"
-      ln -s "$real_py" "$fakebin/python"
+      # Use a wrapper instead of symlinking the macOS /usr/bin/python3 shim:
+      # xcrun selects the interpreter by argv[0], so the symlink name `python`
+      # can make an otherwise working python3 fail before it runs.
+      printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$real_py" > "$fakebin/python"
+      chmod +x "$fakebin/python"
       export PATH="$fakebin:$PATH"
       T_PYTHON=""
       ts="$(t_now_iso)"
