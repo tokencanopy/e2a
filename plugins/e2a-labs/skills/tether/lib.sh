@@ -10,7 +10,29 @@
 # → `npx -y @e2a/cli@^MIN`. Node is always present where this skill runs
 # (Claude Code requires it), so existing users need to install nothing and
 # minor CLI upgrades flow automatically through npx. Python 3 is still needed
-# for local state/JSON handling only.
+# for local state/JSON handling only, resolved through t_python below.
+
+# t_python resolves and memoizes a Python 3 that actually EXECUTES, trying
+# $E2A_PYTHON, then python3, then python.
+T_PYTHON=""
+t_python() {
+  if [ -z "$T_PYTHON" ]; then
+    local c
+    for c in "${E2A_PYTHON:-}" python3 python; do
+      [ -n "$c" ] || continue
+      if command -v "$c" >/dev/null 2>&1 \
+         && "$c" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' >/dev/null 2>&1; then
+        T_PYTHON="$(command -v "$c")"
+        break
+      fi
+    done
+    if [ -z "$T_PYTHON" ]; then
+      echo "tether: no working Python 3 found (tried \$E2A_PYTHON, python3, python), set E2A_PYTHON to a working interpreter" >&2
+      return 1
+    fi
+  fi
+  "$T_PYTHON" "$@"
+}
 
 t_load_config() {
   # Explicit env vars win; each fallback source fills only the vars still missing
@@ -34,7 +56,7 @@ t_load_config() {
   # already-resolved credential from ~/.e2a-tether.env is never clobbered by
   # a *different* agent the CLI happens to be logged in as.
   if { [ -z "${E2A_API_KEY:-}" ] || [ -z "${E2A_AGENT_EMAIL:-}" ] || [ -z "${E2A_URL:-}" ]; } && [ -f "${HOME}/.e2a/config.json" ]; then
-    eval "$(python3 -c 'import json,shlex,os
+    eval "$(t_python -c 'import json,shlex,os
 try:
   d=json.load(open(os.path.expanduser("~/.e2a/config.json")))
   if not os.environ.get("E2A_API_KEY") and d.get("api_key"):
@@ -83,7 +105,7 @@ except Exception:pass')"
   [ -n "${E2A_API_KEY:-}" ] && [ -n "${E2A_AGENT_EMAIL:-}" ]
 }
 
-t_now_iso()  { python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())'; }
+t_now_iso()  { t_python -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat())'; }
 
 # --- e2a CLI resolution --------------------------------------------------------
 # The minimum CLI this skill's flags require (send --conversation-id, reply
@@ -112,7 +134,7 @@ TETHER_MIN_CLI="2.0.0"
 
 # t_ver_ge "<e2a 2.0.1>" "2.0.0" → 0 when the version (last token) >= min.
 t_ver_ge() {
-  python3 -c 'import sys
+  t_python -c 'import sys
 def v(s):
     s = s.strip().split()[-1] if s.strip() else "0"
     return [int(x) for x in s.lstrip("v").split(".")[:3] if x.isdigit()] or [0]
@@ -121,7 +143,7 @@ sys.exit(0 if v(sys.argv[1]) >= v(sys.argv[2]) else 1)' "$1" "$2" 2>/dev/null
 
 # t_ver_major "<e2a 2.0.1>" → 2 (0 when unparseable).
 t_ver_major() {
-  python3 -c 'import sys
+  t_python -c 'import sys
 s = sys.argv[1].strip()
 s = s.split()[-1] if s else "0"
 p = s.lstrip("v").split(".")[0]
@@ -221,7 +243,7 @@ t_cli_desc() {
 t_state_key() {
   local root
   root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$PWD"
-  python3 -c 'import hashlib,sys;print(hashlib.sha1(sys.argv[1].encode()).hexdigest()[:12])' "$root"
+  t_python -c 'import hashlib,sys;print(hashlib.sha1(sys.argv[1].encode()).hexdigest()[:12])' "$root"
 }
 
 T_STATE_PATH=""   # memoized: t_state_path runs in every poll tick
@@ -240,7 +262,7 @@ t_state_path() {
 
 t_state_get() {
   local f; f="$(t_state_path)"; [ -f "$f" ] || return 0
-  python3 -c 'import json,sys
+  t_python -c 'import json,sys
 try:print(json.load(open(sys.argv[1])).get(sys.argv[2],"") or "")
 except Exception:pass' "$f" "$1"
 }
@@ -253,7 +275,7 @@ except Exception:pass' "$f" "$1"
 # entry re-executes an already-handled instruction).
 t_state_set() {  # t_state_set k1 v1 [k2 v2 ...]
   local f; f="$(t_state_path)"; mkdir -p "$(dirname "$f")"
-  python3 -c 'import json,sys,os,fcntl
+  t_python -c 'import json,sys,os,fcntl
 f=sys.argv[1];kv=sys.argv[2:]
 lock=open(f+".lock","w"); fcntl.flock(lock,fcntl.LOCK_EX)
 d={}
@@ -304,7 +326,7 @@ t_ask_active() {
 # treating a mistyped "1h30m"/"90 min" as an unbounded window).
 # accepts a SINGLE unit: 30m, 2h, 8h, 1d ; "" / forever / until-stop → empty
 t_duration_to_expiry() {
-  python3 -c 'import sys,datetime,re
+  t_python -c 'import sys,datetime,re
 d=(sys.argv[1] if len(sys.argv)>1 else "").strip().lower()
 if not d or d in ("forever","none","off","until-stop","stop"):print("");raise SystemExit
 m=re.fullmatch(r"(\d+)\s*([mhd])",d)
@@ -314,7 +336,7 @@ print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=s
 }
 
 t_parse_until() {
-  python3 -c 'import datetime,sys
+  t_python -c 'import datetime,sys
 try:
     raw=sys.argv[1]
     value=datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -330,7 +352,7 @@ except Exception:
 t_remaining_seconds() {
   local f; f="$(t_state_path)"
   [ -f "$f" ] || { echo 2147483647; return; }
-  python3 -c 'import sys,datetime,json,os,fcntl
+  t_python -c 'import sys,datetime,json,os,fcntl
 try:
   f=sys.argv[1]
   lock=open(f+".lock","w"); fcntl.flock(lock,fcntl.LOCK_EX)
@@ -401,7 +423,7 @@ T_ATTACH_MAX_BYTES=$((15 * 1024 * 1024))
 # t_attach_check <file>... → 0 ok; 3 a file is missing; 4 over the total cap.
 # Validates BEFORE encoding so callers can fail fast with a clear message.
 t_attach_check() {
-  python3 -c 'import sys,os
+  t_python -c 'import sys,os
 maxb=int(sys.argv[1]); total=0
 for f in sys.argv[2:]:
     if not os.path.isfile(f):
@@ -492,7 +514,7 @@ t_ws_wait() {
   conv="$(t_state_get conversation_id)"
   # No conversation = stopped session or torn state — never wait unfiltered.
   if [ -z "$conv" ]; then sleep "${E2A_TETHER_POLL_INTERVAL:-20}"; return 0; fi
-  until="$(python3 -c 'import sys,datetime
+  until="$(t_python -c 'import sys,datetime
 print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1]))).isoformat())' "$secs")"
   t0=$SECONDS
   # Raise the transport deadline past this wait's own window, else the
@@ -517,14 +539,14 @@ print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=i
 
 t_seen_has() {  # <id> → 0 if already processed
   local f; f="$(t_state_path)"; [ -f "$f" ] || return 1
-  python3 -c 'import json,sys
+  t_python -c 'import json,sys
 try:sys.exit(0 if sys.argv[2] in (json.load(open(sys.argv[1])).get("seen") or []) else 1)
 except Exception:sys.exit(1)' "$f" "$1"
 }
 
 t_seen_add() {  # <id> → record as processed (cap at last 500); flocked + atomic
   local f; f="$(t_state_path)"; mkdir -p "$(dirname "$f")"
-  python3 -c 'import json,sys,os,fcntl
+  t_python -c 'import json,sys,os,fcntl
 f,i=sys.argv[1],sys.argv[2]
 lock=open(f+".lock","w"); fcntl.flock(lock,fcntl.LOCK_EX)
 d={}

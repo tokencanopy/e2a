@@ -10,7 +10,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${here}/../lib.sh"
 
 payload="$(cat)"
-message="$(printf '%s' "$payload" | python3 -c 'import json,sys
+message="$(printf '%s' "$payload" | t_python -c 'import json,sys
 try:print(json.load(sys.stdin).get("message","") or "")
 except Exception:print("")')"
 [ -n "$message" ] || message="The agent needs your attention."

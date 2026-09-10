@@ -327,7 +327,7 @@ question or instruction; reply \"stop\" to end early.
       exit 1
     fi
     rm -f "$errf"
-    scope="$(printf '%s' "$who" | python3 -c 'import json,sys
+    scope="$(printf '%s' "$who" | t_python -c 'import json,sys
 try:print(json.load(sys.stdin).get("scope",""))
 except Exception:print("")')"
     if [ "$scope" = "agent" ]; then
@@ -335,7 +335,7 @@ except Exception:print("")')"
       # AccountView.agent_address → agent_email as part of the agent-reference
       # unification. Reading the old name silently yielded an empty string, so
       # this line reported "already holds an agent-scoped key ()".
-      bound="$(printf '%s' "$who" | python3 -c 'import json,sys
+      bound="$(printf '%s' "$who" | t_python -c 'import json,sys
 try:print(json.load(sys.stdin).get("agentEmail",""))
 except Exception:print("")')"
       echo "tether setup: the CLI already holds an agent-scoped key (${bound}) — nothing to mint."
@@ -358,14 +358,14 @@ except Exception:print("")')"
     if [ -z "$inbox" ]; then
       sd="$(t_cli config get shared_domain 2>/dev/null)"
       [ -n "$sd" ] || { echo "tether setup: no shared domain on this deployment — pass --email you@yourdomain"; exit 1; }
-      inbox="tether-$(python3 -c 'import secrets;print(secrets.token_hex(3))')@${sd}"
+      inbox="tether-$(t_python -c 'import secrets;print(secrets.token_hex(3))')@${sd}"
     fi
     if ! t_cli agents get "$inbox" >/dev/null 2>&1; then
       echo "tether setup: creating ${inbox}…"
       t_cli agents create "$inbox" --name "tether" >/dev/null || { echo "tether setup: agent create failed (slug taken/invalid?)"; exit 1; }
     fi
-    kjson="$(t_cli keys create --agent "$inbox" --name "tether-$(python3 -c 'import secrets;print(secrets.token_hex(2))')" --json 2>/dev/null)"
-    agtkey="$(printf '%s' "$kjson" | python3 -c 'import json,sys
+    kjson="$(t_cli keys create --agent "$inbox" --name "tether-$(t_python -c 'import secrets;print(secrets.token_hex(2))')" --json 2>/dev/null)"
+    agtkey="$(printf '%s' "$kjson" | t_python -c 'import json,sys
 try:print(json.load(sys.stdin).get("key","") or "")
 except Exception:print("")')"
     [ -n "$agtkey" ] || { echo "tether setup: could not mint an agent-scoped key — aborting (NOT storing the broad account key)"; exit 1; }
@@ -424,6 +424,34 @@ except Exception:print("")')"
 
     fail=0
     ck() { if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1 (want [$3] got [$2])"; fail=1; fi; }
+
+    echo "# python interpreter resolution (Windows/Git Bash python3 shim):"
+    ( fakebin=/tmp/tether-selftest-fakepy; rm -rf "$fakebin"; mkdir -p "$fakebin"
+      real_py="$(command -v python3)"
+      # Mirrors the Microsoft Store App Installer redirector shim: on PATH
+      # (so `command -v python3` succeeds) but exits non-zero with no output
+      # on every invocation.
+      printf '#!/usr/bin/env bash\nexit 49\n' > "$fakebin/python3"; chmod +x "$fakebin/python3"
+      ln -s "$real_py" "$fakebin/python"
+      export PATH="$fakebin:$PATH"
+      T_PYTHON=""
+      ts="$(t_now_iso)"
+      case "$ts" in *T*:*:*) : ;; *)
+        echo "FAIL: t_now_iso silently failed when python3 is a broken shim but 'python' works (got [$ts])"; exit 1;; esac
+      echo "ok: t_now_iso falls back to a working 'python' when python3 is a non-functional shim" ) || fail=1
+    ( fakebin=/tmp/tether-selftest-fakepy2; rm -rf "$fakebin"; mkdir -p "$fakebin"
+      # Shadow BOTH names with the broken shim so no fallback resolves,
+      # isolating the "nothing works" branch from the "python still works"
+      # branch tested above.
+      printf '#!/usr/bin/env bash\nexit 49\n' > "$fakebin/python3"; chmod +x "$fakebin/python3"
+      cp "$fakebin/python3" "$fakebin/python"
+      PATH="$fakebin"
+      export PATH
+      T_PYTHON=""
+      diag="$(t_now_iso 2>&1 1>/dev/null)"
+      [ -n "$diag" ] || { echo "FAIL: no working Python 3 anywhere fails completely silently (no diagnostic)"; exit 1; }
+      echo "ok: no working Python 3 anywhere fails loud with a diagnostic, not silently" ) || fail=1
+    rm -rf /tmp/tether-selftest-fakepy /tmp/tether-selftest-fakepy2
 
     echo "# duration parser:"
     ck "2h parses"        "$([ -n "$(t_duration_to_expiry 2h)" ] && echo good)" "good"
@@ -543,7 +571,7 @@ except Exception:print("")')"
     t_attach_check "$af" || { echo "FAIL: attach check on a real file"; fail=1; }
     t_attach_check /nonexistent-tether-file 2>/dev/null; ck "missing file → exit 3" "$?" "3"
     big=/tmp/tether-selftest-big.bin
-    python3 -c 'f=open("/tmp/tether-selftest-big.bin","wb");f.seek(16*1024*1024-1);f.write(b"\0")'
+    t_python -c 'f=open("/tmp/tether-selftest-big.bin","wb");f.seek(16*1024*1024-1);f.write(b"\0")'
     t_attach_check "$big" 2>/dev/null; ck "16 MB → exit 4 (over cap)" "$?" "4"
     rm -f "$af" "$big"
 
