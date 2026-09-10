@@ -45,14 +45,14 @@ func baseTestDBURL() string {
 }
 
 // TestDBURL returns the database URL tests should use. Inside a `go test`
-// binary it derives a PER-PACKAGE database name (<base>_pkg_<package>) so
-// packages can run in parallel: the harness truncates tables between tests,
-// which made one shared database the documented cross-package flake source
-// and forced -p 1 on every DB-backed run. The suffix comes from the test
-// binary's name (os.Args[0] = <package>.test — unique per package in this
-// repo), so every URL consumer in one test binary — TestDB, hand-built
-// pools, the in-process contract server — lands on the same database.
-// Non-test binaries (cmd/e2a-contract-server) and E2A_TEST_DB_SHARED=1 get
+// binary it derives a PER-WORKSPACE, PER-BINARY database name
+// (<base>_ws<workspace>_pkg_<binary>) so packages can run in parallel and
+// separate checkouts cannot truncate each other's rows: the harness truncates
+// tables between tests, which made shared databases the documented
+// cross-package and cross-worktree flake source. The suffix comes from the
+// binary's name (os.Args[0] = <package>.test for go test), so every URL
+// consumer in one process — TestDB, hand-built pools, and the in-process
+// contract server — lands on the same database. E2A_TEST_DB_SHARED=1 gets
 // the base URL verbatim. Missing databases self-provision on first open
 // (see OpenPreparedTestDB). Concurrent sessions, agents, and worktrees are
 // isolated by the per-workspace component below, so handing each runner its
