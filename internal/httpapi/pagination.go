@@ -91,6 +91,7 @@ const (
 	cursorMessageLifecycle    CursorResource = "message_lifecycle"
 	cursorMessages            CursorResource = "messages"
 	cursorReviews             CursorResource = "reviews"
+	cursorScheduled           CursorResource = "scheduled"
 	cursorStarterTemplates    CursorResource = "starter_templates"
 	cursorTemplates           CursorResource = "templates"
 	cursorWebhookDeliveries   CursorResource = "webhook_deliveries"

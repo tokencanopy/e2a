@@ -6,6 +6,7 @@ import useSWR, { mutate } from "swr";
 import {
   findPendingMessage,
   listPendingMessages,
+  listScheduledMessages,
 } from "../../components/onboarding/api";
 import {
   invalidateAgents,
@@ -13,10 +14,12 @@ import {
   invalidateMessageDetail,
   invalidateMessageLifecycle,
   pendingMessagesKey,
+  scheduledMessagesKey,
 } from "../../../lib/swrKeys";
 import type { PendingMessageSummary } from "../../components/types";
 import { PageShell } from "../../components/loft/PageShell";
 import { PendingRow } from "./_components/PendingRow";
+import { ScheduledRow } from "./_components/ScheduledRow";
 
 // Pending review — a single-column "outbound holds" inbox. Each row is an
 // agent-drafted reply awaiting approval; clicking expands it read-first
@@ -93,6 +96,29 @@ function PendingContent() {
       : "Failed to load pending messages"
     : "";
 
+  // Scheduled-send queue (GET /v1/scheduled): outbound messages accepted and
+  // waiting for a future send_at. Shown as the page's second tab. Reuses the
+  // PendingMessageSummary shape so both tabs share one row vocabulary.
+  const { data: scheduled = [], isLoading: scheduledLoadingRaw } = useSWR<
+    PendingMessageSummary[]
+  >(scheduledMessagesKey, listScheduledMessages);
+  const scheduledLoading = scheduledLoadingRaw && scheduled.length === 0;
+
+  // Tab is URL-linkable (?tab=scheduled) so it survives refresh/deep-link. A
+  // deep link to a specific hold (?id=) always lands on the Holds tab.
+  const activeTab: "holds" | "scheduled" =
+    !routeSelectedId && searchParams.get("tab") === "scheduled"
+      ? "scheduled"
+      : "holds";
+  const selectTab = useCallback(
+    (tab: "holds" | "scheduled") => {
+      router.replace(tab === "scheduled" ? "/reviews?tab=scheduled" : "/reviews", {
+        scroll: false,
+      });
+    },
+    [router],
+  );
+
   // Accordion toggle: open a row (?id=) or collapse it if already open.
   const handleToggle = useCallback(
     (id: string) => {
@@ -124,12 +150,54 @@ function PendingContent() {
       eyebrow="Review · Message holds"
       title={<>Pending review</>}
       subtitle={
-        visibleMessages.length > 0
-          ? `${visibleMessages.length} held ${visibleMessages.length === 1 ? "message" : "messages"} awaiting review`
-          : "Inbound or outbound messages held by a review gate land here. Approve or reject each one."
+        activeTab === "scheduled"
+          ? scheduled.length > 0
+            ? `${scheduled.length} message${scheduled.length === 1 ? "" : "s"} queued to send later`
+            : "Messages scheduled to send at a future time appear here."
+          : visibleMessages.length > 0
+            ? `${visibleMessages.length} held ${visibleMessages.length === 1 ? "message" : "messages"} awaiting review`
+            : "Inbound or outbound messages held by a review gate land here. Approve or reject each one."
       }
       maxWidth={900}
     >
+      <div
+        role="tablist"
+        aria-label="Pending views"
+        className="flex items-center gap-1 mb-4"
+      >
+        {(
+          [
+            { key: "holds", label: "Held", count: visibleMessages.length },
+            { key: "scheduled", label: "Scheduled", count: scheduled.length },
+          ] as const
+        ).map((tab) => {
+          const active = activeTab === tab.key;
+          return (
+            <button
+              key={tab.key}
+              role="tab"
+              aria-selected={active}
+              data-testid={`tab-${tab.key}`}
+              onClick={() => selectTab(tab.key)}
+              className="text-[13px] font-medium px-3 py-1.5"
+              style={{
+                borderRadius: "var(--r-md)",
+                background: active ? "var(--bg-elev)" : "transparent",
+                color: active ? "var(--fg)" : "var(--fg-muted)",
+                border: active
+                  ? "1px solid var(--border)"
+                  : "1px solid transparent",
+              }}
+            >
+              {tab.label}
+              {tab.count > 0 && (
+                <span style={{ color: "var(--fg-subtle)" }}> {tab.count}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
       {error && (
         <div
           className="mb-4 p-3 text-[13px]"
@@ -144,52 +212,93 @@ function PendingContent() {
         </div>
       )}
 
-      {loading ? (
-        <div
-          className="text-[13px] py-12 text-center"
-          style={{ color: "var(--fg-muted)" }}
-        >
-          Loading…
-        </div>
-      ) : visibleMessages.length === 0 ? (
-        <div
-          data-testid="pending-empty"
-          className="p-12 text-center"
-          style={{
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border)",
-            borderRadius: "var(--r-lg)",
-          }}
-        >
-          <p className="text-[14px]" style={{ color: "var(--fg-muted)" }}>
-            Nothing waiting for review.
-          </p>
-          <p className="text-[12px] mt-1" style={{ color: "var(--fg-subtle)" }}>
-            Inbound or outbound messages held by an inbox&apos;s review gate
-            appear here. Configure holds in an inbox&apos;s Settings →
-            Protection.
-          </p>
-        </div>
-      ) : (
-        <div
-          style={{
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border)",
-            borderRadius: "var(--r-lg)",
-            overflow: "hidden",
-          }}
-        >
-          {visibleMessages.map((m) => (
-            <PendingRow
-              key={m.id}
-              summary={m}
-              expanded={m.id === selectedId}
-              onToggle={() => handleToggle(m.id)}
-              onResolved={handleResolved}
-            />
-          ))}
-        </div>
-      )}
+      {activeTab === "holds" &&
+        (loading ? (
+          <div
+            className="text-[13px] py-12 text-center"
+            style={{ color: "var(--fg-muted)" }}
+          >
+            Loading…
+          </div>
+        ) : visibleMessages.length === 0 ? (
+          <div
+            data-testid="pending-empty"
+            className="p-12 text-center"
+            style={{
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-lg)",
+            }}
+          >
+            <p className="text-[14px]" style={{ color: "var(--fg-muted)" }}>
+              Nothing waiting for review.
+            </p>
+            <p className="text-[12px] mt-1" style={{ color: "var(--fg-subtle)" }}>
+              Inbound or outbound messages held by an inbox&apos;s review gate
+              appear here. Configure holds in an inbox&apos;s Settings →
+              Protection.
+            </p>
+          </div>
+        ) : (
+          <div
+            style={{
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-lg)",
+              overflow: "hidden",
+            }}
+          >
+            {visibleMessages.map((m) => (
+              <PendingRow
+                key={m.id}
+                summary={m}
+                expanded={m.id === selectedId}
+                onToggle={() => handleToggle(m.id)}
+                onResolved={handleResolved}
+              />
+            ))}
+          </div>
+        ))}
+
+      {activeTab === "scheduled" &&
+        (scheduledLoading ? (
+          <div
+            className="text-[13px] py-12 text-center"
+            style={{ color: "var(--fg-muted)" }}
+          >
+            Loading…
+          </div>
+        ) : scheduled.length === 0 ? (
+          <div
+            data-testid="scheduled-empty"
+            className="p-12 text-center"
+            style={{
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-lg)",
+            }}
+          >
+            <p className="text-[14px]" style={{ color: "var(--fg-muted)" }}>
+              No scheduled messages.
+            </p>
+            <p className="text-[12px] mt-1" style={{ color: "var(--fg-subtle)" }}>
+              Messages sent with a future send time wait here until they go out.
+            </p>
+          </div>
+        ) : (
+          <div
+            style={{
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-lg)",
+              overflow: "hidden",
+            }}
+          >
+            {scheduled.map((m) => (
+              <ScheduledRow key={m.id} summary={m} />
+            ))}
+          </div>
+        ))}
     </PageShell>
   );
 }

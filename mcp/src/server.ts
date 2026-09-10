@@ -4,6 +4,7 @@ import { registerMessageTools } from "./tools/messages.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerDomainTools } from "./tools/domains.js";
 import { registerReviewTools } from "./tools/review.js";
+import { registerScheduledTools } from "./tools/scheduled.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { registerEventTools } from "./tools/events.js";
 import { registerTemplateTools } from "./tools/templates.js";
@@ -120,6 +121,7 @@ export function buildServer({
   registerAgentTools(server, client);
   registerDomainTools(server, client);
   registerReviewTools(server, client);
+  registerScheduledTools(server, client);
   registerWebhookTools(server, client);
   registerEventTools(server, client);
   registerTemplateTools(server, client);

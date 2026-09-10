@@ -7,6 +7,7 @@ apis/EventsApi.ts
 apis/MessagesApi.ts
 apis/MetaApi.ts
 apis/ReviewsApi.ts
+apis/ScheduledApi.ts
 apis/TemplatesApi.ts
 apis/WebhooksApi.ts
 apis/baseapi.ts
@@ -116,6 +117,7 @@ models/PageEventView.ts
 models/PageMessageLifecycleTransition.ts
 models/PageMessageSummaryView.ts
 models/PageReviewView.ts
+models/PageScheduledMessageView.ts
 models/PageStarterTemplateView.ts
 models/PageSuppressionView.ts
 models/PageTemplateSummaryView.ts
@@ -149,6 +151,7 @@ models/RetryAfterDetails.ts
 models/ReviewView.ts
 models/RotateSecretResponse.ts
 models/SPFResult.ts
+models/ScheduledMessageView.ts
 models/SendEmailRequest.ts
 models/SendResultView.ts
 models/SendingRampView.ts

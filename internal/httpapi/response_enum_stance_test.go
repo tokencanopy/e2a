@@ -35,6 +35,7 @@ var closedResponseEnumAllowlist = map[string]string{
 	"MessageSummaryView.direction":           "binary invariant of the model",
 	"MessageView.direction":                  "binary invariant of the model",
 	"ReviewView.direction":                   "binary invariant of the model",
+	"ScheduledMessageView.direction":         "model invariant: a scheduled send is always outbound",
 	"SPFResult.status":                       "normalized exhaustive RFC 7208 result classification",
 	"DKIMResult.status":                      "normalized exhaustive RFC 8601 DKIM result classification",
 	"DMARCResult.status":                     "normalized exhaustive RFC 7489/9989 DMARC result classification",

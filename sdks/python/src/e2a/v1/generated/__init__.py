@@ -27,6 +27,7 @@ __all__ = [
     "MessagesApi",
     "MetaApi",
     "ReviewsApi",
+    "ScheduledApi",
     "TemplatesApi",
     "WebhooksApi",
     "ApiResponse",
@@ -136,6 +137,7 @@ __all__ = [
     "PageMessageLifecycleTransition",
     "PageMessageSummaryView",
     "PageReviewView",
+    "PageScheduledMessageView",
     "PageStarterTemplateView",
     "PageSuppressionView",
     "PageTemplateSummaryView",
@@ -169,6 +171,7 @@ __all__ = [
     "ReviewView",
     "RotateSecretResponse",
     "SPFResult",
+    "ScheduledMessageView",
     "SendEmailRequest",
     "SendResultView",
     "SendingRampView",
@@ -217,6 +220,7 @@ from e2a.v1.generated.api.events_api import EventsApi as EventsApi
 from e2a.v1.generated.api.messages_api import MessagesApi as MessagesApi
 from e2a.v1.generated.api.meta_api import MetaApi as MetaApi
 from e2a.v1.generated.api.reviews_api import ReviewsApi as ReviewsApi
+from e2a.v1.generated.api.scheduled_api import ScheduledApi as ScheduledApi
 from e2a.v1.generated.api.templates_api import TemplatesApi as TemplatesApi
 from e2a.v1.generated.api.webhooks_api import WebhooksApi as WebhooksApi
 
@@ -330,6 +334,7 @@ from e2a.v1.generated.models.page_event_view import PageEventView as PageEventVi
 from e2a.v1.generated.models.page_message_lifecycle_transition import PageMessageLifecycleTransition as PageMessageLifecycleTransition
 from e2a.v1.generated.models.page_message_summary_view import PageMessageSummaryView as PageMessageSummaryView
 from e2a.v1.generated.models.page_review_view import PageReviewView as PageReviewView
+from e2a.v1.generated.models.page_scheduled_message_view import PageScheduledMessageView as PageScheduledMessageView
 from e2a.v1.generated.models.page_starter_template_view import PageStarterTemplateView as PageStarterTemplateView
 from e2a.v1.generated.models.page_suppression_view import PageSuppressionView as PageSuppressionView
 from e2a.v1.generated.models.page_template_summary_view import PageTemplateSummaryView as PageTemplateSummaryView
@@ -363,6 +368,7 @@ from e2a.v1.generated.models.retry_after_details import RetryAfterDetails as Ret
 from e2a.v1.generated.models.review_view import ReviewView as ReviewView
 from e2a.v1.generated.models.rotate_secret_response import RotateSecretResponse as RotateSecretResponse
 from e2a.v1.generated.models.spf_result import SPFResult as SPFResult
+from e2a.v1.generated.models.scheduled_message_view import ScheduledMessageView as ScheduledMessageView
 from e2a.v1.generated.models.send_email_request import SendEmailRequest as SendEmailRequest
 from e2a.v1.generated.models.send_result_view import SendResultView as SendResultView
 from e2a.v1.generated.models.sending_ramp_view import SendingRampView as SendingRampView
