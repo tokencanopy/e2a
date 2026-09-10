@@ -122,6 +122,15 @@ export const posts: Post[] = [
     author: "e2a",
     readingMinutes: 3,
   },
+  {
+    slug: "from-is-a-claim",
+    title: "Your agent can't tell who sent that email",
+    description:
+      "The From line is a claim, not a fact - and a support agent that trusts it will hand order data and refunds to anyone who types the right name. How e2a attaches SPF, DKIM, and aligned DMARC evidence to every inbound message (header_from, envelope_from, verified_domain) so agents route on proof instead of text.",
+    date: "2026-09-07",
+    author: "e2a",
+    readingMinutes: 3,
+  },
 ];
 
 export function getPost(slug: string): Post | undefined {
