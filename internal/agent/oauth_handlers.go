@@ -118,6 +118,17 @@ type OAuthError struct {
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description,omitempty"`
 	RequestID        string `json:"request_id,omitempty"`
+	Details          any    `json:"details,omitempty"`
+}
+
+// OAuthLimitExceededDetails carries the same quota facts as the REST agent
+// creation path, while keeping the top-level OAuthError RFC 6749-compatible.
+type OAuthLimitExceededDetails struct {
+	Resource   string `json:"resource"`
+	Limit      int    `json:"limit"`
+	Current    int    `json:"current"`
+	PlanCode   string `json:"plan_code,omitempty"`
+	UpgradeURL string `json:"upgrade_url,omitempty"`
 }
 
 // validRequestID bounds the ids this package will reflect into [oauth] log
@@ -156,6 +167,10 @@ func oauthRequestID(w http.ResponseWriter, r *http.Request) string {
 }
 
 func writeOAuthError(w http.ResponseWriter, r *http.Request, status int, code, desc string) {
+	writeOAuthErrorWithDetails(w, r, status, code, desc, nil)
+}
+
+func writeOAuthErrorWithDetails(w http.ResponseWriter, r *http.Request, status int, code, desc string, details any) {
 	// Resolve the id before WriteHeader: oauthRequestID may have to set
 	// X-Request-Id on the response (no-middleware case), which only works
 	// while headers are still mutable.
@@ -167,6 +182,7 @@ func writeOAuthError(w http.ResponseWriter, r *http.Request, status int, code, d
 		Error:            code,
 		ErrorDescription: desc,
 		RequestID:        reqID,
+		Details:          details,
 	})
 }
 
@@ -1229,12 +1245,15 @@ func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWri
 	// same order as the REST path's GetLimits call, so this connection
 	// releases before the tx below acquires its own.
 	maxAgents := 0
+	var planCode, upgradeURL string
 	if a.enforcer != nil {
 		lim, err := a.enforcer.Get(ctx, userID)
 		if err != nil {
 			return fmt.Errorf("get limits: %w", err)
 		}
 		maxAgents = lim.MaxAgents
+		planCode = lim.PlanCode
+		upgradeURL = lim.UpgradeURL
 	}
 
 	pool := a.oauthStorage.Pool()
@@ -1258,7 +1277,13 @@ func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWri
 	if _, err := a.store.CreateAgentWithLimitTx(txCtx, tx, agentEmail, a.sharedDomain, "", userID, maxAgents); err != nil {
 		var limErr *identity.AgentLimitExceededError
 		if errors.As(err, &limErr) {
-			http.Error(w, limErr.Error(), http.StatusPaymentRequired)
+			writeOAuthErrorWithDetails(w, r, http.StatusPaymentRequired, "limit_exceeded", limErr.Error(), OAuthLimitExceededDetails{
+				Resource:   "agents",
+				Limit:      limErr.Limit,
+				Current:    limErr.Current,
+				PlanCode:   planCode,
+				UpgradeURL: upgradeURL,
+			})
 			return nil
 		}
 		if isUniqueViolation(err) {

@@ -507,6 +507,26 @@ func TestHTTP_Consent_Allow_CreateNew_AtAgentCap(t *testing.T) {
 	if resp.StatusCode != http.StatusPaymentRequired {
 		t.Fatalf("status = %d, want 402 Payment Required", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var body struct {
+		Error   string `json:"error"`
+		Details struct {
+			Resource string `json:"resource"`
+			Limit    int    `json:"limit"`
+			Current  int    `json:"current"`
+		} `json:"details"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode 402 body: %v", err)
+	}
+	if body.Error != "limit_exceeded" {
+		t.Fatalf("error = %q, want limit_exceeded", body.Error)
+	}
+	if body.Details.Resource != "agents" || body.Details.Limit != 1 || body.Details.Current != 1 {
+		t.Fatalf("details = %+v, want agents limit=1 current=1", body.Details)
+	}
 
 	var agentCount int
 	if err := f.pool.QueryRow(ctx,
