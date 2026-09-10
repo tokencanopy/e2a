@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -415,6 +416,53 @@ func TestTestDBURLDerivesPerPackageDatabase(t *testing.T) {
 	}
 	if got := strings.TrimPrefix(u2.Path, "/"); strings.Contains(got, "_pkg_") {
 		t.Errorf("shared-mode dbname = %q, want no _pkg_ suffix", got)
+	}
+}
+
+// TestTestDBURLDerivesForNonTestBinaries proves the derivation also covers
+// cmd/e2a-contract-server (see #827): a symlink to this test binary under a
+// non-test name reproduces a real non-".test" argv[0].
+func TestTestDBURLDerivesForNonTestBinaries(t *testing.T) {
+	if os.Getenv(testDBErrorChildEnv) == t.Name() {
+		u, err := url.Parse(TestDBURL())
+		if err != nil {
+			t.Fatalf("parse TestDBURL: %v", err)
+		}
+		fmt.Printf("DBNAME=%s\n", strings.TrimPrefix(u.Path, "/"))
+		return
+	}
+
+	self, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatalf("resolve this test binary's path: %v", err)
+	}
+	renamed := filepath.Join(t.TempDir(), "e2a-contract-server")
+	if err := os.Symlink(self, renamed); err != nil {
+		t.Fatalf("symlink the test binary under a non-test name: %v", err)
+	}
+
+	cmd := exec.Command(renamed, "-test.run=^"+t.Name()+"$")
+	cmd.Env = testDBChildEnv(t.Name(), "postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child failed: %v\n%s", err, output)
+	}
+
+	var dbname string
+	for _, line := range strings.Split(string(output), "\n") {
+		if rest, ok := strings.CutPrefix(line, "DBNAME="); ok {
+			dbname = rest
+			break
+		}
+	}
+	if dbname == "" {
+		t.Fatalf("child did not report a dbname:\n%s", output)
+	}
+	if !strings.Contains(dbname, "_ws") {
+		t.Errorf("dbname = %q from a non-test binary, want a _ws<hash> workspace component", dbname)
+	}
+	if !strings.HasSuffix(dbname, "_pkg_e2a_contract_server") {
+		t.Errorf("dbname = %q, want the _pkg_e2a_contract_server suffix", dbname)
 	}
 }
 
