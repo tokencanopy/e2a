@@ -1190,9 +1190,20 @@ func TestOverCapScenarioShape(t *testing.T) {
 		}
 		return s.Expect.BodyMatch
 	}
+	wantPaymentRequired := func(id string) {
+		t.Helper()
+		s, ok := steps[id]
+		if !ok || s.Expect == nil {
+			t.Fatalf("step %s is missing or has no expect block", id)
+		}
+		if s.Expect.Status != http.StatusPaymentRequired {
+			t.Errorf("step %s status = %d, want %d", id, s.Expect.Status, http.StatusPaymentRequired)
+		}
+	}
 
 	// The whole point: current strictly greater than limit, which only a
 	// server reading the real resource count can produce.
+	wantPaymentRequired("domain_create_reports_true_overcap_current")
 	domainRefusal := matched("domain_create_reports_true_overcap_current")
 	for path, want := range map[string]interface{}{
 		"error.details.resource": "domains",
@@ -1207,6 +1218,7 @@ func TestOverCapScenarioShape(t *testing.T) {
 		t.Fatalf("domain_create_reports_true_overcap_current pins current == limit, which cannot distinguish a real count from a hardcoded one")
 	}
 
+	wantPaymentRequired("agent_create_reports_true_overcap_current")
 	agentRefusal := matched("agent_create_reports_true_overcap_current")
 	for path, want := range map[string]interface{}{
 		"error.details.resource": "agents",
