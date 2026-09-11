@@ -150,7 +150,24 @@ type Consumer struct {
 	store              Store
 	fire               Firer
 	finalizeAcceptance ProviderAcceptanceFinalizer
+	// feedback is the deletion-resistant accounting seam (B8). It runs
+	// before any live-message lookup, in its own transaction, so provider
+	// evidence for a purged message still lands; nil means no accounting
+	// (self-host with the policy module absent).
+	feedback FeedbackProcessor
 }
+
+// WithFeedbackProcessor installs the deletion-resistant accounting seam.
+func (c *Consumer) WithFeedbackProcessor(p FeedbackProcessor) *Consumer {
+	c.feedback = p
+	return c
+}
+
+// FeedbackProcessorWired reports whether the accounting seam is installed.
+// Without it every notification is still acked and the lifecycle half still
+// runs, so a missing processor is invisible at runtime — the detector just
+// never sees anything. The composition root's test asserts this.
+func (c *Consumer) FeedbackProcessorWired() bool { return c.feedback != nil }
 
 // NewConsumer builds the consumer. fire may be nil (no events).
 func NewConsumer(store Store, fire Firer, finalizers ...ProviderAcceptanceFinalizer) *Consumer {
@@ -175,6 +192,21 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 	if ev.OccurredAt.IsZero() {
 		return fmt.Errorf("provider event timestamp is required")
 	}
+	// Deletion-resistant accounting first, and on its own: it must not
+	// depend on a surviving message, agent, or user row, and a failure here
+	// must make the provider retry rather than let the lifecycle path below
+	// consume the notification. Its event-id dedupe makes that retry a zero
+	// delta, and the lifecycle path has its own dedupe keys, so the two
+	// halves committing independently is safe in both orders.
+	var accounted FeedbackResult
+	if c.feedback != nil {
+		var err error
+		accounted, err = c.feedback.ProcessProviderFeedback(ctx, ev.FeedbackFor())
+		if err != nil {
+			return fmt.Errorf("provider feedback accounting: %w", err)
+		}
+	}
+
 	m, found, err := c.store.CorrelateBySESMessageID(ctx, ev.SESMessageID)
 	if err != nil {
 		return err
@@ -192,6 +224,44 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 		}
 	}
 	if !found {
+		// No live message can own a suppression for this event, but the
+		// retained provenance may still prove one — this is the purged /
+		// deleted-message case B8 exists for. The account-wide repair is
+		// applied here, outside any message transaction, and announces
+		// nothing: there is no message for an event to reference.
+		if c.feedback != nil && accounted.AccountRef != "" && len(accounted.RepairNeeded) > 0 {
+			if err := c.feedback.RepairSuppressions(ctx, accounted.AccountRef, accounted.RepairNeeded); err != nil {
+				return fmt.Errorf("suppression repair: %w", err)
+			}
+			// Announce it. A row appearing in the customer's suppression
+			// list with no event is the same state/notification desync the
+			// message-backed path deliberately avoids; the payload's
+			// message id is documented as present only when still known,
+			// which is exactly this case. Keyed on the provider event, so a
+			// redelivery dedupes at the outbox and a retry after a failure
+			// here still ends with one event.
+			if c.fire != nil {
+				if err := c.store.WithTx(ctx, func(tx pgx.Tx) error {
+					for _, rep := range accounted.RepairNeeded {
+						if err := c.fire(ctx, tx, FiredEvent{
+							UserID: accounted.AccountRef,
+							Type:   EventSuppressionAdded,
+							Data: eventpayload.DomainSuppressionAddedData{
+								Address: rep.Address, Source: rep.Source, Reason: rep.Reason,
+							},
+							DedupKey:   "provider-feedback:" + ev.ProviderEventID + ":" + rep.Address + ":" + EventSuppressionAdded,
+							OccurredAt: ev.OccurredAt,
+						}); err != nil {
+							return err
+						}
+					}
+					return nil
+				}); err != nil {
+					return fmt.Errorf("announce repaired suppression: %w", err)
+				}
+			}
+			log.Printf("[delivery] SES %s repaired %d suppression(s) for a message that no longer exists", ev.Kind, len(accounted.RepairNeeded))
+		}
 		if len(ev.Recipients) == 0 {
 			return nil
 		}
@@ -268,6 +338,13 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 					source = suppressionSourceCompl
 					suppressionReason = messagelifecycle.ReasonSuppressionComplaintApplied
 				}
+				// The live message owns the customer-visible row: it is the
+				// only writer that knows the source message id and the
+				// diagnostic the suppression API returns, and its insert
+				// must share this transaction with the event that
+				// announces it. The accounting seam deliberately does not
+				// write it here (see the !found branch below, which is the
+				// only case where no message can own the repair).
 				suppressionID, added, err := c.store.AddSuppressionTx(ctx, tx, m.UserID, r.Address, r.Detail, source, m.MessageID)
 				if err != nil {
 					return err

@@ -633,3 +633,53 @@ func containsBytes(haystack, needle []byte) bool {
 
 // silence unused-import lint when the time package isn't otherwise used.
 var _ = time.Time{}
+
+// TestDeleteUserDataStampsFeedbackRetention: the deletion-resistant feedback
+// provenance for the account has no FK and no expiry while the account
+// lives; deleting the account stamps the post-deletion horizon on the
+// correlations and their events instead of removing them.
+func TestDeleteUserDataStampsFeedbackRetention(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user := seedUserData(t, store, ctx, "feedbackret")
+	store.SetFeedbackRetention(10 * 24 * time.Hour)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sending_feedback_correlations (correlation_id, operation_id, submission_attempt, source_account_ref, policy_subject_ref, purpose, shared_reputation, tenant_mode)
+		VALUES ('cor_ret_1', 'msg_ret_1', 1, $1, $1, 'customer_message', true, 'none'),
+		       ('cor_ret_other', 'msg_ret_2', 1, 'usr_someone_else', 'usr_someone_else', 'customer_message', true, 'none')`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sending_feedback_events (provider_event_id, correlation_id, provider_occurred_at)
+		VALUES ('evt_ret_1', 'cor_ret_1', now()), ('evt_ret_other', 'cor_ret_other', now())`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.DeleteUserData(ctx, user.ID); err != nil {
+		t.Fatalf("DeleteUserData: %v", err)
+	}
+
+	var corrExpiry, evtExpiry *time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM sending_feedback_correlations WHERE correlation_id = 'cor_ret_1'`).Scan(&corrExpiry); err != nil {
+		t.Fatalf("correlation must survive account deletion: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM sending_feedback_events WHERE provider_event_id = 'evt_ret_1'`).Scan(&evtExpiry); err != nil {
+		t.Fatalf("event must survive account deletion: %v", err)
+	}
+	lo, hi := time.Now().Add(9*24*time.Hour), time.Now().Add(11*24*time.Hour)
+	if corrExpiry == nil || corrExpiry.Before(lo) || corrExpiry.After(hi) {
+		t.Fatalf("correlation expiry = %v, want ~10 days out", corrExpiry)
+	}
+	if evtExpiry == nil || !evtExpiry.Equal(*corrExpiry) {
+		t.Fatalf("event expiry = %v, want the correlation's %v", evtExpiry, corrExpiry)
+	}
+	var otherExpiry *time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM sending_feedback_correlations WHERE correlation_id = 'cor_ret_other'`).Scan(&otherExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if otherExpiry != nil {
+		t.Fatalf("another account's provenance was stamped: %v", otherExpiry)
+	}
+}
