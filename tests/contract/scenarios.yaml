@@ -995,7 +995,7 @@ scenarios:
       immediately rather than waiting for the future instant.
     setup:
       - register_agent:
-          email: scheduled-contract-{scenario_token}@agents.e2a.dev
+          email: scheduled-contract-{scenario_token}@agents.localhost
     steps:
       - id: schedule_send
         action: request
@@ -1084,7 +1084,7 @@ scenarios:
       through with delivery_status=accepted.
     setup:
       - register_agent:
-          email: sched-hold-{scenario_token}@agents.e2a.dev
+          email: sched-hold-{scenario_token}@agents.localhost
     steps:
       - id: enable_outbound_review
         # Empty-allowlist outbound review gate → every recipient is held for review.
@@ -1176,7 +1176,7 @@ scenarios:
       API alone cannot seed one; runners without store access skip this).
     setup:
       - register_agent:
-          email: scheduled-reply-{scenario_token}@agents.e2a.dev
+          email: scheduled-reply-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net
@@ -1263,7 +1263,7 @@ scenarios:
       runners without store access skip this).
     setup:
       - register_agent:
-          email: scheduled-forward-{scenario_token}@agents.e2a.dev
+          email: scheduled-forward-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net
@@ -1353,7 +1353,7 @@ scenarios:
       scheduled_reply_fields; runners without store access skip this).
     setup:
       - register_agent:
-          email: scheduled-validation-{scenario_token}@agents.e2a.dev
+          email: scheduled-validation-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net
@@ -1453,7 +1453,7 @@ scenarios:
       runners alike instead of being store-seeded and skipped in TS/Python.
     setup:
       - register_agent:
-          email: bot-reply-to-{scenario_token}@agents.e2a.dev
+          email: bot-reply-to-{scenario_token}@agents.localhost
     steps:
       - id: send_reply_to_array
         action: request
@@ -2279,11 +2279,11 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-{scenario_token}@agents.e2a.dev
+          email: capped-bot-{scenario_token}@agents.localhost
         expect:
           status: 201
           body_match:
-            email: capped-bot-{scenario_token}@agents.e2a.dev
+            email: capped-bot-{scenario_token}@agents.localhost
 
       - id: second_agent_fits_the_cap
         action: request
@@ -2291,7 +2291,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-2-{scenario_token}@agents.e2a.dev
+          email: capped-bot-2-{scenario_token}@agents.localhost
         expect:
           status: 201
 
@@ -2301,7 +2301,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-3-{scenario_token}@agents.e2a.dev
+          email: capped-bot-3-{scenario_token}@agents.localhost
         expect:
           status: 402
           body_match:
@@ -2317,7 +2317,7 @@ scenarios:
       - id: agent_slot_frees_on_delete
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
         expect:
           status: 200
@@ -2330,7 +2330,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {capped_api_key}"
         body:
-          email: capped-bot-3-{scenario_token}@agents.e2a.dev
+          email: capped-bot-3-{scenario_token}@agents.localhost
         expect:
           status: 201
 
@@ -2349,19 +2349,19 @@ scenarios:
       - id: delete_agent_1
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
 
       - id: delete_agent_2
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-2-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-2-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
 
       - id: delete_agent_3
         action: request
         method: DELETE
-        path: /v1/agents/capped-bot-3-{scenario_token}@agents.e2a.dev?confirm=DELETE&permanent=true
+        path: /v1/agents/capped-bot-3-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
         auth_override: "Bearer {capped_api_key}"
 
       - id: delete_domain
@@ -2407,7 +2407,7 @@ scenarios:
         path: /v1/agents
         auth_override: "Bearer {overcap_api_key}"
         body:
-          email: overcap-blocked-bot-{scenario_token}@agents.e2a.dev
+          email: overcap-blocked-bot-{scenario_token}@agents.localhost
         expect:
           status: 402
           body_match:
@@ -2878,7 +2878,7 @@ scenarios:
       scenarios).
     setup:
       - register_agent:
-          email: quote-history-{scenario_token}@agents.e2a.dev
+          email: quote-history-{scenario_token}@agents.localhost
       - inject_message:
           agent_email: "{agent_email}"
           from: alice@example.net

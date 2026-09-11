@@ -50,9 +50,9 @@ func TestCreateAgentConcurrentRequestsRespectMaxAgentsE2E(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			// A shared-domain address (testutil's default SharedDomain,
-			// agents.e2a.dev) needs no domain ownership/verification, so the
+			// agents.localhost) needs no domain ownership/verification, so the
 			// only thing under test is the max_agents race.
-			body := []byte(fmt.Sprintf(`{"email":"race-agent-%d@agents.e2a.dev","name":"race agent"}`, i))
+			body := []byte(fmt.Sprintf(`{"email":"race-agent-%d@agents.localhost","name":"race agent"}`, i))
 			req, err := http.NewRequest("POST", ts.HTTPServer.URL+"/v1/agents", bytes.NewReader(body))
 			if err != nil {
 				t.Errorf("build request %d: %v", i, err)

@@ -36,7 +36,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   const client = new E2AClient({ apiKey: apiKey!, baseUrl: baseUrl! });
 
   it("messages.send with wait: \"sent\" returns the terminal loopback result", async () => {
-    const email = `${slug("sdkc-wait")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-wait")}@agents.localhost`;
     await client.agents.create({ email });
     try {
       const res = await client.messages.send(
@@ -53,7 +53,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   });
 
   it("messages.getMetrics keeps rates null without outward traffic and numeric with it", async () => {
-    const email = `${slug("sdkc-metrics")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-metrics")}@agents.localhost`;
     await client.agents.create({ email });
     try {
       // A brand-new agent has no traffic. Every rate must come back null, not
@@ -114,7 +114,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   });
 
   it("account.metrics rolls up every agent and can break down by agent", async () => {
-    const email = `${slug("sdkc-acct")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-acct")}@agents.localhost`;
     await client.agents.create({ email });
     try {
       await client.messages.send(
@@ -144,7 +144,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
   });
 
   it("agents.delete with permanent: true removes the agent immediately", async () => {
-    const email = `${slug("sdkc-del")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-del")}@agents.localhost`;
     await client.agents.create({ email });
 
     const receipt = await client.agents.delete(email, { permanent: true });
@@ -179,7 +179,7 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     // on update the stored validator never matches "undefined", and a
     // conditional request never creates a first enrolment. Only a live server
     // can prove the header truly stays off the wire end to end.
-    const email = `${slug("sdkc-ifm")}@agents.e2a.dev`;
+    const email = `${slug("sdkc-ifm")}@agents.localhost`;
     const address = `${slug("sdkc-ifm-c")}@fund.vc`;
     await client.agents.create({ email });
     try {
