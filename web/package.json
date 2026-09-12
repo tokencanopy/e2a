@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@e2a/ui": "file:../design-system",
-    "dompurify": "^3.4.14",
+    "dompurify": "^3.4.15",
     "next": "^16.3.4",
     "react": "19.2.7",
     "react-dom": "19.2.7",
