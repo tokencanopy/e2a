@@ -11,6 +11,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 const (
@@ -27,6 +30,19 @@ const (
 	// defaultDetectorTimeout): 2 retries with a 500ms/1s backoff leaves ~3.5s of
 	// budget for the up-to-3 HTTP calls themselves against a flash-lite model.
 	geminiDefaultMaxRetries = 2
+
+	// Auth modes for the Gemini REST call. api_key is the AI Studio consumer
+	// surface (x-goog-api-key header). adc authenticates with Application Default
+	// Credentials as an OAuth bearer token — required by project-scoped Vertex AI
+	// endpoints, which (unlike AI Studio) can be covered by a Google Cloud BAA/DPA
+	// for deployments that must not disclose message content to a non-contracted
+	// processor. See docs/deployment.md for the Vertex base-URL shape.
+	geminiAuthAPIKey = "api_key"
+	geminiAuthADC    = "adc"
+
+	// geminiADCScope is the OAuth scope requested for adc-mode token sources;
+	// cloud-platform is the scope Vertex AI accepts.
+	geminiADCScope = "https://www.googleapis.com/auth/cloud-platform"
 )
 
 // geminiSystemPrompt is the combined injection+phishing classifier prompt used in
@@ -54,8 +70,25 @@ type GeminiConfig struct {
 	Model string
 	// APIKey is the Google AI Studio key. When empty, NewGeminiDetector falls back
 	// to the GEMINI_API_KEY and GOOGLE_API_KEY environment variables. Never log or
-	// include this value in error messages.
+	// include this value in error messages. Ignored in adc auth mode.
 	APIKey string
+	// BaseURL overrides the Gemini REST base URL. When empty, NewGeminiDetector
+	// falls back to the GEMINI_BASE_URL environment variable, then to the AI Studio
+	// default. The request path appended is always /models/{model}:generateContent,
+	// which fits both the AI Studio base and a project-scoped Vertex AI base ending
+	// in .../publishers/google.
+	BaseURL string
+	// Auth selects how the request is authenticated: "api_key" (default; AI Studio
+	// x-goog-api-key header) or "adc" (Application Default Credentials bearer
+	// token, for Vertex AI endpoints under a Google Cloud BAA/DPA). When empty,
+	// NewGeminiDetector falls back to the GEMINI_AUTH environment variable, then
+	// to api_key. Any other value is a construction error — auth mode misconfig
+	// must fail loudly, not silently fall back to the non-contracted endpoint.
+	Auth string
+	// TokenSource supplies bearer tokens in adc auth mode; tests inject a static
+	// source here. When nil in adc mode, NewGeminiDetector resolves Application
+	// Default Credentials from the environment. Unused in api_key mode.
+	TokenSource oauth2.TokenSource
 	// MaxRetries is the number of retries on transient API errors (429, 5xx).
 	// Default geminiDefaultMaxRetries.
 	MaxRetries int
@@ -72,26 +105,56 @@ type GeminiConfig struct {
 // individually as Categories for audit and per-threat-type reasoning. Safe for
 // concurrent use.
 //
-// The API key is sent only in the x-goog-api-key request header and is never written
-// to logs or included in error messages.
+// Credentials are sent only in request headers (x-goog-api-key in api_key mode,
+// Authorization: Bearer in adc mode) and are never written to logs or included in
+// error messages.
 type GeminiDetector struct {
 	model      string
 	apiKey     string
 	maxRetries int
 	client     *http.Client
-	// apiBase overrides the Gemini REST base URL. Tests set this to a local
-	// httptest.Server URL; production leaves it empty (uses geminiAPIBase).
+	// apiBase overrides the Gemini REST base URL (GeminiConfig.BaseURL /
+	// GEMINI_BASE_URL; tests also set it directly to a local httptest.Server URL).
+	// Empty means the AI Studio default, geminiAPIBase.
 	apiBase string
+	// authMode is geminiAuthAPIKey or geminiAuthADC, validated at construction.
+	authMode string
+	// tokenSource mints bearer tokens in adc mode; nil in api_key mode.
+	tokenSource oauth2.TokenSource
 }
 
-// NewGeminiDetector constructs a GeminiDetector. Returns a non-nil error when no
-// API key is available (cfg.APIKey empty and neither GEMINI_API_KEY nor
-// GOOGLE_API_KEY is set in the environment).
+// NewGeminiDetector constructs a GeminiDetector. In api_key mode (the default) it
+// returns a non-nil error when no API key is available (cfg.APIKey empty and
+// neither GEMINI_API_KEY nor GOOGLE_API_KEY is set in the environment). In adc
+// mode no API key is involved; it returns a non-nil error when Application
+// Default Credentials cannot be resolved (and cfg.TokenSource is nil), so a
+// deployment that *intends* to use the BAA-coverable Vertex path never silently
+// runs without it.
 func NewGeminiDetector(cfg GeminiConfig) (*GeminiDetector, error) {
-	key := firstNonEmpty(cfg.APIKey, os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY"))
-	if key == "" {
-		return nil, fmt.Errorf("piguard/gemini: no API key (set GEMINI_API_KEY or GOOGLE_API_KEY)")
+	authMode := firstNonEmpty(cfg.Auth, os.Getenv("GEMINI_AUTH"), geminiAuthAPIKey)
+	if authMode != geminiAuthAPIKey && authMode != geminiAuthADC {
+		return nil, fmt.Errorf("piguard/gemini: unknown auth mode %q (set GEMINI_AUTH to %q or %q)", authMode, geminiAuthAPIKey, geminiAuthADC)
 	}
+
+	var key string
+	var ts oauth2.TokenSource
+	switch authMode {
+	case geminiAuthAPIKey:
+		key = firstNonEmpty(cfg.APIKey, os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY"))
+		if key == "" {
+			return nil, fmt.Errorf("piguard/gemini: no API key (set GEMINI_API_KEY or GOOGLE_API_KEY)")
+		}
+	case geminiAuthADC:
+		ts = cfg.TokenSource
+		if ts == nil {
+			src, err := google.DefaultTokenSource(context.Background(), geminiADCScope)
+			if err != nil {
+				return nil, fmt.Errorf("piguard/gemini: GEMINI_AUTH=adc but Application Default Credentials unavailable: %w", err)
+			}
+			ts = src
+		}
+	}
+
 	model := firstNonEmpty(cfg.Model, os.Getenv("GEMINI_EVAL_MODEL"), geminiDefaultModel)
 	maxRetries := cfg.MaxRetries
 	if maxRetries <= 0 {
@@ -101,7 +164,15 @@ func NewGeminiDetector(cfg GeminiConfig) (*GeminiDetector, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &GeminiDetector{model: model, apiKey: key, maxRetries: maxRetries, client: hc}, nil
+	return &GeminiDetector{
+		model:       model,
+		apiKey:      key,
+		maxRetries:  maxRetries,
+		client:      hc,
+		apiBase:     firstNonEmpty(cfg.BaseURL, os.Getenv("GEMINI_BASE_URL")),
+		authMode:    authMode,
+		tokenSource: ts,
+	}, nil
 }
 
 // firstNonEmpty returns the first non-empty string, or "" if all are empty.
@@ -296,7 +367,20 @@ func (g *GeminiDetector) callOnce(ctx context.Context, emailText string) (string
 		return "", err, false
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-goog-api-key", g.apiKey)
+	switch g.authMode {
+	case geminiAuthADC:
+		// Bearer-token fetch failures are treated as transient: DefaultTokenSource
+		// refreshes through the metadata server / token endpoint, which can hiccup
+		// exactly like the API itself, and the retry budget already fits the
+		// engine's per-detector timeout. The token never appears in logs or errors.
+		tok, tokErr := g.tokenSource.Token()
+		if tokErr != nil {
+			return "", &geminiTransientErr{"bearer token fetch failed"}, false
+		}
+		tok.SetAuthHeader(httpReq)
+	default:
+		httpReq.Header.Set("x-goog-api-key", g.apiKey)
+	}
 
 	resp, err := g.client.Do(httpReq)
 	if err != nil {

@@ -3,11 +3,14 @@ package piguard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"golang.org/x/oauth2"
 )
 
 // newGeminiTestDetector builds a GeminiDetector that points at srv instead of the
@@ -385,4 +388,158 @@ func geminiWriteTextResponse(w http.ResponseWriter, text string) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// — auth-mode and endpoint configuration (BAA-coverable Vertex AI path) —
+
+// geminiBenignRequest is a minimal Request for tests that only care about the
+// transport (headers, URL, auth), not the verdict mapping.
+func geminiBenignRequest() Request {
+	return Request{
+		Direction: DirectionInput,
+		Sender:    "sender@example.com",
+		Segments: []Segment{
+			{Type: SegmentSubject, Content: "Hello"},
+			{Type: SegmentTextPlain, Content: "Just a normal message."},
+		},
+	}
+}
+
+func TestNewGeminiDetector_UnknownAuthMode(t *testing.T) {
+	t.Setenv("GEMINI_AUTH", "bearer-ish")
+	t.Setenv("GEMINI_API_KEY", "k")
+	if _, err := NewGeminiDetector(GeminiConfig{}); err == nil {
+		t.Fatal("expected error for unknown GEMINI_AUTH value, got nil — misconfig must not silently fall back to api_key")
+	}
+}
+
+// TestGeminiDetector_APIKeyHeaderOnly pins the default transport: the AI Studio
+// key travels in x-goog-api-key and no Authorization header is ever attached.
+func TestGeminiDetector_APIKeyHeaderOnly(t *testing.T) {
+	var gotAPIKey, gotAuthz string
+	srv := httptest.NewServer(func() http.HandlerFunc {
+		inner := geminiFixedHandler(geminiVerdict{})
+		return func(w http.ResponseWriter, r *http.Request) {
+			gotAPIKey = r.Header.Get("x-goog-api-key")
+			gotAuthz = r.Header.Get("Authorization")
+			inner(w, r)
+		}
+	}())
+	defer srv.Close()
+
+	d := newGeminiTestDetector(t, srv, 0)
+	if _, err := d.Inspect(context.Background(), geminiBenignRequest()); err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if gotAPIKey != "test-key" {
+		t.Errorf("x-goog-api-key = %q, want %q", gotAPIKey, "test-key")
+	}
+	if gotAuthz != "" {
+		t.Errorf("Authorization header = %q, want empty in api_key mode", gotAuthz)
+	}
+}
+
+// TestGeminiDetector_ADCBearerAuth covers the adc auth mode used for Vertex AI
+// endpoints: no API key is required, the bearer token from the TokenSource is
+// attached as Authorization, and x-goog-api-key is NOT sent.
+func TestGeminiDetector_ADCBearerAuth(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+
+	var gotAPIKey, gotAuthz string
+	srv := httptest.NewServer(func() http.HandlerFunc {
+		inner := geminiFixedHandler(geminiVerdict{})
+		return func(w http.ResponseWriter, r *http.Request) {
+			gotAPIKey = r.Header.Get("x-goog-api-key")
+			gotAuthz = r.Header.Get("Authorization")
+			inner(w, r)
+		}
+	}())
+	defer srv.Close()
+
+	d, err := NewGeminiDetector(GeminiConfig{
+		Model:       "gemini-test",
+		Auth:        "adc",
+		TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-bearer-token"}),
+		HTTPClient:  &http.Client{Timeout: 0},
+	})
+	if err != nil {
+		t.Fatalf("NewGeminiDetector (adc, no API key): %v", err)
+	}
+	d.apiBase = srv.URL
+
+	if _, err := d.Inspect(context.Background(), geminiBenignRequest()); err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if gotAuthz != "Bearer test-bearer-token" {
+		t.Errorf("Authorization = %q, want %q", gotAuthz, "Bearer test-bearer-token")
+	}
+	if gotAPIKey != "" {
+		t.Errorf("x-goog-api-key = %q, want empty in adc mode", gotAPIKey)
+	}
+}
+
+// TestNewGeminiDetector_BaseURLEnv verifies GEMINI_BASE_URL routes the live call
+// without touching the private test hook — this is the supported operator path
+// for pointing the detector at a Vertex AI (BAA-covered) base.
+func TestNewGeminiDetector_BaseURLEnv(t *testing.T) {
+	srv := httptest.NewServer(geminiFixedHandler(geminiVerdict{}))
+	defer srv.Close()
+	t.Setenv("GEMINI_BASE_URL", srv.URL)
+
+	d, err := NewGeminiDetector(GeminiConfig{
+		APIKey:     "test-key",
+		Model:      "gemini-test",
+		HTTPClient: &http.Client{Timeout: 0},
+	})
+	if err != nil {
+		t.Fatalf("NewGeminiDetector: %v", err)
+	}
+	res, err := d.Inspect(context.Background(), geminiBenignRequest())
+	if err != nil {
+		t.Fatalf("Inspect via GEMINI_BASE_URL: %v", err)
+	}
+	if res.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK", res.Status)
+	}
+}
+
+type geminiFailingTokenSource struct{}
+
+func (geminiFailingTokenSource) Token() (*oauth2.Token, error) {
+	return nil, errStaticTokenFetch
+}
+
+var errStaticTokenFetch = errors.New("simulated token endpoint outage")
+
+// TestGeminiDetector_ADCTokenFetchFailureIsTransient pins the classification of
+// bearer-token fetch failures as transient (retried, then StatusError → the
+// engine excludes the detector and heuristics carries), and that the underlying
+// token error text is not propagated into the detector error.
+func TestGeminiDetector_ADCTokenFetchFailureIsTransient(t *testing.T) {
+	d, err := NewGeminiDetector(GeminiConfig{
+		Model:       "gemini-test",
+		Auth:        "adc",
+		TokenSource: geminiFailingTokenSource{},
+		HTTPClient:  &http.Client{Timeout: 0},
+		MaxRetries:  1,
+	})
+	if err != nil {
+		t.Fatalf("NewGeminiDetector: %v", err)
+	}
+	d.apiBase = "http://127.0.0.1:0" // must never be reached
+
+	res, inspectErr := d.Inspect(context.Background(), geminiBenignRequest())
+	if inspectErr == nil {
+		t.Fatal("expected error when token fetch fails")
+	}
+	if !geminiIsTransient(inspectErr) {
+		t.Errorf("token fetch failure classified as terminal, want transient: %v", inspectErr)
+	}
+	if strings.Contains(inspectErr.Error(), errStaticTokenFetch.Error()) {
+		t.Errorf("detector error leaks token-source error text: %v", inspectErr)
+	}
+	if res.Status != StatusError {
+		t.Errorf("Status = %v, want StatusError", res.Status)
+	}
 }
