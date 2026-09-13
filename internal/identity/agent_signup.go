@@ -91,6 +91,13 @@ func normalizedSignupName(name string) (string, string) {
 
 var signupSlugInvalid = regexp.MustCompile(`[^a-z0-9]+`)
 
+var reservedSignupSlugs = map[string]bool{
+	"admin": true, "postmaster": true, "abuse": true, "noreply": true,
+	"no-reply": true, "mailer-daemon": true, "info": true, "help": true,
+	"demo": true, "test": true, "www": true, "mail": true, "agent": true,
+	"api": true, "system": true, "root": true,
+}
+
 func signupSlug(displayName, fallback string) string {
 	slug := strings.Trim(signupSlugInvalid.ReplaceAllString(strings.ToLower(displayName), "-"), "-")
 	if len(slug) > 32 {
@@ -98,6 +105,12 @@ func signupSlug(displayName, fallback string) string {
 	}
 	if len(slug) < 2 {
 		slug = "agent-" + fallback[:6]
+	}
+	// Shared-domain operational and platform mailboxes must never be claimable
+	// through an anonymous display name. Prefixing keeps the requested name
+	// recognizable while matching the normal create-agent reserved namespace.
+	if reservedSignupSlugs[slug] {
+		slug = "agent-" + slug
 	}
 	return slug
 }

@@ -6,9 +6,14 @@ export * from '../models/AccountView.js';
 export * from '../models/AgentIdentity.js';
 export * from '../models/AgentMetricsGroupView.js';
 export * from '../models/AgentMetricsView.js';
+export * from '../models/AgentSignupCreateResponse.js';
+export * from '../models/AgentSignupRequest.js';
+export * from '../models/AgentSignupRestrictionsView.js';
+export * from '../models/AgentSignupView.js';
 export * from '../models/AgentSuppressionAddedData.js';
 export * from '../models/AgentSuppressionView.js';
 export * from '../models/AgentView.js';
+export * from '../models/ApproveAgentSignupInputBody.js';
 export * from '../models/ApproveRequest.js';
 export * from '../models/Attachment.js';
 export * from '../models/AttachmentMetaView.js';
@@ -86,6 +91,7 @@ export * from '../models/MetricsRatesView.js';
 export * from '../models/MetricsSummaryView.js';
 export * from '../models/OAuthConnectionEntry.js';
 export * from '../models/PageAPIKeyView.js';
+export * from '../models/PageAgentSignupView.js';
 export * from '../models/PageAgentSuppressionView.js';
 export * from '../models/PageAgentView.js';
 export * from '../models/PageContactEngagementView.js';
@@ -121,6 +127,7 @@ export * from '../models/RedeliverDelivery.js';
 export * from '../models/RedeliverEventRequest.js';
 export * from '../models/RedeliverView.js';
 export * from '../models/RegisterDomainRequest.js';
+export * from '../models/RejectAgentSignupOutputBody.js';
 export * from '../models/RejectRequest.js';
 export * from '../models/RejectResultView.js';
 export * from '../models/RenderedTemplateView.js';
@@ -158,6 +165,7 @@ export * from '../models/UserExportUser.js';
 export * from '../models/ValidateTemplateRequest.js';
 export * from '../models/ValidateTemplateResponse.js';
 export * from '../models/ValidationErrorDetails.js';
+export * from '../models/VerifyAgentSignupRequest.js';
 export * from '../models/VerifyDomainView.js';
 export * from '../models/WebhookDeliveryView.js';
 export * from '../models/WebhookEndpointMetricsView.js';
@@ -174,9 +182,14 @@ import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
 import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
 import { AgentMetricsView } from '../models/AgentMetricsView.js';
+import { AgentSignupCreateResponse } from '../models/AgentSignupCreateResponse.js';
+import { AgentSignupRequest } from '../models/AgentSignupRequest.js';
+import { AgentSignupRestrictionsView } from '../models/AgentSignupRestrictionsView.js';
+import { AgentSignupView } from '../models/AgentSignupView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
+import { ApproveAgentSignupInputBody } from '../models/ApproveAgentSignupInputBody.js';
 import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
@@ -253,6 +266,7 @@ import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
+import { PageAgentSignupView } from '../models/PageAgentSignupView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
 import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
@@ -288,6 +302,7 @@ import { RedeliverDelivery } from '../models/RedeliverDelivery.js';
 import { RedeliverEventRequest } from '../models/RedeliverEventRequest.js';
 import { RedeliverView } from '../models/RedeliverView.js';
 import { RegisterDomainRequest } from '../models/RegisterDomainRequest.js';
+import { RejectAgentSignupOutputBody } from '../models/RejectAgentSignupOutputBody.js';
 import { RejectRequest } from '../models/RejectRequest.js';
 import { RejectResultView } from '../models/RejectResultView.js';
 import { RenderedTemplateView } from '../models/RenderedTemplateView.js';
@@ -325,6 +340,7 @@ import { UserExportUser } from '../models/UserExportUser.js';
 import { ValidateTemplateRequest } from '../models/ValidateTemplateRequest.js';
 import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js';
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
+import { VerifyAgentSignupRequest } from '../models/VerifyAgentSignupRequest.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
 import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
@@ -382,9 +398,14 @@ let typeMap: {[index: string]: any} = {
     "AgentIdentity": AgentIdentity,
     "AgentMetricsGroupView": AgentMetricsGroupView,
     "AgentMetricsView": AgentMetricsView,
+    "AgentSignupCreateResponse": AgentSignupCreateResponse,
+    "AgentSignupRequest": AgentSignupRequest,
+    "AgentSignupRestrictionsView": AgentSignupRestrictionsView,
+    "AgentSignupView": AgentSignupView,
     "AgentSuppressionAddedData": AgentSuppressionAddedData,
     "AgentSuppressionView": AgentSuppressionView,
     "AgentView": AgentView,
+    "ApproveAgentSignupInputBody": ApproveAgentSignupInputBody,
     "ApproveRequest": ApproveRequest,
     "Attachment": Attachment,
     "AttachmentMetaView": AttachmentMetaView,
@@ -461,6 +482,7 @@ let typeMap: {[index: string]: any} = {
     "MetricsSummaryView": MetricsSummaryView,
     "OAuthConnectionEntry": OAuthConnectionEntry,
     "PageAPIKeyView": PageAPIKeyView,
+    "PageAgentSignupView": PageAgentSignupView,
     "PageAgentSuppressionView": PageAgentSuppressionView,
     "PageAgentView": PageAgentView,
     "PageContactEngagementView": PageContactEngagementView,
@@ -496,6 +518,7 @@ let typeMap: {[index: string]: any} = {
     "RedeliverEventRequest": RedeliverEventRequest,
     "RedeliverView": RedeliverView,
     "RegisterDomainRequest": RegisterDomainRequest,
+    "RejectAgentSignupOutputBody": RejectAgentSignupOutputBody,
     "RejectRequest": RejectRequest,
     "RejectResultView": RejectResultView,
     "RenderedTemplateView": RenderedTemplateView,
@@ -533,6 +556,7 @@ let typeMap: {[index: string]: any} = {
     "ValidateTemplateRequest": ValidateTemplateRequest,
     "ValidateTemplateResponse": ValidateTemplateResponse,
     "ValidationErrorDetails": ValidationErrorDetails,
+    "VerifyAgentSignupRequest": VerifyAgentSignupRequest,
     "VerifyDomainView": VerifyDomainView,
     "WebhookDeliveryView": WebhookDeliveryView,
     "WebhookEndpointMetricsView": WebhookEndpointMetricsView,

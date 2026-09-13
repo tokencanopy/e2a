@@ -24,7 +24,7 @@ type testSignupCalls struct {
 func sampleSignup() *identity.AgentSignup {
 	return &identity.AgentSignup{
 		ID: "asu_example", UserID: "u_1", AgentID: "build-bot@agents.example.test",
-		HumanEmail: "owner@acme.com", DisplayName: "Build Bot", NoteToHuman: "Approve this build agent.",
+		HumanEmail: "owner@example.test", DisplayName: "Build Bot", NoteToHuman: "Approve this build agent.",
 		Harness: "test-harness", Status: identity.AgentSignupPending,
 		CodeExpiresAt: time.Unix(1700100000, 0).UTC(), VerificationSentAt: time.Unix(1700000000, 0).UTC(),
 		CreatedAt: time.Unix(1700000000, 0).UTC(), UpdatedAt: time.Unix(1700000000, 0).UTC(),
@@ -36,9 +36,9 @@ func withSignupDeps(calls *testSignupCalls) func(*Deps) {
 		d.PrincipalAuthenticator = func(r *http.Request) (*identity.Principal, error) {
 			switch r.Header.Get("Authorization") {
 			case "Bearer agent":
-				return &identity.Principal{User: &identity.User{ID: "u_1", Email: "owner@acme.com"}, Scope: identity.ScopeAgent, AgentID: "build-bot@agents.example.test"}, nil
+				return &identity.Principal{User: &identity.User{ID: "u_1", Email: "owner@example.test"}, Scope: identity.ScopeAgent, AgentID: "build-bot@agents.example.test"}, nil
 			case "Bearer good":
-				return &identity.Principal{User: &identity.User{ID: "u_1", Email: "owner@acme.com"}, Scope: identity.ScopeAccount}, nil
+				return &identity.Principal{User: &identity.User{ID: "u_1", Email: "owner@example.test"}, Scope: identity.ScopeAccount}, nil
 			default:
 				return nil, errors.New("unauthorized")
 			}
@@ -58,13 +58,13 @@ func withSignupDeps(calls *testSignupCalls) func(*Deps) {
 			return s, nil
 		}
 		d.ListPendingAgentSignups = func(_ context.Context, human string, limit int, after time.Time, afterID string) ([]identity.AgentSignup, error) {
-			if human != "owner@acme.com" {
+			if human != "owner@example.test" {
 				return nil, errors.New("wrong owner")
 			}
 			return []identity.AgentSignup{*sampleSignup()}, nil
 		}
 		d.ApproveAgentSignup = func(_ context.Context, id, human string, review bool) (*identity.AgentSignup, error) {
-			if id != "asu_example" || human != "owner@acme.com" {
+			if id != "asu_example" || human != "owner@example.test" {
 				return nil, identity.ErrAgentSignupNotFound
 			}
 			calls.approved = true
@@ -73,7 +73,7 @@ func withSignupDeps(calls *testSignupCalls) func(*Deps) {
 			return s, nil
 		}
 		d.RejectAgentSignup = func(_ context.Context, id, human string) error {
-			if id != "asu_example" || human != "owner@acme.com" {
+			if id != "asu_example" || human != "owner@example.test" {
 				return identity.ErrAgentSignupNotFound
 			}
 			calls.rejected = true
@@ -87,7 +87,7 @@ func TestCreateAgentSignupIsPublicAndReturnsOneTimeKey(t *testing.T) {
 	calls := signupHTTPFixture(t)
 	srv := testServer(t, withSignupDeps(calls))
 	code, body := postJSON(t, srv.URL+"/v1/agent-signup", "", map[string]any{
-		"human_email": "owner@acme.com", "display_name": "Build Bot",
+		"human_email": "owner@example.test", "display_name": "Build Bot",
 		"note_to_human": "Approve this build agent.", "harness": "test-harness",
 	})
 	if code != 201 || body["api_key"] != "e2a_agt_secret" || body["inbox"] != "build-bot@agents.example.test" || body["status"] != "pending" {
@@ -102,7 +102,7 @@ func TestCreateAgentSignupIsPublicAndReturnsOneTimeKey(t *testing.T) {
 func TestCreateAgentSignupReplayReturns200(t *testing.T) {
 	srv := testServer(t, withSignupDeps(signupHTTPFixture(t)))
 	code, body := postJSON(t, srv.URL+"/v1/agent-signup", "", map[string]any{
-		"human_email": "owner@acme.com", "display_name": "Existing Bot",
+		"human_email": "owner@example.test", "display_name": "Existing Bot",
 	})
 	if code != 200 || body["api_key"] != "e2a_agt_secret" {
 		t.Fatalf("status/body = %d %#v", code, body)
@@ -142,7 +142,7 @@ func TestCreateAgentSignupValidatesPublicInput(t *testing.T) {
 	srv := testServer(t, withSignupDeps(signupHTTPFixture(t)))
 	for _, body := range []map[string]any{
 		{"human_email": "not-an-email", "display_name": "Bot"},
-		{"human_email": "owner@acme.com", "display_name": ""},
+		{"human_email": "owner@example.test", "display_name": ""},
 	} {
 		if code, _ := postJSON(t, srv.URL+"/v1/agent-signup", "", body); code != 422 {
 			t.Fatalf("body %#v status=%d want 422", body, code)

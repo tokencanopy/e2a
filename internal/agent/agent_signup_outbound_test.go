@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
@@ -77,5 +76,3 @@ func TestDeliverOutboundPendingSignupSendLimit(t *testing.T) {
 		t.Fatalf("sixth send details = %#v", outboundErr.Details)
 	}
 }
-
-var _ = agent.OutboundError{}

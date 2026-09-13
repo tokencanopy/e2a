@@ -63,6 +63,20 @@ func TestRegisterAgentSignupIsIdempotentAndRotatesKey(t *testing.T) {
 	}
 }
 
+func TestRegisterAgentSignupNeverClaimsReservedSharedMailbox(t *testing.T) {
+	store, ctx, user := signupFixture(t)
+	created, err := store.RegisterAgentSignup(ctx, user.ID, identity.AgentSignupRegistration{
+		HumanEmail: user.Email, DisplayName: "Postmaster", SharedDomain: "agents.test",
+		CodeHash: "hash", CodeExpiresAt: time.Now().Add(time.Hour), MaxAgents: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Signup.AgentID == "postmaster@agents.test" {
+		t.Fatal("public signup claimed the reserved postmaster mailbox")
+	}
+}
+
 func TestVerifyAgentSignupAndReuseReviewPrimitive(t *testing.T) {
 	store, ctx, user := signupFixture(t)
 	now := time.Now().UTC()

@@ -20,6 +20,9 @@ import {
   getWebhook,
   listWebhookDeliveries,
   type MessageViewWire,
+  listPendingAgentSignups,
+  approveAgentSignup,
+  rejectAgentSignup,
 } from "./api";
 
 const mockFetch = jest.fn();
@@ -79,6 +82,38 @@ describe("listAgents", () => {
       "Failed to load all agents: pagination exceeded 20 pages",
     );
     expect(mockFetch).toHaveBeenCalledTimes(20);
+  });
+});
+
+describe("agent signup approvals", () => {
+  it("lists pending requests and sends approval decisions to the typed routes", async () => {
+    const signup = {
+      id: "as_1",
+      inbox: "build-bot@agents.example.test",
+      human_email: "owner@example.test",
+      display_name: "Build Bot",
+      status: "pending",
+      review_outbound: false,
+      created_at: "2026-09-01T00:00:00Z",
+      verification_expires_at: "2026-09-03T00:00:00Z",
+    };
+    mockFetch
+      .mockReturnValueOnce(okJson({ items: [signup], next_cursor: null }))
+      .mockReturnValueOnce(okJson({ ...signup, status: "verified", review_outbound: true }))
+      .mockReturnValueOnce(okJson({ id: "as_1", status: "rejected" }));
+
+    await expect(listPendingAgentSignups()).resolves.toEqual([signup]);
+    await approveAgentSignup("as_1", true);
+    await rejectAgentSignup("as_1");
+
+    expect(mockFetch.mock.calls[1]).toEqual([
+      "/v1/agent-signup/as_1/approve",
+      expect.objectContaining({ method: "POST", body: '{"review_outbound":true}' }),
+    ]);
+    expect(mockFetch.mock.calls[2]).toEqual([
+      "/v1/agent-signup/as_1/reject",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    ]);
   });
 });
 

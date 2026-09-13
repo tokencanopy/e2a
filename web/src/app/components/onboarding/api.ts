@@ -119,6 +119,54 @@ export async function listAgents(): Promise<DashboardAgent[]> {
   return agents;
 }
 
+export type AgentSignupView = {
+  id: string;
+  inbox: string;
+  human_email: string;
+  display_name: string;
+  harness?: string;
+  status: string;
+  review_outbound: boolean;
+  verification_expires_at: string;
+  created_at: string;
+};
+
+/** Pending provisional identities addressed to the signed-in human. */
+export async function listPendingAgentSignups(): Promise<AgentSignupView[]> {
+  const signups: AgentSignupView[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 20; page++) {
+    const url: string = cursor
+      ? "/v1/agent-signup/pending?cursor=" + encodeURIComponent(cursor)
+      : "/v1/agent-signup/pending";
+    const data: { items?: AgentSignupView[] | null; next_cursor?: string | null } =
+      await request(url);
+    signups.push(...(data.items ?? []));
+    cursor = data.next_cursor ?? null;
+    if (!cursor) return signups;
+  }
+  throw new Error("Failed to load all agent requests: pagination exceeded 20 pages");
+}
+
+export async function approveAgentSignup(
+  id: string,
+  reviewOutbound: boolean,
+): Promise<AgentSignupView> {
+  return request(`/v1/agent-signup/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ review_outbound: reviewOutbound }),
+  });
+}
+
+export async function rejectAgentSignup(
+  id: string,
+): Promise<{ id: string; status: string }> {
+  return request(`/v1/agent-signup/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 // POST /v1/agents registers by full email only — a shared-domain agent is
 // an email on the deployment's shared domain; the legacy `slug` field was
 // dropped from the API and is rejected as an unexpected property.

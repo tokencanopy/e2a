@@ -18,6 +18,7 @@ describe("robots", () => {
       "/inboxes",
       "/metrics",
       "/reviews",
+      "/agent-signups",
       "/settings",
       "/templates",
       "/trash",

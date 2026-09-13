@@ -20,6 +20,7 @@ from ._retry import RetryConfig, request_with_retry
 from .errors import E2AError, E2AServerError, E2AValidationError
 from .generated.api.account_api import AccountApi
 from .generated.api.agents_api import AgentsApi
+from .generated.api.agent_signup_api import AgentSignupApi
 from .generated.api.conversations_api import ConversationsApi
 from .generated.api.domains_api import DomainsApi
 from .generated.api.events_api import EventsApi
@@ -33,6 +34,10 @@ from .generated.api_client import ApiClient, RequestSerialized
 from .generated.configuration import Configuration
 from .generated.models import (
     AgentView,
+    AgentSignupCreateResponse,
+    AgentSignupRequest,
+    AgentSignupView,
+    ApproveAgentSignupInputBody,
     AgentSuppressionView,
     APIKeyView,
     ApproveRequest,
@@ -104,13 +109,14 @@ from .generated.models import (
     ValidateTemplateResponse,
     UserExport,
     VerifyDomainView,
+    VerifyAgentSignupRequest,
     WebhookDeliveryView,
     WebhookView,
 )
 from .pagination import AutoPager, Page
 from .inbound import AsyncInboundResource
 
-__all__ = ["AsyncE2AClient"]
+__all__ = ["AsyncE2AClient", "async_signup_agent"]
 
 T = TypeVar("T")
 _Make = Callable[[Optional["dict[str, str]"]], Awaitable[Any]]
@@ -164,6 +170,44 @@ def _resolve_base_url() -> Optional[str]:
             stacklevel=3,
         )
     return legacy
+
+
+async def async_signup_agent(
+    body: Body,
+    *,
+    base_url: Optional[str] = None,
+    max_retries: int = 2,
+    max_elapsed_ms: Optional[float] = None,
+    timeout_ms: Optional[float] = 30_000.0,
+    _retry_config: Optional[RetryConfig] = None,
+) -> AgentSignupCreateResponse:
+    """Create a provisional agent without an existing e2a credential.
+
+    The returned API key is shown once. Construct :class:`AsyncE2AClient` with
+    it, then call ``client.agent_signup.verify(...)`` using the six-digit code
+    sent to the named human.
+    """
+    req = _coerce(AgentSignupRequest, body)
+    cfg = _retry_config or RetryConfig(
+        max_retries=max_retries, max_elapsed_ms=max_elapsed_ms
+    )
+    api_client = _TypedApiClient(
+        Configuration(host=base_url or _resolve_base_url() or DEFAULT_BASE_URL)
+    )
+    timeout_s = (timeout_ms / 1000.0) if timeout_ms and timeout_ms > 0 else None
+    try:
+        return await request_with_retry(
+            lambda h: AgentSignupApi(api_client).create_agent_signup(
+                req, _headers=h, _request_timeout=timeout_s
+            ),
+            cfg=cfg,
+            # A retry repeats the same human/name pair. The server intentionally
+            # treats that as a key rotation and returns the sole active key.
+            retryable=True,
+            idempotency=False,
+        )
+    finally:
+        await api_client.close()
 
 
 def _reply_to_union(body: Optional[Body]) -> Optional[Body]:
@@ -360,6 +404,7 @@ class AsyncE2AClient:
         self.reviews = ReviewsResource(ReviewsApi(self._api_client), self)
         self.templates = TemplatesResource(TemplatesApi(self._api_client), self)
         self.contacts = ContactsResource(ContactsApi(self._api_client), self)
+        self.agent_signup = AgentSignupResource(AgentSignupApi(self._api_client), self)
         self._meta = MetaApi(self._api_client)
 
     # ── lifecycle ───────────────────────────────────────────────────
@@ -433,6 +478,51 @@ def _header(headers: Optional[Mapping[str, str]], name: str) -> Optional[str]:
         if key.lower() == wanted:
             return value
     return None
+
+
+class AgentSignupResource:
+    """Agent verification and human account approval for signup requests."""
+
+    def __init__(self, api: AgentSignupApi, client: AsyncE2AClient) -> None:
+        self._api = api
+        self._c = client
+
+    async def verify(self, body: Body) -> AgentSignupView:
+        """Verify the six-digit code with the provisional agent key."""
+        req = _coerce(VerifyAgentSignupRequest, body)
+        return await self._c._write_unsafe(
+            lambda h: self._api.verify_agent_signup(req, _headers=h)
+        )
+
+    def list_pending(self, *, limit: Optional[int] = None) -> AutoPager[AgentSignupView]:
+        """List requests awaiting the human. Account scope only."""
+
+        async def fetch(cursor: Optional[str]) -> Page:
+            resp = await self._c._read(
+                lambda h: self._api.list_pending_agent_signups(
+                    cursor=cursor, limit=limit, _headers=h
+                )
+            )
+            return _page(resp.items, resp.next_cursor)
+
+        return AutoPager(fetch)
+
+    async def approve(self, signup_id: str, body: Optional[Body] = None) -> AgentSignupView:
+        """Approve and bind a verified request to the human's account."""
+        req = _coerce(ApproveAgentSignupInputBody, body)
+        return await self._c._write_unsafe(
+            lambda h: self._api.approve_agent_signup(
+                _assert_not_dot_segment(signup_id, "id"), req, _headers=h
+            )
+        )
+
+    async def reject(self, signup_id: str) -> Any:
+        """Reject a request and deactivate its provisional key and inbox."""
+        return await self._c._write_unsafe(
+            lambda h: self._api.reject_agent_signup(
+                _assert_not_dot_segment(signup_id, "id"), {}, _headers=h
+            )
+        )
 
 
 class AgentsResource:

@@ -19,6 +19,20 @@ Two ways to authenticate:
 
 An agent-scoped credential resolves its agent server-side. Account-scoped callers pass the agent `email` per tool call.
 
+### Start without credentials
+
+Connect to the separate public endpoint when an agent does not have an e2a
+account or API key yet:
+
+```
+https://api.e2a.dev/mcp/signup
+```
+
+Call `signup_agent`, save the returned one-time agent key, ask the human for
+the six-digit code delivered by email, then call `verify_agent_signup`. Move to
+the authenticated `/mcp` endpoint for normal email tools. Full flow:
+[agent-signup.md](https://e2a.dev/agent-signup.md).
+
 ## Quick start
 
 ### Google ADK (Python)

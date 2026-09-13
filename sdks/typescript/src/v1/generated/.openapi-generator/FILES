@@ -1,4 +1,5 @@
 apis/AccountApi.ts
+apis/AgentSignupApi.ts
 apis/AgentsApi.ts
 apis/ContactsApi.ts
 apis/ConversationsApi.ts
@@ -25,9 +26,14 @@ models/AccountView.ts
 models/AgentIdentity.ts
 models/AgentMetricsGroupView.ts
 models/AgentMetricsView.ts
+models/AgentSignupCreateResponse.ts
+models/AgentSignupRequest.ts
+models/AgentSignupRestrictionsView.ts
+models/AgentSignupView.ts
 models/AgentSuppressionAddedData.ts
 models/AgentSuppressionView.ts
 models/AgentView.ts
+models/ApproveAgentSignupInputBody.ts
 models/ApproveRequest.ts
 models/Attachment.ts
 models/AttachmentMetaView.ts
@@ -106,6 +112,7 @@ models/MetricsSummaryView.ts
 models/OAuthConnectionEntry.ts
 models/ObjectSerializer.ts
 models/PageAPIKeyView.ts
+models/PageAgentSignupView.ts
 models/PageAgentSuppressionView.ts
 models/PageAgentView.ts
 models/PageContactEngagementView.ts
@@ -141,6 +148,7 @@ models/RedeliverDelivery.ts
 models/RedeliverEventRequest.ts
 models/RedeliverView.ts
 models/RegisterDomainRequest.ts
+models/RejectAgentSignupOutputBody.ts
 models/RejectRequest.ts
 models/RejectResultView.ts
 models/RenderedTemplateView.ts
@@ -178,6 +186,7 @@ models/UserExportUser.ts
 models/ValidateTemplateRequest.ts
 models/ValidateTemplateResponse.ts
 models/ValidationErrorDetails.ts
+models/VerifyAgentSignupRequest.ts
 models/VerifyDomainView.ts
 models/WebhookDeliveryView.ts
 models/WebhookEndpointMetricsView.ts

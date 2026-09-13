@@ -40,6 +40,7 @@ approval before an agent's message leaves.
 
 ## Start here
 
+- [agent-signup.md](https://e2a.dev/agent-signup.md): No credential yet? Create one provisional inbox and agent key, verify it with a human, and optionally route future outbound through review. Includes MCP, CLI, TypeScript, Python, and REST flows.
 - [setup.md](https://e2a.dev/setup.md): What e2a is, how an agent connects (one MCP command), and what it can do. Read this first.
 - [llms-full.txt](https://e2a.dev/llms-full.txt): Every document below, inlined into one file. Fetch this instead if you would rather read the whole corpus in a single request.
 

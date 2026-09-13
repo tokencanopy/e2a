@@ -13,7 +13,7 @@ from pydantic import ValidationError
 import e2a.v1 as v1
 
 from e2a.v1._retry import RetryConfig
-from e2a.v1.client import AsyncE2AClient
+from e2a.v1.client import AsyncE2AClient, async_signup_agent
 from e2a.v1.errors import (
     E2AConflictError,
     E2AConnectionError,
@@ -214,9 +214,77 @@ def test_explicit_base_url_beats_env(monkeypatch):
 
 def test_resources_exposed():
     c = _client()
-    for name in ("agents", "messages", "conversations", "domains", "events", "webhooks", "account", "reviews", "templates"):
+    for name in ("agents", "messages", "conversations", "domains", "events", "webhooks", "account", "reviews", "templates", "agent_signup"):
         assert getattr(c, name) is not None
     assert c.account.suppressions is not None
+
+
+@pytest.mark.anyio
+async def test_public_agent_signup_needs_no_authorization(httpx_mock):
+    httpx_mock.add_response(
+        status_code=201,
+        json={
+            "id": "as_1",
+            "inbox": "build-bot@agents.example.test",
+            "human_email": "owner@example.test",
+            "display_name": "Build Bot",
+            "status": "pending",
+            "api_key": "e2a_agt_signup",
+            "review_outbound": False,
+            "created_at": "2026-09-01T00:00:00Z",
+            "verification_expires_at": "2026-09-03T00:00:00Z",
+            "restrictions": {
+                "can_receive_from": "anyone",
+                "send_to": ["owner@example.test"],
+                "sends_per_24h": 5,
+                "can_create_identities": False,
+            },
+        },
+    )
+
+    result = await async_signup_agent(
+        {
+            "human_email": "owner@example.test",
+            "display_name": "Build Bot",
+            "harness": "codex",
+        },
+        base_url=BASE,
+    )
+
+    assert result.api_key == "e2a_agt_signup"
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "POST"
+    assert str(req.url) == f"{BASE}/v1/agent-signup"
+    assert "authorization" not in req.headers
+    assert json.loads(req.content) == {
+        "display_name": "Build Bot",
+        "harness": "codex",
+        "human_email": "owner@example.test",
+    }
+
+
+@pytest.mark.anyio
+async def test_agent_signup_verify_uses_provisional_key(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "id": "as_1",
+            "inbox": "build-bot@agents.example.test",
+            "human_email": "owner@example.test",
+            "display_name": "Build Bot",
+            "status": "verified",
+            "review_outbound": True,
+            "created_at": "2026-09-01T00:00:00Z",
+            "verification_expires_at": "2026-09-03T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        result = await c.agent_signup.verify(
+            {"code": "123456", "review_outbound": True}
+        )
+    assert result.status == "verified"
+    req = httpx_mock.get_requests()[-1]
+    assert req.headers["authorization"] == "Bearer e2a_test"
+    assert json.loads(req.content) == {"code": "123456", "review_outbound": True}
 
 
 @pytest.mark.parametrize(
