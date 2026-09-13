@@ -363,8 +363,78 @@ of Prepare itself, not of every caller.
 
 Two consequences worth knowing. Notification and feedback mail now cross the
 same submitter as customer mail, so it carries `X-SES-CONFIGURATION-SET`
-and SES publishes delivery feedback for it; none of it correlates to a
-message row, and the SNS consumer acks it as unknown (a log line, no
-suppression). And the closure guard fences `net/smtp` and the SES v2 SDK
+and SES publishes delivery feedback for it. None of it correlates to a
+message row, so the SNS consumer's message-lifecycle half still acks it as
+unknown; since B8 its retained sending correlation does match, which feeds
+the detector but never repairs a suppression (see that addendum). And the closure guard fences `net/smtp` and the SES v2 SDK
 import; a send through some other HTTP provider API would be a new
 dependency, which is where review catches it.
+
+
+## Addendum (2026-09-07): deletion-resistant feedback provenance (B8)
+
+Slice B8 makes provider feedback count even when the message, the agent, or
+the whole account it belongs to is gone. The SNS consumer now runs a
+deletion-resistant accounting seam (`delivery.FeedbackProcessor`, implemented
+by the sending-policy module) BEFORE it looks for a live message, in its own
+transaction, and fails the notification if that accounting fails so the
+provider retries. The seam never reads `messages`, `agent_identities`, or
+`users`:
+
+- **Correlation** is by the SES message id bound at settlement (normalized
+  to SES's bare form), then by the random `X-E2A-Provider-Attempt` marker SES
+  echoes from the submitted headers. Each recipient the event names is
+  matched against the keyed HMACs recorded at authorization; an address
+  outside the authorized envelope proves nothing and is ignored.
+- **One row per provider event id** (`sending_feedback_events`), so a
+  redelivered notification is a zero delta.
+- **Buckets** are derived from the full kind and retained subtypes:
+  `delivered`; `terminal_other` for a transient or undetermined bounce;
+  `hard_bounce` for a permanent bounce, including the global-list subtype
+  `Suppressed`; `complaint` for a genuine complaint. The account- and
+  tenant-suppression-list subtypes are `none` (SES never attempted delivery)
+  but still repair the local suppression list, and so does a complaint with
+  a suppression-list `complaintSubType`.
+- **Evidence is monotonic per authorized recipient**: `none < delivered <
+  terminal_other < hard_bounce < complaint`. Higher evidence replaces lower
+  (the prior bucket is subtracted from the epoch/day it was counted in and
+  the new one added to the account's current `outcome_epoch` and the
+  ingestion UTC day, on the correlation's immutable shared/dedicated path);
+  a delayed lower-ranked callback never erases a hard bounce or complaint;
+  equal rank is a zero delta with provider time then event id deciding the
+  stored provenance.
+- **Suppression ownership stays with the live message.** The seam only
+  *reports* the repairs an event proves; when a message row survives, the
+  consumer writes the suppression inside its own transaction exactly as
+  before, keeping the `source_message_id` and diagnostic reason the
+  suppression API returns and keeping the row's insert atomic with the
+  `suppression_added` event that announces it. Only when no message can own
+  the row — the purged-message case this slice exists for — does the
+  consumer apply the repair through the seam, and that repair announces
+  nothing because there is no message for an event to reference. Repair is
+  limited to customer messages: a bounce on an approval notice must not
+  suppress the account owner's own address. Upserts go through
+  `internal/suppressionsync`, which advances the row's `sync_generation` and
+  clears `removal_pending`; that guard has no production remover yet and is
+  the contract Task 11's provider reconciliation will build on.
+- **After account deletion** feedback still advances the retained bucket
+  provenance but recreates no customer state; account deletion stamps the
+  30-day post-deletion horizon on the account's correlations and events, and
+  the hourly `sending_feedback_maintenance` job removes expired provenance and
+  daily outcome rows older than the detector window plus one day.
+- **Keyring coverage is a startup gate**: a server that HAS a keyring
+  refuses to start if any unexpired recipient row was signed under a version
+  that keyring does not hold. Rotation is superset-first: add the new key
+  while the old stays active, then move the active version, and drop the old
+  key only once no retained row references it. Because a live account's rows
+  never expire, a version that has signed for a live account is effectively
+  permanent — treat the keyring as append-only. A deployment with no keyring
+  at all is not checked: it signs and matches nothing by design, and
+  bricking it over rows an earlier configuration wrote would turn a disabled
+  feature into an outage.
+
+The detector itself (thresholds, pauses, notices) is B9. B8 captures
+evidence; the one new customer-visible behavior is that a hard bounce or
+complaint for a message that has since been purged now repairs the account
+suppression, where before it was acked and dropped. Suppressions for live
+messages keep their existing shape and events exactly.
