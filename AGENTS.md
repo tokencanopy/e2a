@@ -59,9 +59,9 @@ is explicitly enumerated in `docs/api.md` → "Stability: GA and beta surface"
 | Design system | `design-system/` | React + tsup + Storybook | `@e2a/ui` ("Loft", consumed via `file:` dep) |
 | Agent plugins | `plugins/e2a/`, `plugins/e2a-labs/` | Markdown skills + manifests | Core: Claude / Codex / Cursor; Labs: Claude / Codex |
 
-Toolchain versions: `go.mod` declares Go 1.25; CI and the Dockerfiles build
-with Go 1.26. Node: engines `>=18`, CI runs on 22. Python: `requires-python
->=3.9`, CI runs on 3.12.
+Toolchain versions: `go.mod` declares Go 1.26; CI builds with Go 1.26; the
+Dockerfiles build with Go 1.27. Node: engines `>=18`, CI runs on 22. Python:
+`requires-python >=3.9`, CI runs on 3.12.
 
 ## Repository layout
 
@@ -249,7 +249,10 @@ Key packages, grouped (name — a few words each):
   (List-Unsubscribe); `usage`/`limits` usage metering + plan/account
   entitlements; `sendramp` per-domain recipient-volume ramping; `sendrate`
   per-agent fire-time submission rate limiting (durable sliding window
-  enforced in the send worker immediately before provider submission).
+  enforced in the send worker immediately before provider submission);
+  `sendingpolicy` authoritative sending-protection runtime policy — the sole
+  provider-authorization gate (single-use, bound to one durable attempt),
+  ramp/budget composition, and operator activation.
 - Auth: `auth` API key authentication; `oauth` fosite-based MCP OAuth
   server; Google OAuth + optional generic OIDC login.
 - Misc/infra: `ratelimit`; `telemetry` (metrics interface); `logredact`
