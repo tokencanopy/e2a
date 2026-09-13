@@ -13,7 +13,9 @@ import (
 )
 
 var betaOperationIDs = []string{
+	"approveAgentSignup",
 	"approveReview",
+	"createAgentSignup",
 	"createAgentSuppression",
 	"createContact",
 	"createTemplate",
@@ -35,15 +37,18 @@ var betaOperationIDs = []string{
 	"listAgentSuppressions",
 	"listContacts",
 	"listEngagements",
+	"listPendingAgentSignups",
 	"listReviews",
 	"listStarterTemplates",
 	"listTemplates",
 	"putAgentProtection",
+	"rejectAgentSignup",
 	"rejectReview",
 	"updateContact",
 	"updateTemplate",
 	"upsertEngagement",
 	"validateTemplate",
+	"verifyAgentSignup",
 }
 
 // These tests pin the forward-compatibility stance stamped by

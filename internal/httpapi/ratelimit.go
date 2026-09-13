@@ -134,6 +134,13 @@ func (s *Server) rateLimit(ctx huma.Context, next func(huma.Context)) {
 			return
 		}
 		snap, key = s.deps.PollLimit, p.User.ID
+	case op.OperationID == "createAgentSignup" && s.deps.SignupLimit != nil:
+		r := RequestFromContext(ctx.Context())
+		if r == nil {
+			next(ctx)
+			return
+		}
+		snap, key = s.deps.SignupLimit, clientIP(r)
 	case op.OperationID == "createAgent" && s.deps.RegLimit != nil:
 		r := RequestFromContext(ctx.Context())
 		if r == nil {

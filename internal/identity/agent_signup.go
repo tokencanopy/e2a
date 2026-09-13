@@ -333,6 +333,36 @@ func (s *Store) RejectAgentSignup(ctx context.Context, signupID, humanEmail stri
 	return tx.Commit(ctx)
 }
 
+// ListPendingAgentSignups returns pending requests for the authenticated
+// human, newest first, keyset-paginated on (created_at,id).
+func (s *Store) ListPendingAgentSignups(ctx context.Context, humanEmail string, limit int, afterCreatedAt time.Time, afterID string) ([]AgentSignup, error) {
+	query := `SELECT ` + agentSignupColumns + ` FROM agent_signups
+		WHERE human_email=$1 AND status='pending'`
+	args := []any{NormalizeEmail(humanEmail)}
+	if !afterCreatedAt.IsZero() {
+		query += ` AND (created_at,id) < ($2,$3)`
+		args = append(args, afterCreatedAt, afterID)
+	}
+	query += ` ORDER BY created_at DESC,id DESC`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AgentSignup, 0)
+	for rows.Next() {
+		v, err := scanAgentSignup(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *v)
+	}
+	return items, rows.Err()
+}
+
 // ConsumeAgentSignupSend is a no-op for ordinary and verified agents. Pending
 // signups may address only their human and consume one of five rolling slots.
 func (s *Store) ConsumeAgentSignupSend(ctx context.Context, agentID string, recipients []string, now time.Time) error {

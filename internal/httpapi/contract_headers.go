@@ -77,7 +77,7 @@ func (s *Server) applyResponseHeaderContract() {
 			if status == "429" || status == "503" {
 				response.Headers["Retry-After"] = headerRef(headerRetryAfter)
 			}
-			if pollLimitedOps[op.OperationID] || op.OperationID == "createAgent" {
+			if pollLimitedOps[op.OperationID] || op.OperationID == "createAgent" || op.OperationID == "createAgentSignup" {
 				response.Headers["RateLimit-Limit"] = headerRef(headerRateLimitLimit)
 				response.Headers["RateLimit-Remaining"] = headerRef(headerRateLimitRemain)
 				response.Headers["RateLimit-Reset"] = headerRef(headerRateLimitReset)

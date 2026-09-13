@@ -28,7 +28,7 @@ machine-readable source of truth is **`x-stability-level`** in
 `x-stability-level: beta` may change before it is promoted to stable, and
 **everything not marked beta (or experimental) is GA**, covered by the
 [compatibility rules](#compatibility-rules) below. At the operation level that
-is currently 43 GA operations and 31 beta operations:
+is currently 43 GA operations and 36 beta operations:
 
 | Resource group | Stability | Operations |
 | --- | --- | --- |
@@ -43,6 +43,7 @@ is currently 43 GA operations and 31 beta operations:
 | [Contacts & outreach](#contacts--outreach-v1contacts-v1agentsemailcontacts-beta) | **beta** | `createContact`, `listContacts`, `getContact`, `updateContact`, `deleteContact`, `importContacts`, `deleteImportBatch`, `listEngagements`, `getEngagement`, `upsertEngagement`, `deleteEngagement` |
 | [Templates & starter templates](#templates-v1templates-v1starter-templates-beta) | **beta** | `createTemplate`, `listTemplates`, `getTemplate`, `updateTemplate`, `deleteTemplate`, `validateTemplate`, `listStarterTemplates`, `getStarterTemplate` |
 | [Reviews (HITL queue)](#reviews-v1reviews-beta) | **beta** | `listReviews`, `getReview`, `approveReview`, `rejectReview` |
+| Agent self-signup | **beta** | `createAgentSignup`, `verifyAgentSignup`, `listPendingAgentSignups`, `approveAgentSignup`, `rejectAgentSignup` |
 | Agent protection config | **beta** | `getAgentProtection`, `putAgentProtection` |
 | Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
 | [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
@@ -313,6 +314,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | **Auth / policy** | | |
 | `unauthorized` | 401 | Missing or invalid credentials (REST and the WebSocket handshake). |
 | `forbidden` | 403 | Authenticated but not allowed (key scope, cross-tenant access). |
+| `pending_human_verification` | 403 | The provisional identity may send only to its registered human until the signup is verified. |
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
 | `sending_paused` | 403 | **Experimental.** Outbound sending is paused for the account by the platform abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
 | **Validation** | | |
@@ -406,7 +408,9 @@ every `/v1` operation not listed here is covered by the GA freeze.
 
 | operationId | Method and path | Surface |
 | --- | --- | --- |
+| `approveAgentSignup` | `POST /v1/agent-signup/{id}/approve` | Agent signup |
 | `approveReview` | `POST /v1/reviews/{id}/approve` | Reviews |
+| `createAgentSignup` | `POST /v1/agent-signup` | Agent signup |
 | `createAgentSuppression` | `POST /v1/agents/{email}/suppressions` | Agent suppressions |
 | `createContact` | `POST /v1/contacts` | Contacts |
 | `createTemplate` | `POST /v1/templates` | Templates |
@@ -428,15 +432,18 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `listAgentSuppressions` | `GET /v1/agents/{email}/suppressions` | Agent suppressions |
 | `listContacts` | `GET /v1/contacts` | Contacts |
 | `listEngagements` | `GET /v1/agents/{email}/contacts` | Contacts |
+| `listPendingAgentSignups` | `GET /v1/agent-signup/pending` | Agent signup |
 | `listReviews` | `GET /v1/reviews` | Reviews |
 | `listStarterTemplates` | `GET /v1/starter-templates` | Starter templates |
 | `listTemplates` | `GET /v1/templates` | Templates |
 | `putAgentProtection` | `PUT /v1/agents/{email}/protection` | Protection config |
+| `rejectAgentSignup` | `POST /v1/agent-signup/{id}/reject` | Agent signup |
 | `rejectReview` | `POST /v1/reviews/{id}/reject` | Reviews |
 | `updateContact` | `PATCH /v1/contacts/{address}` | Contacts |
 | `updateTemplate` | `PATCH /v1/templates/{id}` | Templates |
 | `upsertEngagement` | `PUT /v1/agents/{email}/contacts/{address}` | Contacts |
 | `validateTemplate` | `POST /v1/templates/validate` | Templates |
+| `verifyAgentSignup` | `POST /v1/agent-signup/verify` | Agent signup |
 
 ### Compatibility rules
 

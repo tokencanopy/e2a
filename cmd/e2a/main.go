@@ -668,6 +668,7 @@ func main() {
 	// HTTP API
 	router := mux.NewRouter()
 	api := agent.NewAPI(store, sender, smtpRelay, userAuth, usageTracker, cfg.SMTP.Domain, cfg.OutboundSMTP.FromDomain, cfg.SharedDomain, cfg.HTTP.PublicURL, cfg.IsProduction())
+	api.SetAgentSignupSecret(cfg.Signing.HMACSecret)
 	// The programmatic API host (OAuth issuer + token/jwks). Defaults to
 	// public_url; set api_url to serve the API/MCP on a different host than
 	// the web app (the authorization_endpoint + login/consent stay on
