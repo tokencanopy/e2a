@@ -27,12 +27,13 @@ class AgentSignupRequest(BaseModel):
     """
     AgentSignupRequest
     """ # noqa: E501
+    current_api_key: Optional[Annotated[str, Field(strict=True, max_length=256)]] = Field(default=None, description="Current agent-scoped key. Required when resuming the same pending human_email + display_name; successful resume rotates it.")
     display_name: Annotated[str, Field(min_length=1, strict=True, max_length=200)] = Field(description="Human-readable agent name. The inbox slug is derived from this value.")
     harness: Optional[Annotated[str, Field(strict=True, max_length=100)]] = Field(default=None, description="Optional agent harness identifier for diagnostics.")
     human_email: Annotated[str, Field(strict=True, max_length=320)] = Field(description="Email address of the human who will verify and own this agent.")
     note_to_human: Optional[Annotated[str, Field(strict=True, max_length=2000)]] = Field(default=None, description="Optional explanation included verbatim in the verification email.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["display_name", "harness", "human_email", "note_to_human"]
+    __properties: ClassVar[List[str]] = ["current_api_key", "display_name", "harness", "human_email", "note_to_human"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -92,6 +93,7 @@ class AgentSignupRequest(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
+            "current_api_key": obj.get("current_api_key"),
             "display_name": obj.get("display_name"),
             "harness": obj.get("harness"),
             "human_email": obj.get("human_email"),
@@ -103,5 +105,3 @@ class AgentSignupRequest(BaseModel):
                 _obj.additional_properties[_key] = obj.get(_key)
 
         return _obj
-
-

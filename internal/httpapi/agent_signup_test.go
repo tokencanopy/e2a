@@ -16,9 +16,10 @@ func signupHTTPFixture(t *testing.T) *testSignupCalls {
 }
 
 type testSignupCalls struct {
-	verified bool
-	approved bool
-	rejected bool
+	verified      bool
+	approved      bool
+	rejected      bool
+	currentAPIKey string
 }
 
 func sampleSignup() *identity.AgentSignup {
@@ -43,7 +44,8 @@ func withSignupDeps(calls *testSignupCalls) func(*Deps) {
 				return nil, errors.New("unauthorized")
 			}
 		}
-		d.RegisterAgentSignup = func(_ context.Context, human, display, note, harness string) (*identity.AgentSignupResult, error) {
+		d.RegisterAgentSignup = func(_ context.Context, human, display, note, harness, currentAPIKey string) (*identity.AgentSignupResult, error) {
+			calls.currentAPIKey = currentAPIKey
 			s := sampleSignup()
 			s.HumanEmail, s.DisplayName, s.NoteToHuman, s.Harness = human, display, note, harness
 			return &identity.AgentSignupResult{Signup: s, APIKey: &identity.APIKey{PlaintextKey: "e2a_agt_secret"}, Created: display != "Existing Bot"}, nil
@@ -63,8 +65,8 @@ func withSignupDeps(calls *testSignupCalls) func(*Deps) {
 			}
 			return []identity.AgentSignup{*sampleSignup()}, nil
 		}
-		d.ApproveAgentSignup = func(_ context.Context, id, human string, review bool) (*identity.AgentSignup, error) {
-			if id != "asu_example" || human != "owner@example.test" {
+		d.ApproveAgentSignup = func(_ context.Context, id, human, userID string, review bool) (*identity.AgentSignup, error) {
+			if id != "asu_example" || human != "owner@example.test" || userID != "u_1" {
 				return nil, identity.ErrAgentSignupNotFound
 			}
 			calls.approved = true
@@ -100,12 +102,19 @@ func TestCreateAgentSignupIsPublicAndReturnsOneTimeKey(t *testing.T) {
 }
 
 func TestCreateAgentSignupReplayReturns200(t *testing.T) {
-	srv := testServer(t, withSignupDeps(signupHTTPFixture(t)))
+	calls := signupHTTPFixture(t)
+	srv := testServer(t, withSignupDeps(calls))
 	code, body := postJSON(t, srv.URL+"/v1/agent-signup", "", map[string]any{
 		"human_email": "owner@example.test", "display_name": "Existing Bot",
+		"current_api_key": "e2a_agt_current",
 	})
 	if code != 200 || body["api_key"] != "e2a_agt_secret" {
 		t.Fatalf("status/body = %d %#v", code, body)
+	}
+	// The possession capability is passed only to the lifecycle service; it is
+	// never treated as HTTP authentication for the public endpoint.
+	if calls.currentAPIKey != "e2a_agt_current" {
+		t.Fatalf("current key = %q", calls.currentAPIKey)
 	}
 }
 

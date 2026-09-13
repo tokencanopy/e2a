@@ -42,6 +42,7 @@ describe("public agent signup MCP tools", () => {
         display_name: "Build Bot",
         note_to_human: "For the build queue.",
         harness: "codex",
+        current_api_key: "e2a_agt_current",
       },
     });
     expect(created.isError).not.toBe(true);
@@ -50,6 +51,7 @@ describe("public agent signup MCP tools", () => {
       displayName: "Build Bot",
       noteToHuman: "For the build queue.",
       harness: "codex",
+      currentApiKey: "e2a_agt_current",
     });
 
     const verified = await client.callTool({

@@ -170,7 +170,7 @@ describe("E2AClient", () => {
     });
 
     const result = await signupAgent(
-      { humanEmail: "owner@example.test", displayName: "Build Bot", harness: "codex" },
+      { humanEmail: "owner@example.test", displayName: "Build Bot", harness: "codex", currentApiKey: "e2a_agt_current" },
       { baseUrl: BASE },
     );
 
@@ -183,6 +183,7 @@ describe("E2AClient", () => {
       human_email: "owner@example.test",
       display_name: "Build Bot",
       harness: "codex",
+      current_api_key: "e2a_agt_current",
     });
   });
 

@@ -413,6 +413,9 @@ components:
         id:
           type: string
         inbox:
+          description: Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain.
+          type: string
+        note_to_human:
           type: string
         restrictions:
           $ref: "#/components/schemas/AgentSignupRestrictionsView"
@@ -440,6 +443,10 @@ components:
     AgentSignupRequest:
       additionalProperties: false
       properties:
+        current_api_key:
+          description: Current agent-scoped key. Required when resuming the same pending human_email + display_name; successful resume rotates it.
+          maxLength: 256
+          type: string
         display_name:
           description: Human-readable agent name. The inbox slug is derived from this value.
           maxLength: 200
@@ -503,6 +510,9 @@ components:
         id:
           type: string
         inbox:
+          description: Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain.
+          type: string
+        note_to_human:
           type: string
         review_outbound:
           type: boolean
@@ -5756,7 +5766,7 @@ paths:
         - account
   /v1/agent-signup:
     post:
-      description: Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.
+      description: Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
       operationId: createAgentSignup
       requestBody:
         content:

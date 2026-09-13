@@ -1,17 +1,42 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
 )
 
 // sendURL is POST /v1/agents/{address}/messages for the test agent. The sender
 // is the path agent (decision 3 — explicit operation, not a body `from`).
 const sendURL = "/v1/agents/support%40acme.com/messages"
+
+func TestPendingSignupRecipientCheckPrecedesQuotaAndDelivery(t *testing.T) {
+	quotaChecked, delivered := false, false
+	srv := testServer(t, func(d *Deps) {
+		d.CheckAgentSignupSend = func(context.Context, *identity.AgentIdentity, []string, bool) (*identity.AgentIdentity, *agent.OutboundError) {
+			return nil, &agent.OutboundError{Status: 403, Code: "pending_human_verification", Msg: "pending human verification"}
+		}
+		d.EnforceMessageSend = func(context.Context, string, int) error {
+			quotaChecked = true
+			return nil
+		}
+		d.DeliverOutbound = func(context.Context, *identity.User, *identity.AgentIdentity, outbound.SendRequest, string, string, *identity.Message, agent.AcceptIdemCompleter) (*agent.OutboundResult, *agent.OutboundError) {
+			delivered = true
+			return nil, nil
+		}
+	})
+	code, body := postJSON(t, srv.URL+sendURL, "good", map[string]any{
+		"to": []string{"other@example.test"}, "subject": "Hi", "text": "hello",
+	})
+	if code != 403 || errCode(body) != "pending_human_verification" || quotaChecked || delivered {
+		t.Fatalf("status/body/quota/delivered = %d %#v %v %v", code, body, quotaChecked, delivered)
+	}
+}
 
 func TestSendSent(t *testing.T) {
 	srv := testServer(t)

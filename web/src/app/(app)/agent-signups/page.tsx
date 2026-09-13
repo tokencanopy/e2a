@@ -109,6 +109,11 @@ export default function AgentSignupsPage() {
                       Requested {new Date(signup.created_at).toLocaleString()}
                       {signup.harness ? ` · ${signup.harness}` : ""}
                     </p>
+                    {signup.note_to_human ? (
+                      <blockquote className="text-[13px] mt-3 whitespace-pre-wrap" style={{ color: "var(--fg-muted)" }}>
+                        {signup.note_to_human}
+                      </blockquote>
+                    ) : null}
                   </div>
                   <div className="flex gap-2 sm:shrink-0">
                     <button

@@ -38,6 +38,8 @@ func TestRecipientGate(t *testing.T) {
 			outbound.SendRequest{To: []string{"stranger@evil.com"}}, false, ""},
 		{"allowlist permits listed", identity.OutboundPolicyAllowlist, []string{"ok@friend.com"}, "bot.example.com",
 			outbound.SendRequest{To: []string{"ok@friend.com"}}, false, ""},
+		{"allowlist normalizes display mailbox", identity.OutboundPolicyAllowlist, []string{"owner@example.test"}, "bot.example.com",
+			outbound.SendRequest{To: []string{"Owner <OWNER@example.test>"}}, false, ""},
 		{"allowlist flags unlisted", identity.OutboundPolicyAllowlist, []string{"ok@friend.com"}, "bot.example.com",
 			outbound.SendRequest{To: []string{"ok@friend.com"}, CC: []string{"who@stranger.com"}}, true, "who@stranger.com"},
 		{"domain permits same domain", identity.OutboundPolicyDomain, nil, "bot.example.com",

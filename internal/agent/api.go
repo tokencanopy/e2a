@@ -1453,11 +1453,44 @@ func resolveOutboundConversationID(explicit, msgType string, referenced *identit
 	return identity.NewConversationID()
 }
 
+func agentSignupOutboundError(err error) *OutboundError {
+	switch {
+	case errors.Is(err, identity.ErrAgentSignupPendingVerification):
+		return &OutboundError{
+			Status: http.StatusForbidden,
+			Code:   "pending_human_verification",
+			Msg:    "pending human verification: this provisional identity may send only to its registered human email and cannot schedule sends",
+		}
+	case errors.Is(err, identity.ErrAgentSignupSendLimit):
+		return &OutboundError{
+			Status:  http.StatusTooManyRequests,
+			Code:    "rate_limited",
+			Msg:     "pending human verification: provisional identities may send at most 5 messages per 24 hours",
+			Details: map[string]any{"limit": identity.AgentSignupSendLimit, "window_seconds": 24 * 60 * 60},
+		}
+	case errors.Is(err, identity.ErrAgentSignupRejected):
+		return &OutboundError{Status: http.StatusForbidden, Code: "forbidden", Msg: "agent signup was rejected and the identity is inactive"}
+	default:
+		log.Printf("[agent-signup] provisional send guard failed: error=%v", err)
+		return &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to verify provisional send permission"}
+	}
+}
+
 func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string, referenced *identity.Message, idemCompleteTx AcceptIdemCompleter) (*OutboundResult, *OutboundError) {
 	parentMessageID := ""
 	if msgType == "reply" && referenced != nil {
 		parentMessageID = referenced.ID
 	}
+	signupRecipients := make([]string, 0, len(req.To)+len(req.CC)+len(req.BCC))
+	signupRecipients = append(signupRecipients, req.To...)
+	signupRecipients = append(signupRecipients, req.CC...)
+	signupRecipients = append(signupRecipients, req.BCC...)
+	agent, signupErr := a.CheckAgentSignupSend(ctx, agent, signupRecipients, req.ScheduledAt != nil)
+	if signupErr != nil {
+		return nil, signupErr
+	}
+	user.ID = agent.UserID
+
 	// Validate the canonical envelope before screening can durably hold the
 	// draft, but deliberately do not mint while it is pending human review.
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, user.ID, agent, &req, false); uerr != nil {
@@ -1474,29 +1507,8 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// This check lives in the shared send/reply/forward tail so no transport or
 	// message shape can bypass it. Ordinary and verified identities are a cheap
 	// no-op in the store.
-	signupRecipients := make([]string, 0, len(req.To)+len(req.CC)+len(req.BCC))
-	signupRecipients = append(signupRecipients, req.To...)
-	signupRecipients = append(signupRecipients, req.CC...)
-	signupRecipients = append(signupRecipients, req.BCC...)
 	if err := a.store.ConsumeAgentSignupSend(ctx, agent.ID, signupRecipients, time.Now().UTC()); err != nil {
-		switch {
-		case errors.Is(err, identity.ErrAgentSignupPendingVerification):
-			return nil, &OutboundError{
-				Status: http.StatusForbidden,
-				Code:   "pending_human_verification",
-				Msg:    "pending human verification: this provisional identity may send only to its registered human email",
-			}
-		case errors.Is(err, identity.ErrAgentSignupSendLimit):
-			return nil, &OutboundError{
-				Status:  http.StatusTooManyRequests,
-				Code:    "rate_limited",
-				Msg:     "pending human verification: provisional identities may send at most 5 messages per 24 hours",
-				Details: map[string]any{"limit": identity.AgentSignupSendLimit, "window_seconds": 24 * 60 * 60},
-			}
-		default:
-			log.Printf("[agent-signup] provisional send guard failed: agent=%s error=%v", agent.ID, err)
-			return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to verify provisional send permission"}
-		}
+		return nil, agentSignupOutboundError(err)
 	}
 
 	// Conversation threading (#328): resolve the thread id once, here, so every
@@ -1700,6 +1712,10 @@ func (a *API) SendTestCore(ctx context.Context, agent *identity.AgentIdentity) (
 	subject := "Test email from e2a"
 	body := fmt.Sprintf("This is a test email for %s.\n\nYour agent is set up and ready to receive emails.", agent.EmailAddress())
 	testReq := outbound.SendRequest{To: to, Subject: subject, Body: body}
+	agent, signupErr := a.CheckAgentSignupSend(ctx, agent, to, false)
+	if signupErr != nil {
+		return nil, signupErr
+	}
 
 	// Suppression enforcement — the same recipient gate DeliverOutbound runs
 	// (decision 9): a suppressed agent address must never be submitted.

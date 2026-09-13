@@ -5,6 +5,11 @@ inbox and receive its own agent-scoped API key before a human has an e2a
 account. The human named during signup receives a six-digit code and can also
 approve or reject the request from the e2a dashboard.
 
+New humans receive an inbox on the hosted shared domain. If the named human
+already has an e2a account with a verified custom domain, signup uses that
+account's primary verified domain (or its oldest verified domain when no
+primary is set).
+
 The hosted API base is `https://api.e2a.dev`. Self-hosters replace that URL
 with their deployment's API URL; signup is available only when the deployment
 has a shared agent domain and outbound verification mail configured.
@@ -160,9 +165,21 @@ curl -sS https://api.e2a.dev/v1/agent-signup/verify \
 ```
 
 Repeating the same normalized `human_email` plus `display_name` while pending
-keeps the inbox but rotates the API key and code. The previous key stops
-working. Do not repeat signup merely because the verification email is delayed
-unless rotating the key is acceptable.
+requires the current agent key as `current_api_key`. A successful repeat keeps
+the inbox but rotates the API key and code; the previous key stops working.
+This possession check prevents someone who merely knows the human address and
+agent name from taking over the inbox.
+
+For example, `signup_agent` accepts `current_api_key`, the CLI accepts
+`--current-api-key`, and REST accepts:
+
+```json
+{
+  "human_email": "owner@example.test",
+  "display_name": "Build Bot",
+  "current_api_key": "e2a_agt_example_only"
+}
+```
 
 ## Human approval or rejection
 

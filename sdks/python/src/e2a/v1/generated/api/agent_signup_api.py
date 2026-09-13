@@ -353,7 +353,7 @@ class AgentSignupApi:
     ) -> AgentSignupCreateResponse:
         """Create a provisional agent identity (beta)
 
-        Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.
+        Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
 
         :param agent_signup_request: (required)
         :type agent_signup_request: AgentSignupRequest
@@ -422,7 +422,7 @@ class AgentSignupApi:
     ) -> ApiResponse[AgentSignupCreateResponse]:
         """Create a provisional agent identity (beta)
 
-        Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.
+        Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
 
         :param agent_signup_request: (required)
         :type agent_signup_request: AgentSignupRequest
@@ -491,7 +491,7 @@ class AgentSignupApi:
     ) -> RESTResponseType:
         """Create a provisional agent identity (beta)
 
-        Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.
+        Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
 
         :param agent_signup_request: (required)
         :type agent_signup_request: AgentSignupRequest
@@ -846,13 +846,13 @@ class AgentSignupApi:
         # process the path parameters
         # process the query parameters
         if cursor is not None:
-            
+
             _query_params.append(('cursor', cursor))
-            
+
         if limit is not None:
-            
+
             _query_params.append(('limit', limit))
-            
+
         # process the header parameters
         # process the form parameters
         # process the body parameter
@@ -1449,5 +1449,3 @@ class AgentSignupApi:
             _host=_host,
             _request_auth=_request_auth
         )
-
-

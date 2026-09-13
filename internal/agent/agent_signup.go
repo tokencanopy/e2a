@@ -43,7 +43,7 @@ func generateAgentSignupCode() (string, error) {
 
 // RegisterAgentSignup provisions or rotates one pending signup and sends the
 // human verification mail before returning the one-time plaintext key.
-func (a *API) RegisterAgentSignup(ctx context.Context, humanEmail, displayName, noteToHuman, harness string) (*identity.AgentSignupResult, error) {
+func (a *API) RegisterAgentSignup(ctx context.Context, humanEmail, displayName, noteToHuman, harness, currentAPIKey string) (*identity.AgentSignupResult, error) {
 	if a.store == nil || a.sharedDomain == "" || len(a.agentSignupSecret) == 0 || a.submitter == nil || a.gate == nil || a.smtpRelay == nil || !a.smtpRelay.Configured() || a.fromDomain == "" {
 		return nil, ErrAgentSignupUnavailable
 	}
@@ -51,39 +51,67 @@ func (a *API) RegisterAgentSignup(ctx context.Context, humanEmail, displayName, 
 	if err != nil {
 		return nil, err
 	}
-	user, err := a.store.EnsureAgentSignupUser(ctx, humanEmail, displayName)
-	if err != nil {
-		return nil, err
-	}
-	maxAgents := 0
-	if a.enforcer != nil {
-		resolved, err := a.enforcer.Get(ctx, user.ID)
-		if err != nil {
-			return nil, err
-		}
-		maxAgents = resolved.MaxAgents
-	}
-	result, err := a.store.RegisterAgentSignup(ctx, user.ID, identity.AgentSignupRegistration{
+	result, err := a.store.RegisterAgentSignup(ctx, identity.AgentSignupRegistration{
 		HumanEmail: humanEmail, DisplayName: displayName, NoteToHuman: noteToHuman,
 		Harness: harness, SharedDomain: a.sharedDomain, CodeHash: a.hashAgentSignupCode(code),
-		CodeExpiresAt: time.Now().UTC().Add(AgentSignupCodeTTL), MaxAgents: maxAgents,
+		CodeExpiresAt: time.Now().UTC().Add(AgentSignupCodeTTL), CurrentAPIKey: currentAPIKey,
+	}, func(signup *identity.AgentSignup) error {
+		return a.sendAgentSignupVerification(ctx, signup, code)
 	})
-	if err != nil {
-		return nil, err
-	}
-	if err := a.sendAgentSignupVerification(ctx, result.Signup, code); err != nil {
-		// Do not leave a usable credential behind when the public call failed.
-		_ = a.store.DeleteAPIKey(context.WithoutCancel(ctx), result.APIKey.ID, user.ID)
-		return nil, err
-	}
-	return result, nil
+	return result, err
 }
 
 func (a *API) VerifyAgentSignup(ctx context.Context, agentID, code string, reviewOutbound bool) (*identity.AgentSignup, error) {
 	if len(a.agentSignupSecret) == 0 {
 		return nil, ErrAgentSignupUnavailable
 	}
-	return a.store.VerifyAgentSignup(ctx, agentID, a.hashAgentSignupCode(code), reviewOutbound, time.Now().UTC())
+	return a.store.VerifyAgentSignup(ctx, agentID, a.hashAgentSignupCode(code), reviewOutbound, time.Now().UTC(), func(signup *identity.AgentSignup) (string, int, error) {
+		user, err := a.store.EnsureAgentSignupUser(ctx, signup.HumanEmail, signup.DisplayName)
+		if err != nil {
+			return "", 0, err
+		}
+		maxAgents, err := a.agentSignupMaxAgents(ctx, user.ID)
+		return user.ID, maxAgents, err
+	})
+}
+
+// ApproveAgentSignup binds a pending identity to the authenticated human's
+// account under the same atomic plan-cap check as code verification.
+func (a *API) ApproveAgentSignup(ctx context.Context, signupID, humanEmail, userID string, reviewOutbound bool) (*identity.AgentSignup, error) {
+	maxAgents, err := a.agentSignupMaxAgents(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return a.store.ApproveAgentSignup(ctx, signupID, humanEmail, userID, maxAgents, reviewOutbound, time.Now().UTC())
+}
+
+func (a *API) agentSignupMaxAgents(ctx context.Context, userID string) (int, error) {
+	if a.enforcer == nil {
+		return 0, nil
+	}
+	resolved, err := a.enforcer.Get(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	return resolved.MaxAgents, nil
+}
+
+// CheckAgentSignupSend applies the non-consuming provisional policy and
+// refreshes a just-verified identity so callers use its transferred owner and
+// optional human-review policy before any quota or suppression checks.
+func (a *API) CheckAgentSignupSend(ctx context.Context, agent *identity.AgentIdentity, recipients []string, scheduled bool) (*identity.AgentIdentity, *OutboundError) {
+	status, err := a.store.CheckAgentSignupSend(ctx, agent.ID, recipients, scheduled)
+	if err != nil {
+		return nil, agentSignupOutboundError(err)
+	}
+	if status != identity.AgentSignupVerified {
+		return agent, nil
+	}
+	fresh, err := a.store.GetAgentByID(ctx, agent.ID)
+	if err != nil {
+		return nil, &OutboundError{Status: 403, Code: "forbidden", Msg: "agent identity is no longer active"}
+	}
+	return fresh, nil
 }
 
 func (a *API) sendAgentSignupVerification(ctx context.Context, signup *identity.AgentSignup, code string) error {

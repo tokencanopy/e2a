@@ -581,7 +581,7 @@ export class ObjectAgentSignupApi {
     }
 
     /**
-     * Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.
+     * Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
      * Create a provisional agent identity (beta)
      * @param param the request object
      */
@@ -590,7 +590,7 @@ export class ObjectAgentSignupApi {
     }
 
     /**
-     * Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.
+     * Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
      * Create a provisional agent identity (beta)
      * @param param the request object
      */

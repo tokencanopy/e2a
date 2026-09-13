@@ -17,8 +17,9 @@ const (
 	AgentSignupVerified = "verified"
 	AgentSignupRejected = "rejected"
 
-	AgentSignupSendLimit   = 5
-	AgentSignupMaxAttempts = 5
+	AgentSignupSendLimit             = 5
+	AgentSignupMaxAttempts           = 5
+	AgentSignupVerificationMailLimit = 5
 )
 
 var (
@@ -29,6 +30,9 @@ var (
 	ErrAgentSignupFinal               = errors.New("agent signup is already resolved")
 	ErrAgentSignupPendingVerification = errors.New("agent signup is pending human verification")
 	ErrAgentSignupSendLimit           = errors.New("agent signup provisional send limit reached")
+	ErrAgentSignupResumeRequired      = errors.New("current agent signup key is required")
+	ErrAgentSignupMailLimit           = errors.New("agent signup verification mail limit reached")
+	ErrAgentSignupRejected            = errors.New("agent signup was rejected")
 )
 
 type AgentSignup struct {
@@ -58,7 +62,7 @@ type AgentSignupRegistration struct {
 	SharedDomain  string
 	CodeHash      string
 	CodeExpiresAt time.Time
-	MaxAgents     int
+	CurrentAPIKey string
 }
 
 type AgentSignupResult struct {
@@ -142,7 +146,7 @@ func createScopedAPIKeyTx(ctx context.Context, tx pgx.Tx, userID, name, agentID 
 
 // RegisterAgentSignup creates the provisional identity or rotates the
 // credential/code of the existing pending identity for the normalized pair.
-func (s *Store) RegisterAgentSignup(ctx context.Context, userID string, in AgentSignupRegistration) (*AgentSignupResult, error) {
+func (s *Store) RegisterAgentSignup(ctx context.Context, in AgentSignupRegistration, beforeCommit func(*AgentSignup) error) (*AgentSignupResult, error) {
 	human := NormalizeEmail(in.HumanEmail)
 	display, displayKey := normalizedSignupName(in.DisplayName)
 	domain := normalizeDomain(in.SharedDomain)
@@ -160,19 +164,40 @@ func (s *Store) RegisterAgentSignup(ctx context.Context, userID string, in Agent
 		if existing.Status != AgentSignupPending {
 			return nil, ErrAgentSignupFinal
 		}
+		var keyMatches bool
+		if in.CurrentAPIKey != "" {
+			err = tx.QueryRow(ctx, `SELECT EXISTS(
+				SELECT 1 FROM api_keys
+				 WHERE agent_id=$1 AND key_hash=$2 AND revoked_at IS NULL
+			)`, existing.AgentID, hashAPIKey(in.CurrentAPIKey)).Scan(&keyMatches)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !keyMatches {
+			return nil, ErrAgentSignupResumeRequired
+		}
+		if err := reserveAgentSignupVerificationMailTx(ctx, tx, human, time.Now().UTC()); err != nil {
+			return nil, err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE api_keys SET revoked_at=now() WHERE agent_id=$1 AND revoked_at IS NULL`, existing.AgentID); err != nil {
 			return nil, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE agent_signups SET note_to_human=$2, harness=$3, code_hash=$4, code_expires_at=$5, verification_attempts=0, verification_sent_at=now(), updated_at=now() WHERE id=$1`, existing.ID, strings.TrimSpace(in.NoteToHuman), strings.TrimSpace(in.Harness), in.CodeHash, in.CodeExpiresAt); err != nil {
 			return nil, err
 		}
-		key, err := createScopedAPIKeyTx(ctx, tx, userID, "Agent signup", existing.AgentID)
+		key, err := createScopedAPIKeyTx(ctx, tx, existing.UserID, "Agent signup", existing.AgentID)
 		if err != nil {
 			return nil, err
 		}
 		updated, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, existing.ID))
 		if err != nil {
 			return nil, err
+		}
+		if beforeCommit != nil {
+			if err := beforeCommit(updated); err != nil {
+				return nil, err
+			}
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
@@ -190,7 +215,33 @@ func (s *Store) RegisterAgentSignup(ctx context.Context, userID string, in Agent
 		}
 		return nil, err
 	}
+	if err := reserveAgentSignupVerificationMailTx(ctx, tx, human, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	// An already-established human account may have a verified custom domain.
+	// Prefer its primary domain, then its oldest verified domain, so anonymous
+	// retries cannot steer the namespace and the choice remains deterministic.
+	// New humans and accounts without a verified domain use the hosted shared
+	// domain. Ownership still remains isolated until verification below.
+	var customDomain string
+	err = tx.QueryRow(ctx, `
+		SELECT d.domain
+		  FROM users u
+		  JOIN domains d ON d.user_id=u.id
+		 WHERE u.email=$1 AND d.verified=true
+		 ORDER BY d.is_primary DESC, d.created_at ASC, d.domain ASC
+		 LIMIT 1`, human).Scan(&customDomain)
+	if err == nil {
+		domain = customDomain
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
 	signupID := "asu_" + generateID()
+	provisionalUserID := generateID()
+	if _, err := tx.Exec(ctx, `INSERT INTO users(id,email,name,google_subject)
+		VALUES($1,$2,$3,$4)`, provisionalUserID, signupID+"@agents.localhost", display, "agent-signup:"+signupID); err != nil {
+		return nil, err
+	}
 	slug := signupSlug(display, strings.TrimPrefix(signupID, "asu_"))
 	agentID := slug + "@" + domain
 	var taken bool
@@ -205,16 +256,16 @@ func (s *Store) RegisterAgentSignup(ctx context.Context, userID string, in Agent
 		}
 		agentID = strings.TrimRight(base, "-") + "-" + suffix + "@" + domain
 	}
-	if _, err := s.CreateAgentWithLimitTx(ctx, tx, agentID, domain, display, userID, in.MaxAgents); err != nil {
+	if _, err := s.CreateAgentWithLimitTx(ctx, tx, agentID, domain, display, provisionalUserID, 0); err != nil {
 		return nil, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO agent_signups
 		(id,user_id,agent_id,human_email,display_name,display_name_key,note_to_human,harness,code_hash,code_expires_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, signupID, userID, agentID, human, display, displayKey, strings.TrimSpace(in.NoteToHuman), strings.TrimSpace(in.Harness), in.CodeHash, in.CodeExpiresAt)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, signupID, provisionalUserID, agentID, human, display, displayKey, strings.TrimSpace(in.NoteToHuman), strings.TrimSpace(in.Harness), in.CodeHash, in.CodeExpiresAt)
 	if err != nil {
 		return nil, err
 	}
-	key, err := createScopedAPIKeyTx(ctx, tx, userID, "Agent signup", agentID)
+	key, err := createScopedAPIKeyTx(ctx, tx, provisionalUserID, "Agent signup", agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -222,10 +273,33 @@ func (s *Store) RegisterAgentSignup(ctx context.Context, userID string, in Agent
 	if err != nil {
 		return nil, err
 	}
+	if beforeCommit != nil {
+		if err := beforeCommit(signup); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return &AgentSignupResult{Signup: signup, APIKey: key, Created: true}, nil
+}
+
+func reserveAgentSignupVerificationMailTx(ctx context.Context, tx pgx.Tx, human string, now time.Time) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 32))`, human); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM agent_signup_verification_events WHERE human_email=$1 AND sent_at <= $2`, human, now.Add(-24*time.Hour)); err != nil {
+		return err
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_signup_verification_events WHERE human_email=$1`, human).Scan(&count); err != nil {
+		return err
+	}
+	if count >= AgentSignupVerificationMailLimit {
+		return ErrAgentSignupMailLimit
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO agent_signup_verification_events(human_email,sent_at) VALUES($1,$2)`, human, now)
+	return err
 }
 
 func applySignupReviewPolicy(ctx context.Context, tx pgx.Tx, agentID, human string, review bool) error {
@@ -236,16 +310,70 @@ func applySignupReviewPolicy(ctx context.Context, tx pgx.Tx, agentID, human stri
 	return err
 }
 
-func (s *Store) VerifyAgentSignup(ctx context.Context, agentID, presentedHash string, review bool, now time.Time) (*AgentSignup, error) {
+func transferAgentSignupTx(ctx context.Context, tx pgx.Tx, signupID, agentID, human, sourceUserID, targetUserID string, maxAgents int, review bool, now time.Time) error {
+	if sourceUserID == targetUserID {
+		return fmt.Errorf("provisional and verified signup owners must differ")
+	}
+	var targetEmail string
+	if err := tx.QueryRow(ctx, `SELECT email FROM users WHERE id=$1`, targetUserID).Scan(&targetEmail); err != nil {
+		return err
+	}
+	if NormalizeEmail(targetEmail) != human {
+		return ErrAgentSignupNotFound
+	}
+	// A signup may have selected this account's verified custom domain. Refuse
+	// to transfer it to any other account if ownership changed after signup;
+	// system shared domains have a NULL owner and remain valid for everyone.
+	var domainOwner *string
+	if err := tx.QueryRow(ctx, `SELECT d.user_id FROM agent_identities a JOIN domains d ON d.domain=a.registered_domain WHERE a.id=$1`, agentID).Scan(&domainOwner); err != nil {
+		return err
+	}
+	if domainOwner != nil && *domainOwner != targetUserID {
+		return ErrAgentSignupNotFound
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 2))`, targetUserID); err != nil {
+		return err
+	}
+	if maxAgents > 0 {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_identities a JOIN domains d ON a.registered_domain=d.domain WHERE a.user_id=$1 AND a.deleted_at IS NULL`, targetUserID).Scan(&count); err != nil {
+			return err
+		}
+		if count >= maxAgents {
+			return &AgentLimitExceededError{Limit: maxAgents, Current: count}
+		}
+	}
+	result, err := tx.Exec(ctx, `UPDATE agent_identities SET user_id=$3 WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL`, agentID, sourceUserID, targetUserID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrAgentSignupNotFound
+	}
+	if _, err := tx.Exec(ctx, `UPDATE api_keys SET user_id=$2 WHERE agent_id=$1`, agentID, targetUserID); err != nil {
+		return err
+	}
+	if review {
+		if err := applySignupReviewPolicy(ctx, tx, agentID, human, true); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_signups SET user_id=$2,status='verified',review_outbound=$3,verified_at=$4,updated_at=$4 WHERE id=$1`, signupID, targetUserID, review, now); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) VerifyAgentSignup(ctx context.Context, agentID, presentedHash string, review bool, now time.Time, bind func(*AgentSignup) (targetUserID string, maxAgents int, err error)) (*AgentSignup, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	var signupID, human, status, expected string
+	var signupID, human, sourceUserID, status, expected string
 	var expires time.Time
 	var attempts int
-	if err := tx.QueryRow(ctx, `SELECT id,human_email,status,code_hash,code_expires_at,verification_attempts FROM agent_signups WHERE agent_id=$1 FOR UPDATE`, NormalizeEmail(agentID)).Scan(&signupID, &human, &status, &expected, &expires, &attempts); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id,human_email,user_id,status,code_hash,code_expires_at,verification_attempts FROM agent_signups WHERE agent_id=$1 FOR UPDATE`, NormalizeEmail(agentID)).Scan(&signupID, &human, &sourceUserID, &status, &expected, &expires, &attempts); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrAgentSignupNotFound
 		}
@@ -270,10 +398,18 @@ func (s *Store) VerifyAgentSignup(ctx context.Context, agentID, presentedHash st
 		}
 		return nil, ErrAgentSignupCodeInvalid
 	}
-	if err := applySignupReviewPolicy(ctx, tx, agentID, human, review); err != nil {
+	current, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, signupID))
+	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE agent_signups SET status='verified',review_outbound=$2,verified_at=$3,updated_at=$3 WHERE id=$1`, signupID, review, now); err != nil {
+	if bind == nil {
+		return nil, fmt.Errorf("agent signup owner resolver is required")
+	}
+	targetUserID, maxAgents, err := bind(current)
+	if err != nil {
+		return nil, err
+	}
+	if err := transferAgentSignupTx(ctx, tx, signupID, NormalizeEmail(agentID), human, sourceUserID, targetUserID, maxAgents, review, now); err != nil {
 		return nil, err
 	}
 	v, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, signupID))
@@ -286,14 +422,15 @@ func (s *Store) VerifyAgentSignup(ctx context.Context, agentID, presentedHash st
 	return v, nil
 }
 
-func (s *Store) ApproveAgentSignup(ctx context.Context, signupID, humanEmail string, review bool, now time.Time) (*AgentSignup, error) {
+func (s *Store) ApproveAgentSignup(ctx context.Context, signupID, humanEmail, targetUserID string, maxAgents int, review bool, now time.Time) (*AgentSignup, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	var agentID, human, status string
-	if err := tx.QueryRow(ctx, `SELECT agent_id,human_email,status FROM agent_signups WHERE id=$1 AND human_email=$2 FOR UPDATE`, signupID, NormalizeEmail(humanEmail)).Scan(&agentID, &human, &status); err != nil {
+	human := NormalizeEmail(humanEmail)
+	var agentID, sourceUserID, status string
+	if err := tx.QueryRow(ctx, `SELECT agent_id,user_id,status FROM agent_signups WHERE id=$1 AND human_email=$2 FOR UPDATE`, signupID, human).Scan(&agentID, &sourceUserID, &status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrAgentSignupNotFound
 		}
@@ -302,10 +439,7 @@ func (s *Store) ApproveAgentSignup(ctx context.Context, signupID, humanEmail str
 	if status != AgentSignupPending {
 		return nil, ErrAgentSignupFinal
 	}
-	if err := applySignupReviewPolicy(ctx, tx, agentID, human, review); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE agent_signups SET status='verified',review_outbound=$2,verified_at=$3,updated_at=$3 WHERE id=$1`, signupID, review, now); err != nil {
+	if err := transferAgentSignupTx(ctx, tx, signupID, agentID, human, sourceUserID, targetUserID, maxAgents, review, now); err != nil {
 		return nil, err
 	}
 	v, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, signupID))
@@ -316,6 +450,39 @@ func (s *Store) ApproveAgentSignup(ctx context.Context, signupID, humanEmail str
 		return nil, err
 	}
 	return v, nil
+}
+
+// CheckAgentSignupSend validates the non-consuming part of the provisional
+// egress policy. Call it before account quotas and suppression checks so a
+// forbidden provisional request always receives the same 403 and cannot use
+// those checks as an oracle. The returned status is empty for ordinary agents.
+func (s *Store) CheckAgentSignupSend(ctx context.Context, agentID string, recipients []string, scheduled bool) (string, error) {
+	var human, status string
+	err := s.pool.QueryRow(ctx, `SELECT human_email,status FROM agent_signups WHERE agent_id=$1`, NormalizeEmail(agentID)).Scan(&human, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	switch status {
+	case AgentSignupVerified:
+		return status, nil
+	case AgentSignupRejected:
+		return status, ErrAgentSignupRejected
+	case AgentSignupPending:
+		if scheduled {
+			return status, ErrAgentSignupPendingVerification
+		}
+		for _, recipient := range recipients {
+			if NormalizeMailboxAddress(recipient) != human {
+				return status, ErrAgentSignupPendingVerification
+			}
+		}
+		return status, nil
+	default:
+		return status, ErrAgentSignupRejected
+	}
 }
 
 func (s *Store) RejectAgentSignup(ctx context.Context, signupID, humanEmail string, now time.Time) error {
@@ -392,8 +559,15 @@ func (s *Store) ConsumeAgentSignupSend(ctx context.Context, agentID string, reci
 	if err != nil {
 		return err
 	}
-	if status != AgentSignupPending {
+	switch status {
+	case AgentSignupVerified:
 		return nil
+	case AgentSignupRejected:
+		return ErrAgentSignupRejected
+	case AgentSignupPending:
+		// Continue below while holding the signup row lock.
+	default:
+		return ErrAgentSignupRejected
 	}
 	for _, recipient := range recipients {
 		if NormalizeMailboxAddress(recipient) != human {

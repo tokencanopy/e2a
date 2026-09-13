@@ -7,6 +7,7 @@ export interface SignupCreateOptions {
   displayName?: string;
   noteToHuman?: string;
   harness?: string;
+  currentApiKey?: string;
   json?: boolean;
 }
 
@@ -21,7 +22,7 @@ export async function signupCreate(opts: SignupCreateOptions): Promise<void> {
   if (!opts.humanEmail || !opts.displayName) {
     fail(
       EXIT.USAGE,
-      "usage: e2a signup create --human-email <email> --display-name <name> [--note <text>] [--harness <name>] [--json]",
+      "usage: e2a signup create --human-email <email> --display-name <name> [--note <text>] [--harness <name>] [--current-api-key <key>] [--json]",
     );
   }
   const config = loadConfig();
@@ -31,6 +32,7 @@ export async function signupCreate(opts: SignupCreateOptions): Promise<void> {
       displayName: opts.displayName,
       noteToHuman: opts.noteToHuman,
       harness: opts.harness,
+      ...(opts.currentApiKey ? { currentApiKey: opts.currentApiKey } : {}),
     },
     { baseUrl: config.api_url },
   );

@@ -9,7 +9,7 @@ const signup = {
   inbox: "build-bot@agents.example.test",
   human_email: "owner@example.test",
   display_name: "Build Bot",
-  note_to_human: "",
+  note_to_human: "I need an inbox for build notifications.",
   harness: "codex",
   status: "pending",
   review_outbound: false,
@@ -35,6 +35,7 @@ it("lets the human approve a requested agent with the existing review gate", asy
 
   expect(await screen.findByText("Build Bot")).toBeInTheDocument();
   expect(screen.getByText("build-bot@agents.example.test")).toBeInTheDocument();
+  expect(screen.getByText("I need an inbox for build notifications.")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("checkbox", { name: /review outbound/i }));
   fireEvent.click(screen.getByRole("button", { name: "Approve" }));

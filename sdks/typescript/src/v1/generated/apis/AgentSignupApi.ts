@@ -26,8 +26,8 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
     /**
      * Account-scoped. Optionally routes the verified agent\'s non-human outbound through the existing review queue.
      * Approve a pending agent identity (beta)
-     * @param id 
-     * @param approveAgentSignupInputBody 
+     * @param id
+     * @param approveAgentSignupInputBody
      */
     public async approveAgentSignup(id: string, approveAgentSignupInputBody: ApproveAgentSignupInputBody, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
@@ -70,7 +70,7 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
         if (authMethod?.applySecurityAuthentication) {
             await authMethod?.applySecurityAuthentication(requestContext);
         }
-        
+
         const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
         if (defaultAuth?.applySecurityAuthentication) {
             await defaultAuth?.applySecurityAuthentication(requestContext);
@@ -80,9 +80,9 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
-     * Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.
+     * Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
      * Create a provisional agent identity (beta)
-     * @param agentSignupRequest 
+     * @param agentSignupRequest
      */
     public async createAgentSignup(agentSignupRequest: AgentSignupRequest, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
@@ -112,7 +112,7 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
         );
         requestContext.setBody(serializedBody);
 
-        
+
         const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
         if (defaultAuth?.applySecurityAuthentication) {
             await defaultAuth?.applySecurityAuthentication(requestContext);
@@ -155,7 +155,7 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
         if (authMethod?.applySecurityAuthentication) {
             await authMethod?.applySecurityAuthentication(requestContext);
         }
-        
+
         const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
         if (defaultAuth?.applySecurityAuthentication) {
             await defaultAuth?.applySecurityAuthentication(requestContext);
@@ -167,8 +167,8 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
     /**
      * Account-scoped. Revokes the signup key and deactivates the inbox.
      * Reject and deactivate a pending agent identity (beta)
-     * @param id 
-     * @param requestBody 
+     * @param id
+     * @param requestBody
      */
     public async rejectAgentSignup(id: string, requestBody: { [key: string]: any; }, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
@@ -211,7 +211,7 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
         if (authMethod?.applySecurityAuthentication) {
             await authMethod?.applySecurityAuthentication(requestContext);
         }
-        
+
         const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
         if (defaultAuth?.applySecurityAuthentication) {
             await defaultAuth?.applySecurityAuthentication(requestContext);
@@ -223,7 +223,7 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
     /**
      * Requires the agent-scoped key returned by signup. A successful code verification unlocks normal plan limits and may enable the existing human-review queue.
      * Verify a provisional identity with its code (beta)
-     * @param verifyAgentSignupRequest 
+     * @param verifyAgentSignupRequest
      */
     public async verifyAgentSignup(verifyAgentSignupRequest: VerifyAgentSignupRequest, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
@@ -259,7 +259,7 @@ export class AgentSignupApiRequestFactory extends BaseAPIRequestFactory {
         if (authMethod?.applySecurityAuthentication) {
             await authMethod?.applySecurityAuthentication(requestContext);
         }
-        
+
         const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
         if (defaultAuth?.applySecurityAuthentication) {
             await defaultAuth?.applySecurityAuthentication(requestContext);

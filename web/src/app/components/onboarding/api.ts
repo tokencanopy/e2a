@@ -124,6 +124,7 @@ export type AgentSignupView = {
   inbox: string;
   human_email: string;
   display_name: string;
+  note_to_human?: string;
   harness?: string;
   status: string;
   review_outbound: boolean;

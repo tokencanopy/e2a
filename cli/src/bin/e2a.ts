@@ -50,6 +50,7 @@ Usage:
         --display-name <name>      Human-readable agent name used for its inbox slug
         --note <text>              Optional context included in the verification email
         --harness <name>           Optional harness identifier
+        --current-api-key <key>   Required to rotate/resend an existing pending signup
         --json                     Print the full result, including the one-time API key
   e2a signup verify                Verify the provisional inbox with its returned key
         --api-key <key> --code <n> Six-digit code sent to the human
@@ -398,13 +399,14 @@ async function main() {
       const sub = args[0];
       const rest = args.slice(1);
       if (sub === "create") {
-        checkFlags(rest, ["--human-email", "--display-name", "--note", "--harness", "--json"]);
+        checkFlags(rest, ["--human-email", "--display-name", "--note", "--harness", "--current-api-key", "--json"]);
         getPositionals(rest, 0, "usage: e2a signup create --human-email <email> --display-name <name> [options]");
         await signupCreate({
           humanEmail: getFlagChecked(rest, "--human-email"),
           displayName: getFlagChecked(rest, "--display-name"),
           noteToHuman: getFlagChecked(rest, "--note"),
           harness: getFlagChecked(rest, "--harness"),
+          currentApiKey: getFlagChecked(rest, "--current-api-key"),
           json: hasFlag(rest, "--json"),
         });
       } else if (sub === "verify") {

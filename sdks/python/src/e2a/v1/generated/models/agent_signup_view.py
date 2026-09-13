@@ -32,12 +32,13 @@ class AgentSignupView(BaseModel):
     harness: Optional[StrictStr] = None
     human_email: StrictStr
     id: StrictStr
-    inbox: StrictStr
+    inbox: StrictStr = Field(description="Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain.")
+    note_to_human: Optional[StrictStr] = None
     review_outbound: StrictBool
     status: StrictStr = Field(description="Open lifecycle value. Known values: pending, verified, rejected.")
     verification_expires_at: datetime
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["created_at", "display_name", "harness", "human_email", "id", "inbox", "review_outbound", "status", "verification_expires_at"]
+    __properties: ClassVar[List[str]] = ["created_at", "display_name", "harness", "human_email", "id", "inbox", "note_to_human", "review_outbound", "status", "verification_expires_at"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -103,6 +104,7 @@ class AgentSignupView(BaseModel):
             "human_email": obj.get("human_email"),
             "id": obj.get("id"),
             "inbox": obj.get("inbox"),
+            "note_to_human": obj.get("note_to_human"),
             "review_outbound": obj.get("review_outbound"),
             "status": obj.get("status"),
             "verification_expires_at": obj.get("verification_expires_at")
@@ -113,5 +115,3 @@ class AgentSignupView(BaseModel):
                 _obj.additional_properties[_key] = obj.get(_key)
 
         return _obj
-
-

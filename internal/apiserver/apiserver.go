@@ -259,9 +259,8 @@ func BuildDeps(p Params) httpapi.Deps {
 		RegisterAgentSignup:           p.API.RegisterAgentSignup,
 		VerifyAgentSignup:             p.API.VerifyAgentSignup,
 		ListPendingAgentSignups:       p.Store.ListPendingAgentSignups,
-		ApproveAgentSignup: func(ctx context.Context, signupID, humanEmail string, reviewOutbound bool) (*identity.AgentSignup, error) {
-			return p.Store.ApproveAgentSignup(ctx, signupID, humanEmail, reviewOutbound, time.Now().UTC())
-		},
+		ApproveAgentSignup:            p.API.ApproveAgentSignup,
+		CheckAgentSignupSend:          p.API.CheckAgentSignupSend,
 		RejectAgentSignup: func(ctx context.Context, signupID, humanEmail string) error {
 			return p.Store.RejectAgentSignup(ctx, signupID, humanEmail, time.Now().UTC())
 		},

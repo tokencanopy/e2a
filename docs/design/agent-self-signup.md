@@ -18,7 +18,7 @@ The flow creates exactly one provisional agent identity, sends a six-digit verif
 
 ## 3. Caller experience
 
-`POST /v1/agent-signup` is public and accepts `human_email`, `display_name`, optional `note_to_human`, and optional `harness`. It returns `201` for a new provisional identity and `200` for an idempotent re-signup. Both responses reveal the newly rotated agent-scoped API key once, the inbox address, signup id, status, verification expiry, and the provisional restrictions.
+`POST /v1/agent-signup` is public and accepts `human_email`, `display_name`, optional `note_to_human`, optional `harness`, and optional `current_api_key`. It returns `201` for a new provisional identity and `200` for a possession-authorized re-signup. A re-signup of an existing pair requires its current key. Both successful responses reveal the newly rotated agent-scoped API key once, the inbox address, signup id, status, verification expiry, and the provisional restrictions.
 
 The agent verifies with its returned key:
 
@@ -34,9 +34,9 @@ Approval accepts the same optional `review_outbound`. Rejection deactivates the 
 
 ## 4. Ownership and lifecycle model
 
-The signup transaction creates or reuses a restricted placeholder user keyed by normalized human email, creates one agent under the deployment shared domain, creates the signup row, and mints an agent-scoped key. Placeholder subjects use a reserved `agent-signup:` prefix. A successful verified browser login may atomically claim only such a placeholder row; ordinary email conflicts are never merged.
+The signup transaction creates an isolated provisional user under the non-routable `agents.localhost` namespace, creates one agent, creates the signup row, and mints an agent-scoped key. If the declared human already has an account with verified custom domains, the inbox uses the primary domain (then the oldest verified domain as a deterministic fallback); otherwise it uses the deployment shared domain. The provisional row does not consume quota from or expose itself in the human's account. Verification creates or resolves the human's claimable placeholder account and atomically transfers the live agent, key, and signup record under that account's plan cap. A successful verified browser login may claim only a placeholder with the reserved `agent-signup:` subject prefix; ordinary email conflicts are never merged.
 
-States are `pending`, `verified`, and `rejected`. Only `pending` can transition. Verification codes are HMAC-hashed, expire after 48 hours, permit five failed attempts, and are replaced on every re-signup. Re-signup revokes the previous credential before returning the replacement.
+States are `pending`, `verified`, and `rejected`. Only `pending` can transition. Verification codes are HMAC-hashed, expire after 48 hours, permit five failed attempts, and are replaced on every re-signup. Re-signup proves possession of the current credential and revokes it before returning the replacement.
 
 The unique normalized pair `(human_email, display_name)` is the idempotency key. The inbox address is generated from the display name plus a stable collision suffix when needed, and never changes on re-signup.
 
@@ -61,7 +61,8 @@ When `review_outbound` is selected at verification or approval, the transition w
 - Normalize and validate human addresses and display names before lookup.
 - Never log API keys, verification codes, notes, or full human addresses.
 - Store only an HMAC of the verification code.
-- Apply a dedicated anonymous per-IP rate limit to signup requests in addition to the per-identity re-signup behavior.
+- Apply a dedicated anonymous per-source rate limit to public REST callers. Internal MCP-proxy calls are keyed by a digest of normalized human email, so all callers targeting one recipient share a budget without collapsing every MCP user into one global proxy bucket.
+- Keep a durable five-per-24-hour verification-mail ledger per normalized human email across every source IP and transport.
 - Use constant-time code comparison and uniform verification failures.
 - Scope pending list/approve/reject by the authenticated account's verified email as well as signup id.
 - Revoke existing signup keys transactionally on re-signup and rejection.

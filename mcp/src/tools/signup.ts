@@ -32,7 +32,7 @@ export function registerAgentSignupTools(
     {
       title: "Create a provisional e2a agent",
       description:
-        "Create an e2a inbox and one-time agent API key without an existing credential. A six-digit verification code is emailed to the named human. Save api_key from the result, then call verify_agent_signup. Repeating the same human_email + display_name rotates the key and resends the code.",
+        "Create an e2a inbox and one-time agent API key without an existing credential. A six-digit verification code is emailed to the named human. Save api_key from the result, then call verify_agent_signup. To repeat the same human_email + display_name, pass current_api_key; the successful request rotates it and resends the code.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -44,6 +44,7 @@ export function registerAgentSignupTools(
         display_name: z.string().min(1).max(200).describe("Human-readable agent name; the inbox slug is derived from it."),
         note_to_human: z.string().max(2000).optional().describe("Optional explanation included in the verification email."),
         harness: z.string().max(100).optional().describe("Optional harness identifier, for example codex or a custom runtime name."),
+        current_api_key: z.string().min(1).max(256).optional().describe("Current agent key, required to rotate and resend an existing pending signup."),
       }),
     },
     async (args) =>
@@ -53,6 +54,7 @@ export function registerAgentSignupTools(
           displayName: args.display_name,
           ...(args.note_to_human !== undefined ? { noteToHuman: args.note_to_human } : {}),
           ...(args.harness !== undefined ? { harness: args.harness } : {}),
+          ...(args.current_api_key !== undefined ? { currentApiKey: args.current_api_key } : {}),
         }),
       ),
   );

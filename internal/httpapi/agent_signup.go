@@ -16,10 +16,11 @@ import (
 )
 
 type AgentSignupRequest struct {
-	HumanEmail  string `json:"human_email" required:"true" maxLength:"320" format:"email" doc:"Email address of the human who will verify and own this agent."`
-	DisplayName string `json:"display_name" required:"true" minLength:"1" maxLength:"200" doc:"Human-readable agent name. The inbox slug is derived from this value."`
-	NoteToHuman string `json:"note_to_human,omitempty" maxLength:"2000" doc:"Optional explanation included verbatim in the verification email."`
-	Harness     string `json:"harness,omitempty" maxLength:"100" doc:"Optional agent harness identifier for diagnostics."`
+	HumanEmail    string `json:"human_email" required:"true" maxLength:"320" format:"email" doc:"Email address of the human who will verify and own this agent."`
+	DisplayName   string `json:"display_name" required:"true" minLength:"1" maxLength:"200" doc:"Human-readable agent name. The inbox slug is derived from this value."`
+	NoteToHuman   string `json:"note_to_human,omitempty" maxLength:"2000" doc:"Optional explanation included verbatim in the verification email."`
+	Harness       string `json:"harness,omitempty" maxLength:"100" doc:"Optional agent harness identifier for diagnostics."`
+	CurrentAPIKey string `json:"current_api_key,omitempty" maxLength:"256" doc:"Current agent-scoped key. Required when resuming the same pending human_email + display_name; successful resume rotates it."`
 }
 
 type agentSignupInput struct{ Body AgentSignupRequest }
@@ -33,9 +34,10 @@ type AgentSignupRestrictionsView struct {
 
 type AgentSignupView struct {
 	ID                 string    `json:"id"`
-	Inbox              string    `json:"inbox"`
+	Inbox              string    `json:"inbox" doc:"Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain."`
 	HumanEmail         string    `json:"human_email"`
 	DisplayName        string    `json:"display_name"`
+	NoteToHuman        string    `json:"note_to_human,omitempty"`
 	Harness            string    `json:"harness,omitempty"`
 	Status             string    `json:"status" doc:"Open lifecycle value. Known values: pending, verified, rejected."`
 	ReviewOutbound     bool      `json:"review_outbound"`
@@ -83,7 +85,7 @@ type rejectAgentSignupOutput struct {
 }
 
 func signupView(s *identity.AgentSignup) AgentSignupView {
-	return AgentSignupView{ID: s.ID, Inbox: s.AgentID, HumanEmail: s.HumanEmail, DisplayName: s.DisplayName,
+	return AgentSignupView{ID: s.ID, Inbox: s.AgentID, HumanEmail: s.HumanEmail, DisplayName: s.DisplayName, NoteToHuman: s.NoteToHuman,
 		Harness: s.Harness, Status: s.Status, ReviewOutbound: s.ReviewOutbound,
 		VerificationExpiry: s.CodeExpiresAt, CreatedAt: s.CreatedAt}
 }
@@ -92,7 +94,7 @@ func (s *Server) registerAgentSignup() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "createAgentSignup", Method: http.MethodPost, Path: "/v1/agent-signup",
 		Summary: "Create a provisional agent identity (beta)", Tags: []string{"agent signup"},
-		Description: "Public, no API key required. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name rotates the key and resends verification.",
+		Description: "Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.",
 		Extensions:  beta(), Responses: map[string]*huma.Response{"429": s.rateLimitedResponse(), "default": s.errorEnvelopeResponse()},
 	}, s.handleCreateAgentSignup)
 	registerOp(s.API, huma.Operation{
@@ -140,6 +142,10 @@ func signupError(err error) error {
 		return NewError(http.StatusNotFound, "not_found", "agent signup not found")
 	case errors.Is(err, identity.ErrAgentSignupFinal):
 		return NewError(http.StatusConflict, "conflict", "agent signup is already verified or rejected")
+	case errors.Is(err, identity.ErrAgentSignupResumeRequired):
+		return NewError(http.StatusConflict, "conflict", "an agent signup with this human_email and display_name already exists; provide its current_api_key to rotate and resend verification")
+	case errors.Is(err, identity.ErrAgentSignupMailLimit):
+		return NewError(http.StatusTooManyRequests, "rate_limited", "too many verification emails were requested for this human email; retry after 24 hours")
 	case errors.Is(err, identity.ErrAgentSignupCodeInvalid):
 		return NewError(http.StatusBadRequest, "invalid_request", "verification code is invalid")
 	case errors.Is(err, identity.ErrAgentSignupCodeExpired):
@@ -167,7 +173,7 @@ func (s *Server) handleCreateAgentSignup(ctx context.Context, in *agentSignupInp
 	if s.deps.RegisterAgentSignup == nil {
 		return nil, signupError(agent.ErrAgentSignupUnavailable)
 	}
-	result, err := s.deps.RegisterAgentSignup(ctx, identity.NormalizeEmail(in.Body.HumanEmail), strings.TrimSpace(in.Body.DisplayName), strings.TrimSpace(in.Body.NoteToHuman), strings.TrimSpace(in.Body.Harness))
+	result, err := s.deps.RegisterAgentSignup(ctx, identity.NormalizeEmail(in.Body.HumanEmail), strings.TrimSpace(in.Body.DisplayName), strings.TrimSpace(in.Body.NoteToHuman), strings.TrimSpace(in.Body.Harness), strings.TrimSpace(in.Body.CurrentAPIKey))
 	if err != nil {
 		return nil, signupError(err)
 	}
@@ -237,7 +243,7 @@ func (s *Server) handleApproveAgentSignup(ctx context.Context, in *approveAgentS
 	if err != nil {
 		return nil, err
 	}
-	v, err := s.deps.ApproveAgentSignup(ctx, in.ID, identity.NormalizeEmail(p.User.Email), in.Body.ReviewOutbound)
+	v, err := s.deps.ApproveAgentSignup(ctx, in.ID, identity.NormalizeEmail(p.User.Email), p.User.ID, in.Body.ReviewOutbound)
 	if err != nil {
 		return nil, signupError(err)
 	}

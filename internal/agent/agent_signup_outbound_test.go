@@ -19,10 +19,10 @@ func TestDeliverOutboundEnforcesPendingSignupAcrossMessageTypes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, err := store.RegisterAgentSignup(ctx, user.ID, identity.AgentSignupRegistration{
+	registered, err := store.RegisterAgentSignup(ctx, identity.AgentSignupRegistration{
 		HumanEmail: user.Email, DisplayName: "Guard Bot", SharedDomain: "agents.e2a.dev",
-		CodeHash: "hash", CodeExpiresAt: time.Now().Add(time.Hour), MaxAgents: 3,
-	})
+		CodeHash: "hash", CodeExpiresAt: time.Now().Add(time.Hour),
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,10 +50,10 @@ func TestDeliverOutboundPendingSignupSendLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, err := store.RegisterAgentSignup(ctx, user.ID, identity.AgentSignupRegistration{
+	registered, err := store.RegisterAgentSignup(ctx, identity.AgentSignupRegistration{
 		HumanEmail: user.Email, DisplayName: "Quota Bot", SharedDomain: "agents.e2a.dev",
-		CodeHash: "hash", CodeExpiresAt: time.Now().Add(time.Hour), MaxAgents: 3,
-	})
+		CodeHash: "hash", CodeExpiresAt: time.Now().Add(time.Hour),
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,5 +74,28 @@ func TestDeliverOutboundPendingSignupSendLimit(t *testing.T) {
 	}
 	if outboundErr.Details["limit"] != identity.AgentSignupSendLimit {
 		t.Fatalf("sixth send details = %#v", outboundErr.Details)
+	}
+}
+
+func TestSendTestCoreRejectsPendingSignup(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	if err := store.EnsureSharedDomain(ctx, "agents.e2a.dev"); err != nil {
+		t.Fatal(err)
+	}
+	registered, err := store.RegisterAgentSignup(ctx, identity.AgentSignupRegistration{
+		HumanEmail: "owner@example.test", DisplayName: "Test Guard Bot", SharedDomain: "agents.e2a.dev",
+		CodeHash: "hash", CodeExpiresAt: time.Now().Add(time.Hour),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentIdentity, err := store.GetAgentByID(ctx, registered.Signup.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, outboundErr := api.SendTestCore(ctx, agentIdentity)
+	if result != nil || outboundErr == nil || outboundErr.Status != 403 || outboundErr.Code != "pending_human_verification" {
+		t.Fatalf("test send result/error = %#v/%#v", result, outboundErr)
 	}
 }

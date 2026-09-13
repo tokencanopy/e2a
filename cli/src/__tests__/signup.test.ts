@@ -35,6 +35,7 @@ describe("signup commands", () => {
       displayName: "Build Bot",
       noteToHuman: "Created for the build queue.",
       harness: "codex",
+      currentApiKey: "e2a_agt_current",
       json: true,
     });
 
@@ -44,6 +45,7 @@ describe("signup commands", () => {
         displayName: "Build Bot",
         noteToHuman: "Created for the build queue.",
         harness: "codex",
+        currentApiKey: "e2a_agt_current",
       },
       { baseUrl: "https://e2a.example.test" },
     );

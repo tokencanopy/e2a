@@ -247,6 +247,7 @@ async def test_public_agent_signup_needs_no_authorization(httpx_mock):
             "human_email": "owner@example.test",
             "display_name": "Build Bot",
             "harness": "codex",
+            "current_api_key": "e2a_agt_current",
         },
         base_url=BASE,
     )
@@ -260,6 +261,7 @@ async def test_public_agent_signup_needs_no_authorization(httpx_mock):
         "display_name": "Build Bot",
         "harness": "codex",
         "human_email": "owner@example.test",
+        "current_api_key": "e2a_agt_current",
     }
 
 

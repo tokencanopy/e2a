@@ -25,7 +25,7 @@ sent to its human:
 
 ```bash
 e2a signup create --human-email owner@example.com --display-name scout
-e2a signup verify --api-key 'e2a_agent_...' --code 123456 --review-outbound
+e2a signup verify --api-key 'e2a_agt_...' --code 123456 --review-outbound
 ```
 
 Save the key printed by `signup create`; it is shown once. Until verification,
