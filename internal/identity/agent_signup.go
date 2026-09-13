@@ -1,0 +1,374 @@
+package identity
+
+import (
+	"context"
+	"crypto/subtle"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+const (
+	AgentSignupPending  = "pending"
+	AgentSignupVerified = "verified"
+	AgentSignupRejected = "rejected"
+
+	AgentSignupSendLimit   = 5
+	AgentSignupMaxAttempts = 5
+)
+
+var (
+	ErrAgentSignupNotFound            = errors.New("agent signup not found")
+	ErrAgentSignupCodeInvalid         = errors.New("agent signup verification code is invalid")
+	ErrAgentSignupCodeExpired         = errors.New("agent signup verification code has expired")
+	ErrAgentSignupAttemptsExhausted   = errors.New("agent signup verification attempts exhausted")
+	ErrAgentSignupFinal               = errors.New("agent signup is already resolved")
+	ErrAgentSignupPendingVerification = errors.New("agent signup is pending human verification")
+	ErrAgentSignupSendLimit           = errors.New("agent signup provisional send limit reached")
+)
+
+type AgentSignup struct {
+	ID                   string
+	UserID               string
+	AgentID              string
+	HumanEmail           string
+	DisplayName          string
+	NoteToHuman          string
+	Harness              string
+	Status               string
+	CodeExpiresAt        time.Time
+	VerificationSentAt   time.Time
+	VerificationAttempts int
+	ReviewOutbound       bool
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	VerifiedAt           *time.Time
+	RejectedAt           *time.Time
+}
+
+type AgentSignupRegistration struct {
+	HumanEmail    string
+	DisplayName   string
+	NoteToHuman   string
+	Harness       string
+	SharedDomain  string
+	CodeHash      string
+	CodeExpiresAt time.Time
+	MaxAgents     int
+}
+
+type AgentSignupResult struct {
+	Signup  *AgentSignup
+	APIKey  *APIKey
+	Created bool
+}
+
+// EnsureAgentSignupUser returns the account row identified by the verified
+// human mailbox. It creates a deliberately claimable placeholder only when no
+// account owns that email; existing accounts are never modified or merged.
+func (s *Store) EnsureAgentSignupUser(ctx context.Context, humanEmail, displayName string) (*User, error) {
+	email := NormalizeEmail(humanEmail)
+	id := generateID()
+	u := &User{}
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO users (id, email, name, google_subject)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+		 RETURNING id, email, name, google_subject, created_at`,
+		id, email, strings.TrimSpace(displayName), "agent-signup:"+id,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	return u, err
+}
+
+func normalizedSignupName(name string) (string, string) {
+	display := strings.Join(strings.Fields(name), " ")
+	return display, strings.ToLower(display)
+}
+
+var signupSlugInvalid = regexp.MustCompile(`[^a-z0-9]+`)
+
+func signupSlug(displayName, fallback string) string {
+	slug := strings.Trim(signupSlugInvalid.ReplaceAllString(strings.ToLower(displayName), "-"), "-")
+	if len(slug) > 32 {
+		slug = strings.TrimRight(slug[:32], "-")
+	}
+	if len(slug) < 2 {
+		slug = "agent-" + fallback[:6]
+	}
+	return slug
+}
+
+func scanAgentSignup(row pgx.Row) (*AgentSignup, error) {
+	v := &AgentSignup{}
+	err := row.Scan(&v.ID, &v.UserID, &v.AgentID, &v.HumanEmail, &v.DisplayName,
+		&v.NoteToHuman, &v.Harness, &v.Status, &v.CodeExpiresAt,
+		&v.VerificationSentAt, &v.VerificationAttempts, &v.ReviewOutbound,
+		&v.CreatedAt, &v.UpdatedAt, &v.VerifiedAt, &v.RejectedAt)
+	return v, err
+}
+
+const agentSignupColumns = `id, user_id, agent_id, human_email, display_name,
+ note_to_human, harness, status, code_expires_at, verification_sent_at,
+ verification_attempts, review_outbound, created_at, updated_at, verified_at, rejected_at`
+
+func createScopedAPIKeyTx(ctx context.Context, tx pgx.Tx, userID, name, agentID string) (*APIKey, error) {
+	id := "apk_" + generateID()
+	plaintext := generateAPIKey(ScopeAgent)
+	now := time.Now()
+	ak := &APIKey{ID: id, UserID: userID, Name: name, KeyPrefix: plaintext[:16], PlaintextKey: plaintext, CreatedAt: now, Scope: ScopeAgent, AgentID: &agentID}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scope, agent_id, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		ak.ID, userID, name, ak.KeyPrefix, hashAPIKey(plaintext), ScopeAgent, agentID, now)
+	return ak, err
+}
+
+// RegisterAgentSignup creates the provisional identity or rotates the
+// credential/code of the existing pending identity for the normalized pair.
+func (s *Store) RegisterAgentSignup(ctx context.Context, userID string, in AgentSignupRegistration) (*AgentSignupResult, error) {
+	human := NormalizeEmail(in.HumanEmail)
+	display, displayKey := normalizedSignupName(in.DisplayName)
+	domain := normalizeDomain(in.SharedDomain)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`, human+"\n"+displayKey); err != nil {
+		return nil, err
+	}
+
+	existing, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE human_email=$1 AND display_name_key=$2 FOR UPDATE`, human, displayKey))
+	if err == nil {
+		if existing.Status != AgentSignupPending {
+			return nil, ErrAgentSignupFinal
+		}
+		if _, err := tx.Exec(ctx, `UPDATE api_keys SET revoked_at=now() WHERE agent_id=$1 AND revoked_at IS NULL`, existing.AgentID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE agent_signups SET note_to_human=$2, harness=$3, code_hash=$4, code_expires_at=$5, verification_attempts=0, verification_sent_at=now(), updated_at=now() WHERE id=$1`, existing.ID, strings.TrimSpace(in.NoteToHuman), strings.TrimSpace(in.Harness), in.CodeHash, in.CodeExpiresAt); err != nil {
+			return nil, err
+		}
+		key, err := createScopedAPIKeyTx(ctx, tx, userID, "Agent signup", existing.AgentID)
+		if err != nil {
+			return nil, err
+		}
+		updated, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, existing.ID))
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return &AgentSignupResult{Signup: updated, APIKey: key}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	var verified bool
+	if err := tx.QueryRow(ctx, `SELECT verified FROM domains WHERE domain=$1`, domain).Scan(&verified); err != nil || !verified {
+		if err == nil {
+			err = fmt.Errorf("shared domain is not verified")
+		}
+		return nil, err
+	}
+	signupID := "asu_" + generateID()
+	slug := signupSlug(display, strings.TrimPrefix(signupID, "asu_"))
+	agentID := slug + "@" + domain
+	var taken bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_identities WHERE id=$1)`, agentID).Scan(&taken); err != nil {
+		return nil, err
+	}
+	if taken {
+		suffix := strings.TrimPrefix(signupID, "asu_")[:6]
+		base := slug
+		if len(base) > 32 {
+			base = base[:32]
+		}
+		agentID = strings.TrimRight(base, "-") + "-" + suffix + "@" + domain
+	}
+	if _, err := s.CreateAgentWithLimitTx(ctx, tx, agentID, domain, display, userID, in.MaxAgents); err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO agent_signups
+		(id,user_id,agent_id,human_email,display_name,display_name_key,note_to_human,harness,code_hash,code_expires_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, signupID, userID, agentID, human, display, displayKey, strings.TrimSpace(in.NoteToHuman), strings.TrimSpace(in.Harness), in.CodeHash, in.CodeExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	key, err := createScopedAPIKeyTx(ctx, tx, userID, "Agent signup", agentID)
+	if err != nil {
+		return nil, err
+	}
+	signup, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, signupID))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &AgentSignupResult{Signup: signup, APIKey: key, Created: true}, nil
+}
+
+func applySignupReviewPolicy(ctx context.Context, tx pgx.Tx, agentID, human string, review bool) error {
+	if !review {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE agent_identities SET outbound_policy='allowlist', outbound_allowlist=$2, outbound_policy_action='review' WHERE id=$1`, agentID, []string{human})
+	return err
+}
+
+func (s *Store) VerifyAgentSignup(ctx context.Context, agentID, presentedHash string, review bool, now time.Time) (*AgentSignup, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var signupID, human, status, expected string
+	var expires time.Time
+	var attempts int
+	if err := tx.QueryRow(ctx, `SELECT id,human_email,status,code_hash,code_expires_at,verification_attempts FROM agent_signups WHERE agent_id=$1 FOR UPDATE`, NormalizeEmail(agentID)).Scan(&signupID, &human, &status, &expected, &expires, &attempts); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrAgentSignupNotFound
+		}
+		return nil, err
+	}
+	if status != AgentSignupPending {
+		return nil, ErrAgentSignupFinal
+	}
+	if !now.Before(expires) {
+		return nil, ErrAgentSignupCodeExpired
+	}
+	if attempts >= AgentSignupMaxAttempts {
+		return nil, ErrAgentSignupAttemptsExhausted
+	}
+	if subtle.ConstantTimeCompare([]byte(expected), []byte(presentedHash)) != 1 {
+		_, err = tx.Exec(ctx, `UPDATE agent_signups SET verification_attempts=verification_attempts+1,updated_at=$2 WHERE id=$1`, signupID, now)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return nil, ErrAgentSignupCodeInvalid
+	}
+	if err := applySignupReviewPolicy(ctx, tx, agentID, human, review); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_signups SET status='verified',review_outbound=$2,verified_at=$3,updated_at=$3 WHERE id=$1`, signupID, review, now); err != nil {
+		return nil, err
+	}
+	v, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, signupID))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (s *Store) ApproveAgentSignup(ctx context.Context, signupID, humanEmail string, review bool, now time.Time) (*AgentSignup, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var agentID, human, status string
+	if err := tx.QueryRow(ctx, `SELECT agent_id,human_email,status FROM agent_signups WHERE id=$1 AND human_email=$2 FOR UPDATE`, signupID, NormalizeEmail(humanEmail)).Scan(&agentID, &human, &status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrAgentSignupNotFound
+		}
+		return nil, err
+	}
+	if status != AgentSignupPending {
+		return nil, ErrAgentSignupFinal
+	}
+	if err := applySignupReviewPolicy(ctx, tx, agentID, human, review); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_signups SET status='verified',review_outbound=$2,verified_at=$3,updated_at=$3 WHERE id=$1`, signupID, review, now); err != nil {
+		return nil, err
+	}
+	v, err := scanAgentSignup(tx.QueryRow(ctx, `SELECT `+agentSignupColumns+` FROM agent_signups WHERE id=$1`, signupID))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (s *Store) RejectAgentSignup(ctx context.Context, signupID, humanEmail string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var agentID, status string
+	if err := tx.QueryRow(ctx, `SELECT agent_id,status FROM agent_signups WHERE id=$1 AND human_email=$2 FOR UPDATE`, signupID, NormalizeEmail(humanEmail)).Scan(&agentID, &status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAgentSignupNotFound
+		}
+		return err
+	}
+	if status != AgentSignupPending {
+		return ErrAgentSignupFinal
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_signups SET status='rejected',rejected_at=$2,updated_at=$2 WHERE id=$1`, signupID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE api_keys SET revoked_at=$2 WHERE agent_id=$1 AND revoked_at IS NULL`, agentID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent_identities SET deleted_at=$2 WHERE id=$1`, agentID, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ConsumeAgentSignupSend is a no-op for ordinary and verified agents. Pending
+// signups may address only their human and consume one of five rolling slots.
+func (s *Store) ConsumeAgentSignupSend(ctx context.Context, agentID string, recipients []string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var signupID, human, status string
+	err = tx.QueryRow(ctx, `SELECT id,human_email,status FROM agent_signups WHERE agent_id=$1 FOR UPDATE`, NormalizeEmail(agentID)).Scan(&signupID, &human, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status != AgentSignupPending {
+		return nil
+	}
+	for _, recipient := range recipients {
+		if NormalizeMailboxAddress(recipient) != human {
+			return ErrAgentSignupPendingVerification
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM agent_signup_send_events WHERE signup_id=$1 AND sent_at <= $2`, signupID, now.Add(-24*time.Hour)); err != nil {
+		return err
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_signup_send_events WHERE signup_id=$1`, signupID).Scan(&count); err != nil {
+		return err
+	}
+	if count >= AgentSignupSendLimit {
+		return ErrAgentSignupSendLimit
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_signup_send_events(signup_id,sent_at) VALUES($1,$2)`, signupID, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

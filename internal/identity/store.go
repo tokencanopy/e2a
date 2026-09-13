@@ -5929,8 +5929,29 @@ func (s *Store) CreateOrGetUser(ctx context.Context, email, name, googleSub stri
 		 RETURNING id, email, name, google_subject, created_at`,
 		generateID(), email, name, googleSub,
 	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
-	if err != nil {
+	if err == nil {
+		return u, nil
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.ConstraintName != "users_email_key" {
 		return nil, err
+	}
+	// A public agent signup reserves the human's verified mailbox in a
+	// deliberately claimable placeholder account. Google has now verified
+	// that mailbox, so it may replace only the reserved agent-signup subject.
+	// Ordinary same-email conflicts remain hard errors and are never merged.
+	u = &User{}
+	claimErr := s.pool.QueryRow(ctx,
+		`UPDATE users SET google_subject=$2, name=$3
+		  WHERE email=$1 AND google_subject LIKE 'agent-signup:%'
+		  RETURNING id,email,name,google_subject,created_at`,
+		NormalizeEmail(email), googleSub, name,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	if errors.Is(claimErr, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if claimErr != nil {
+		return nil, claimErr
 	}
 	return u, nil
 }
@@ -6029,7 +6050,23 @@ func (s *Store) provisionUser(ctx context.Context, q rowQuerier, externalRef, em
 		// caller can collide with is email. (An id collision is astronomically
 		// unlikely and is not caller-actionable — surface it as a plain error.)
 		if pgErr.ConstraintName == "users_email_key" {
-			return nil, false, ErrEmailConflict
+			// The external control plane has verified the same mailbox. Claim
+			// only the reserved signup placeholder; never merge an ordinary
+			// user row on email alone.
+			u = &User{}
+			claimErr := q.QueryRow(ctx,
+				`UPDATE users SET google_subject=$2, name=$3
+				  WHERE email=$1 AND google_subject LIKE 'agent-signup:%'
+				  RETURNING id,email,name,google_subject,created_at`,
+				NormalizeEmail(email), subject, name,
+			).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+			if claimErr == nil {
+				return u, false, nil
+			}
+			if errors.Is(claimErr, pgx.ErrNoRows) {
+				return nil, false, ErrEmailConflict
+			}
+			return nil, false, claimErr
 		}
 		return nil, false, err
 	}
