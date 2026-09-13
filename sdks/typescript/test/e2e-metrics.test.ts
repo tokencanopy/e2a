@@ -109,7 +109,7 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
     }
 
     recordCovered("account.metrics");
-  }, 30_000);
+  }, 60_000);
 
   // Split from the flat read, and the only test in this suite carrying an
   // explicit timeout. group_by=agent fans the aggregate out per agent, so its
@@ -134,5 +134,5 @@ describe.skipIf(!env)("ts sdk live e2e: metrics (beta)", () => {
     }
 
     recordCovered("account.metrics");
-  }, 30_000);
+  }, 60_000);
 });
