@@ -208,7 +208,7 @@ it("keeps the scheduled-send scenario self-cleaning and projection-complete", ()
   );
   expect(scenario).toBeDefined();
   expect(scenario!.setup?.[0]?.register_agent?.email).toBe(
-    "scheduled-contract-{scenario_token}@agents.e2a.dev",
+    "scheduled-contract-{scenario_token}@agents.localhost",
   );
 
   const steps = new Map(scenario!.steps.map((step) => [step.id, step]));

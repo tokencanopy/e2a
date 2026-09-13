@@ -1094,7 +1094,7 @@ def test_scheduled_send_scenario_is_self_cleaning_and_projection_complete():
     steps = {step["id"]: step for step in scenario["steps"]}
 
     assert scenario["setup"][0]["register_agent"]["email"] == (
-        "scheduled-contract-{scenario_token}@agents.e2a.dev"
+        "scheduled-contract-{scenario_token}@agents.localhost"
     )
     assert steps["schedule_send"]["body"]["send_at"] == "{future_rfc3339}"
     assert steps["schedule_send"]["expect"]["body_match"] == {
@@ -1233,7 +1233,7 @@ def _slug(prefix: str) -> str:
 @requires_contract_server
 def test_client_send_wait_sent_returns_terminal_loopback_result():
     with E2AClient(API_KEY, base_url=BASE_URL) as client:
-        email = f"{_slug('sdkc-wait')}@agents.e2a.dev"
+        email = f"{_slug('sdkc-wait')}@agents.localhost"
         client.agents.create({"email": email})
         try:
             res = client.messages.send(
@@ -1257,7 +1257,7 @@ def test_client_send_managed_unsubscribe_is_accepted_and_held():
     # deterministic accepted shape is the review hold, mirroring the
     # managed_unsubscribe_send_held step of the Go/TS scenario runner.
     with E2AClient(API_KEY, base_url=BASE_URL) as client:
-        email = f"{_slug('sdkc-unsub')}@agents.e2a.dev"
+        email = f"{_slug('sdkc-unsub')}@agents.localhost"
         client.agents.create({"email": email})
         try:
             client.agents.replace_protection(
