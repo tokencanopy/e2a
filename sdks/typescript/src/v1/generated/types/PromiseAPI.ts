@@ -9,9 +9,14 @@ import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
 import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
 import { AgentMetricsView } from '../models/AgentMetricsView.js';
+import { AgentSignupCreateResponse } from '../models/AgentSignupCreateResponse.js';
+import { AgentSignupRequest } from '../models/AgentSignupRequest.js';
+import { AgentSignupRestrictionsView } from '../models/AgentSignupRestrictionsView.js';
+import { AgentSignupView } from '../models/AgentSignupView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
+import { ApproveAgentSignupInputBody } from '../models/ApproveAgentSignupInputBody.js';
 import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
@@ -86,6 +91,7 @@ import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
+import { PageAgentSignupView } from '../models/PageAgentSignupView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
 import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
@@ -121,6 +127,7 @@ import { RedeliverDelivery } from '../models/RedeliverDelivery.js';
 import { RedeliverEventRequest } from '../models/RedeliverEventRequest.js';
 import { RedeliverView } from '../models/RedeliverView.js';
 import { RegisterDomainRequest } from '../models/RegisterDomainRequest.js';
+import { RejectAgentSignupOutputBody } from '../models/RejectAgentSignupOutputBody.js';
 import { RejectRequest } from '../models/RejectRequest.js';
 import { RejectResultView } from '../models/RejectResultView.js';
 import { RenderedTemplateView } from '../models/RenderedTemplateView.js';
@@ -157,6 +164,7 @@ import { UserExportUser } from '../models/UserExportUser.js';
 import { ValidateTemplateRequest } from '../models/ValidateTemplateRequest.js';
 import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js';
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
+import { VerifyAgentSignupRequest } from '../models/VerifyAgentSignupRequest.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
 import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
@@ -385,6 +393,139 @@ export class PromiseAccountApi {
     public listSuppressions(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<PageSuppressionView> {
         const observableOptions = wrapOptions(_options);
         const result = this.api.listSuppressions(cursor, limit, observableOptions);
+        return result.toPromise();
+    }
+
+
+}
+
+
+
+import { ObservableAgentSignupApi } from './ObservableAPI.js';
+
+import { AgentSignupApiRequestFactory, AgentSignupApiResponseProcessor} from "../apis/AgentSignupApi.js";
+export class PromiseAgentSignupApi {
+    private api: ObservableAgentSignupApi
+
+    public constructor(
+        configuration: Configuration,
+        requestFactory?: AgentSignupApiRequestFactory,
+        responseProcessor?: AgentSignupApiResponseProcessor
+    ) {
+        this.api = new ObservableAgentSignupApi(configuration, requestFactory, responseProcessor);
+    }
+
+    /**
+     * Account-scoped. Optionally routes the verified agent\'s non-human outbound through the existing review queue.
+     * Approve a pending agent identity (beta)
+     * @param id
+     * @param approveAgentSignupInputBody
+     */
+    public approveAgentSignupWithHttpInfo(id: string, approveAgentSignupInputBody: ApproveAgentSignupInputBody, _options?: PromiseConfigurationOptions): Promise<HttpInfo<AgentSignupView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.approveAgentSignupWithHttpInfo(id, approveAgentSignupInputBody, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Account-scoped. Optionally routes the verified agent\'s non-human outbound through the existing review queue.
+     * Approve a pending agent identity (beta)
+     * @param id
+     * @param approveAgentSignupInputBody
+     */
+    public approveAgentSignup(id: string, approveAgentSignupInputBody: ApproveAgentSignupInputBody, _options?: PromiseConfigurationOptions): Promise<AgentSignupView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.approveAgentSignup(id, approveAgentSignupInputBody, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
+     * Create a provisional agent identity (beta)
+     * @param agentSignupRequest
+     */
+    public createAgentSignupWithHttpInfo(agentSignupRequest: AgentSignupRequest, _options?: PromiseConfigurationOptions): Promise<HttpInfo<AgentSignupCreateResponse>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.createAgentSignupWithHttpInfo(agentSignupRequest, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
+     * Create a provisional agent identity (beta)
+     * @param agentSignupRequest
+     */
+    public createAgentSignup(agentSignupRequest: AgentSignupRequest, _options?: PromiseConfigurationOptions): Promise<AgentSignupCreateResponse> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.createAgentSignup(agentSignupRequest, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * List pending agent identities for the signed-in human (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listPendingAgentSignupsWithHttpInfo(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<HttpInfo<PageAgentSignupView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.listPendingAgentSignupsWithHttpInfo(cursor, limit, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * List pending agent identities for the signed-in human (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listPendingAgentSignups(cursor?: string, limit?: number, _options?: PromiseConfigurationOptions): Promise<PageAgentSignupView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.listPendingAgentSignups(cursor, limit, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Account-scoped. Revokes the signup key and deactivates the inbox.
+     * Reject and deactivate a pending agent identity (beta)
+     * @param id
+     * @param requestBody
+     */
+    public rejectAgentSignupWithHttpInfo(id: string, requestBody: { [key: string]: any; }, _options?: PromiseConfigurationOptions): Promise<HttpInfo<RejectAgentSignupOutputBody>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.rejectAgentSignupWithHttpInfo(id, requestBody, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Account-scoped. Revokes the signup key and deactivates the inbox.
+     * Reject and deactivate a pending agent identity (beta)
+     * @param id
+     * @param requestBody
+     */
+    public rejectAgentSignup(id: string, requestBody: { [key: string]: any; }, _options?: PromiseConfigurationOptions): Promise<RejectAgentSignupOutputBody> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.rejectAgentSignup(id, requestBody, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Requires the agent-scoped key returned by signup. A successful code verification unlocks normal plan limits and may enable the existing human-review queue.
+     * Verify a provisional identity with its code (beta)
+     * @param verifyAgentSignupRequest
+     */
+    public verifyAgentSignupWithHttpInfo(verifyAgentSignupRequest: VerifyAgentSignupRequest, _options?: PromiseConfigurationOptions): Promise<HttpInfo<AgentSignupView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.verifyAgentSignupWithHttpInfo(verifyAgentSignupRequest, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Requires the agent-scoped key returned by signup. A successful code verification unlocks normal plan limits and may enable the existing human-review queue.
+     * Verify a provisional identity with its code (beta)
+     * @param verifyAgentSignupRequest
+     */
+    public verifyAgentSignup(verifyAgentSignupRequest: VerifyAgentSignupRequest, _options?: PromiseConfigurationOptions): Promise<AgentSignupView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.verifyAgentSignup(verifyAgentSignupRequest, observableOptions);
         return result.toPromise();
     }
 

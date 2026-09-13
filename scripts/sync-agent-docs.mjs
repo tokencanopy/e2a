@@ -9,6 +9,7 @@ export const AGENT_DOC_MIRRORS = [
   ["plugins/e2a/docs/auth.md", "web/public/auth.md"],
   ["plugins/e2a/docs/sdk.md", "web/public/sdk.md"],
   ["plugins/e2a/docs/templates.md", "web/public/templates.md"],
+  ["plugins/e2a/docs/agent-signup.md", "web/public/agent-signup.md"],
   ["plugins/e2a/docs/llms.txt", "web/public/llms.txt"],
 ];
 
@@ -26,6 +27,7 @@ export const LLMS_FULL_SOURCES = [
   ["plugins/e2a/docs/auth.md", "https://e2a.dev/auth.md"],
   ["plugins/e2a/docs/sdk.md", "https://e2a.dev/sdk.md"],
   ["plugins/e2a/docs/templates.md", "https://e2a.dev/templates.md"],
+  ["plugins/e2a/docs/agent-signup.md", "https://e2a.dev/agent-signup.md"],
 ];
 
 const LLMS_FULL_HEADER = `# e2a — full documentation

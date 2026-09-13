@@ -40,6 +40,16 @@ For application email, start with the [transactional email guide](https://e2a.de
 
 ## Quickstart
 
+### Let an agent create its own inbox
+
+No e2a account or API key is required to begin. Give the agent
+[`https://e2a.dev/agent-signup.md`](https://e2a.dev/agent-signup.md), or connect
+it to the public signup MCP endpoint at `https://api.e2a.dev/mcp/signup`. The
+agent creates a provisional inbox, a six-digit code is sent to its human, and
+the agent verifies that code to unlock normal use. The human can also approve
+or reject the request in the dashboard and can require human review for future
+outbound mail.
+
 ### Connect your agent to hosted e2a
 
 Give your AI agent an inbox directly. Install the e2a plugin — it registers the hosted [MCP server](#mcp-server) and an operate-well skill, so your agent can send, receive, reply in-thread, and hold mail for review out of the box. On first tool use it runs an OAuth flow in your browser — no API key to paste.

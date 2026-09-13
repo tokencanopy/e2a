@@ -19,6 +19,7 @@ __version__ = "1.0.0"
 # Define package exports
 __all__ = [
     "AccountApi",
+    "AgentSignupApi",
     "AgentsApi",
     "ContactsApi",
     "ConversationsApi",
@@ -46,9 +47,14 @@ __all__ = [
     "AgentIdentity",
     "AgentMetricsGroupView",
     "AgentMetricsView",
+    "AgentSignupCreateResponse",
+    "AgentSignupRequest",
+    "AgentSignupRestrictionsView",
+    "AgentSignupView",
     "AgentSuppressionAddedData",
     "AgentSuppressionView",
     "AgentView",
+    "ApproveAgentSignupInputBody",
     "ApproveRequest",
     "Attachment",
     "AttachmentMetaView",
@@ -126,6 +132,7 @@ __all__ = [
     "MetricsSummaryView",
     "OAuthConnectionEntry",
     "PageAPIKeyView",
+    "PageAgentSignupView",
     "PageAgentSuppressionView",
     "PageAgentView",
     "PageContactEngagementView",
@@ -161,6 +168,7 @@ __all__ = [
     "RedeliverEventRequest",
     "RedeliverView",
     "RegisterDomainRequest",
+    "RejectAgentSignupOutputBody",
     "RejectRequest",
     "RejectResultView",
     "RenderedTemplateView",
@@ -198,6 +206,7 @@ __all__ = [
     "ValidateTemplateRequest",
     "ValidateTemplateResponse",
     "ValidationErrorDetails",
+    "VerifyAgentSignupRequest",
     "VerifyDomainView",
     "WebhookDeliveryView",
     "WebhookEndpointMetricsView",
@@ -209,6 +218,7 @@ __all__ = [
 
 # import apis into sdk package
 from e2a.v1.generated.api.account_api import AccountApi as AccountApi
+from e2a.v1.generated.api.agent_signup_api import AgentSignupApi as AgentSignupApi
 from e2a.v1.generated.api.agents_api import AgentsApi as AgentsApi
 from e2a.v1.generated.api.contacts_api import ContactsApi as ContactsApi
 from e2a.v1.generated.api.conversations_api import ConversationsApi as ConversationsApi
@@ -240,9 +250,14 @@ from e2a.v1.generated.models.account_view import AccountView as AccountView
 from e2a.v1.generated.models.agent_identity import AgentIdentity as AgentIdentity
 from e2a.v1.generated.models.agent_metrics_group_view import AgentMetricsGroupView as AgentMetricsGroupView
 from e2a.v1.generated.models.agent_metrics_view import AgentMetricsView as AgentMetricsView
+from e2a.v1.generated.models.agent_signup_create_response import AgentSignupCreateResponse as AgentSignupCreateResponse
+from e2a.v1.generated.models.agent_signup_request import AgentSignupRequest as AgentSignupRequest
+from e2a.v1.generated.models.agent_signup_restrictions_view import AgentSignupRestrictionsView as AgentSignupRestrictionsView
+from e2a.v1.generated.models.agent_signup_view import AgentSignupView as AgentSignupView
 from e2a.v1.generated.models.agent_suppression_added_data import AgentSuppressionAddedData as AgentSuppressionAddedData
 from e2a.v1.generated.models.agent_suppression_view import AgentSuppressionView as AgentSuppressionView
 from e2a.v1.generated.models.agent_view import AgentView as AgentView
+from e2a.v1.generated.models.approve_agent_signup_input_body import ApproveAgentSignupInputBody as ApproveAgentSignupInputBody
 from e2a.v1.generated.models.approve_request import ApproveRequest as ApproveRequest
 from e2a.v1.generated.models.attachment import Attachment as Attachment
 from e2a.v1.generated.models.attachment_meta_view import AttachmentMetaView as AttachmentMetaView
@@ -320,6 +335,7 @@ from e2a.v1.generated.models.metrics_rates_view import MetricsRatesView as Metri
 from e2a.v1.generated.models.metrics_summary_view import MetricsSummaryView as MetricsSummaryView
 from e2a.v1.generated.models.o_auth_connection_entry import OAuthConnectionEntry as OAuthConnectionEntry
 from e2a.v1.generated.models.page_api_key_view import PageAPIKeyView as PageAPIKeyView
+from e2a.v1.generated.models.page_agent_signup_view import PageAgentSignupView as PageAgentSignupView
 from e2a.v1.generated.models.page_agent_suppression_view import PageAgentSuppressionView as PageAgentSuppressionView
 from e2a.v1.generated.models.page_agent_view import PageAgentView as PageAgentView
 from e2a.v1.generated.models.page_contact_engagement_view import PageContactEngagementView as PageContactEngagementView
@@ -355,6 +371,7 @@ from e2a.v1.generated.models.redeliver_delivery import RedeliverDelivery as Rede
 from e2a.v1.generated.models.redeliver_event_request import RedeliverEventRequest as RedeliverEventRequest
 from e2a.v1.generated.models.redeliver_view import RedeliverView as RedeliverView
 from e2a.v1.generated.models.register_domain_request import RegisterDomainRequest as RegisterDomainRequest
+from e2a.v1.generated.models.reject_agent_signup_output_body import RejectAgentSignupOutputBody as RejectAgentSignupOutputBody
 from e2a.v1.generated.models.reject_request import RejectRequest as RejectRequest
 from e2a.v1.generated.models.reject_result_view import RejectResultView as RejectResultView
 from e2a.v1.generated.models.rendered_template_view import RenderedTemplateView as RenderedTemplateView
@@ -392,6 +409,7 @@ from e2a.v1.generated.models.user_export_user import UserExportUser as UserExpor
 from e2a.v1.generated.models.validate_template_request import ValidateTemplateRequest as ValidateTemplateRequest
 from e2a.v1.generated.models.validate_template_response import ValidateTemplateResponse as ValidateTemplateResponse
 from e2a.v1.generated.models.validation_error_details import ValidationErrorDetails as ValidationErrorDetails
+from e2a.v1.generated.models.verify_agent_signup_request import VerifyAgentSignupRequest as VerifyAgentSignupRequest
 from e2a.v1.generated.models.verify_domain_view import VerifyDomainView as VerifyDomainView
 from e2a.v1.generated.models.webhook_delivery_view import WebhookDeliveryView as WebhookDeliveryView
 from e2a.v1.generated.models.webhook_endpoint_metrics_view import WebhookEndpointMetricsView as WebhookEndpointMetricsView

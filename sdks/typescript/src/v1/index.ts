@@ -11,9 +11,10 @@
 export * from "./generated/models/all.js";
 
 // High-level client and its per-resource parameter types.
-export { E2AClient } from "./client.js";
+export { E2AClient, signupAgent } from "./client.js";
 export type {
   E2AClientOptions,
+  AgentSignupOptions,
   RequestOptions,
   SendOptions,
   ManagedUnsubscribeOptions,

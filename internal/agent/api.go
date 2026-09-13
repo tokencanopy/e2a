@@ -211,6 +211,7 @@ type API struct {
 	production            bool
 	sendLimit             *ratelimit.Limiter
 	regLimit              *ratelimit.Limiter
+	signupLimit           *ratelimit.Limiter // anonymous agent signup, per-IP
 	pollLimit             *ratelimit.Limiter
 	feedbackLimit         *ratelimit.Limiter
 	dcrLimit              *ratelimit.Limiter    // OAuth Dynamic Client Registration — anonymous endpoint, per-IP
@@ -230,6 +231,8 @@ type API struct {
 	provisioningSecret    string                // required with provisioningEnabled; signs /api/internal/users/provision
 	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
 	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
+	agentSignupSecret     []byte                // verification-code HMAC key; empty disables public signup
+	agentSignupNotifyEnq  AgentSignupNotificationEnqueuer
 
 	delegatedLookup DelegatedIdentityLookup // external-principal store seam; defaults to store
 	billingHookURL  string                  // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
@@ -313,6 +316,7 @@ func prepareManagedUnsubscribe(ctx context.Context, issuer ManagedUnsubscribeIss
 type WebSocketHub interface {
 	IsConnected(agentID string) bool
 	Send(agentID string, msg []byte) bool
+	Disconnect(agentID string) bool
 }
 
 func (a *API) SetWebSocketHub(h WebSocketHub) { a.wsHub = h }
@@ -552,6 +556,10 @@ func (a *API) RegLimitAllow(key string) (bool, time.Duration, int, int, int) {
 	return a.regLimit.AllowSnapshot(key)
 }
 
+func (a *API) SignupLimitAllow(key string) (bool, time.Duration, int, int, int) {
+	return a.signupLimit.AllowSnapshot(key)
+}
+
 // DownloadLimitAllow exposes the per-IP attachment-download limiter (key = client
 // ip). The download route is a raw capability-token endpoint outside the Huma
 // rate-limit middleware, so it calls this directly. Returns the IETF snapshot.
@@ -626,10 +634,11 @@ func NewAPI(store *identity.Store, sender *outbound.Sender, smtpRelay *outbound.
 		publicURL:     publicURL,
 		// Default the API/issuer URL to the web URL; SetAPIURL overrides it
 		// for split web/API-host deployments.
-		apiURL:     publicURL,
-		production: production,
-		sendLimit:  ratelimit.New(1*time.Minute, 60), // 60 sends per agent per minute
-		regLimit:   ratelimit.New(1*time.Hour, 200),  // 200 registrations per IP per hour
+		apiURL:      publicURL,
+		production:  production,
+		sendLimit:   ratelimit.New(1*time.Minute, 60), // 60 sends per agent per minute
+		regLimit:    ratelimit.New(1*time.Hour, 200),  // 200 registrations per IP per hour
+		signupLimit: ratelimit.New(1*time.Hour, 10),   // 10 anonymous signup attempts per IP per hour
 		// The poll bucket is keyed per USER and shared by every reader the
 		// account runs — each agent's polling loop plus the dashboard, whose
 		// thread view fetches message bodies individually. 60/min starved
@@ -1446,11 +1455,44 @@ func resolveOutboundConversationID(explicit, msgType string, referenced *identit
 	return identity.NewConversationID()
 }
 
+func agentSignupOutboundError(err error) *OutboundError {
+	switch {
+	case errors.Is(err, identity.ErrAgentSignupPendingVerification):
+		return &OutboundError{
+			Status: http.StatusForbidden,
+			Code:   "pending_human_verification",
+			Msg:    "pending human verification: this provisional identity may send only to its registered human email and cannot schedule sends",
+		}
+	case errors.Is(err, identity.ErrAgentSignupSendLimit):
+		return &OutboundError{
+			Status:  http.StatusTooManyRequests,
+			Code:    "rate_limited",
+			Msg:     "pending human verification: provisional identities may send at most 5 messages per 24 hours",
+			Details: map[string]any{"limit": identity.AgentSignupSendLimit, "window_seconds": 24 * 60 * 60},
+		}
+	case errors.Is(err, identity.ErrAgentSignupRejected):
+		return &OutboundError{Status: http.StatusForbidden, Code: "forbidden", Msg: "agent signup was rejected and the identity is inactive"}
+	default:
+		log.Printf("[agent-signup] provisional send guard failed: error=%v", err)
+		return &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to verify provisional send permission"}
+	}
+}
+
 func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string, referenced *identity.Message, idemCompleteTx AcceptIdemCompleter) (*OutboundResult, *OutboundError) {
 	parentMessageID := ""
 	if msgType == "reply" && referenced != nil {
 		parentMessageID = referenced.ID
 	}
+	signupRecipients := make([]string, 0, len(req.To)+len(req.CC)+len(req.BCC))
+	signupRecipients = append(signupRecipients, req.To...)
+	signupRecipients = append(signupRecipients, req.CC...)
+	signupRecipients = append(signupRecipients, req.BCC...)
+	agent, signupErr := a.CheckAgentSignupSend(ctx, agent, signupRecipients, req.ScheduledAt != nil)
+	if signupErr != nil {
+		return nil, signupErr
+	}
+	user.ID = agent.UserID
+
 	// Validate the canonical envelope before screening can durably hold the
 	// draft, but deliberately do not mint while it is pending human review.
 	if uerr := prepareManagedUnsubscribe(ctx, a.unsubscribeIssuer, a.fromDomain, user.ID, agent, &req, false); uerr != nil {
@@ -1462,6 +1504,13 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	// released like every other error).
 	if supErr := a.checkSuppression(ctx, user.ID, agent.ID, req); supErr != nil {
 		return nil, supErr
+	}
+	// Public signup identities have a hard pre-verification egress boundary.
+	// This check lives in the shared send/reply/forward tail so no transport or
+	// message shape can bypass it. Ordinary and verified identities are a cheap
+	// no-op in the store.
+	if err := a.store.ConsumeAgentSignupSend(ctx, agent.ID, signupRecipients, time.Now().UTC()); err != nil {
+		return nil, agentSignupOutboundError(err)
 	}
 
 	// Conversation threading (#328): resolve the thread id once, here, so every
@@ -1665,6 +1714,10 @@ func (a *API) SendTestCore(ctx context.Context, agent *identity.AgentIdentity) (
 	subject := "Test email from e2a"
 	body := fmt.Sprintf("This is a test email for %s.\n\nYour agent is set up and ready to receive emails.", agent.EmailAddress())
 	testReq := outbound.SendRequest{To: to, Subject: subject, Body: body}
+	agent, signupErr := a.CheckAgentSignupSend(ctx, agent, to, false)
+	if signupErr != nil {
+		return nil, signupErr
+	}
 
 	// Suppression enforcement — the same recipient gate DeliverOutbound runs
 	// (decision 9): a suppressed agent address must never be submitted.

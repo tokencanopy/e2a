@@ -9,6 +9,7 @@ import { startHttpServer, type HttpServerOptions } from "../src/http-server.js";
 import { ResolveCache } from "../src/resolve.js";
 import { MetricsRegistry } from "../src/metrics.js";
 import type { Logger } from "../src/logging.js";
+import type { AgentSignupProvider } from "../src/tools/signup.js";
 
 const frozenToolNames = JSON.parse(
   readFileSync(new URL("../tool-names.v1.json", import.meta.url), "utf8"),
@@ -117,9 +118,21 @@ describe("HTTP MCP server", () => {
   let stub: McpClient;
   let close: () => Promise<void>;
   let url: string;
+  let signupProvider: AgentSignupProvider;
 
   beforeEach(async () => {
     stub = makeStubClient();
+    signupProvider = {
+      create: vi.fn(async () => ({
+        id: "as_1",
+        inbox: "build-bot@agents.example.test",
+        humanEmail: "owner@example.test",
+        displayName: "Build Bot",
+        status: "pending",
+        apiKey: "e2a_agt_signup",
+      })),
+      verify: vi.fn(async () => ({ id: "as_1", status: "verified" })),
+    };
     const { close: c, port } = await startHttpServer(0, {
       baseUrl: "http://e2a.local",
       // Loopback hostnames vary with the random port; allow them all.
@@ -127,6 +140,7 @@ describe("HTTP MCP server", () => {
       clientFactory: () => stub,
       // Keep test output quiet; logging behavior has dedicated tests below.
       logger: () => {},
+      agentSignupProvider: signupProvider,
     });
     close = c;
     url = `http://127.0.0.1:${port}/mcp`;
@@ -169,6 +183,26 @@ describe("HTTP MCP server", () => {
     expect(res.headers.get("www-authenticate")).toMatch(/Bearer realm="e2a"/);
     const body = await res.json();
     expect(body.error.message).toMatch(/missing bearer/);
+  });
+
+  it("serves the public signup tools on a separate unauthenticated MCP endpoint", async () => {
+    const transport = new StreamableHTTPClientTransport(new URL(`${url}/signup`));
+    const client = new Client({ name: "signup-http-test", version: "0" });
+    await client.connect(transport);
+
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
+      "signup_agent",
+      "verify_agent_signup",
+    ]);
+    const response = await client.callTool({
+      name: "signup_agent",
+      arguments: { human_email: "owner@example.test", display_name: "Build Bot" },
+    });
+    expect(response.isError).not.toBe(true);
+    expect(signupProvider.create).toHaveBeenCalled();
+
+    await client.close();
   });
 
   it("rejects a missing bearer before parsing malformed JSON", async () => {

@@ -11,6 +11,23 @@ npm install @e2a/sdk
 The SDK major version tracks the SDK package's own breaking changes and is
 independent of the API version path (`/v1`): SDK 5.x targets the e2a v1 API.
 
+## Start without an API key
+
+```ts
+import { E2AClient, signupAgent } from "@e2a/sdk/v1";
+
+const signup = await signupAgent({
+  humanEmail: "owner@example.com",
+  displayName: "scout",
+});
+const client = new E2AClient({ apiKey: signup.apiKey });
+await client.agentSignup.verify({ code: "123456", reviewOutbound: true });
+```
+
+The key is shown once. The six-digit code is sent to `humanEmail`; see the
+[agent signup guide](https://e2a.dev/agent-signup.md) for provisional limits
+and human approval or rejection.
+
 ## Upgrading to 5.2
 
 Inbound sender and authentication fields now use the final DMARC-aligned

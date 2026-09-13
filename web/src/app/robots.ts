@@ -22,6 +22,7 @@ export default function robots(): MetadataRoute.Robots {
           "/inboxes",
           "/metrics",
           "/reviews",
+          "/agent-signups",
           "/settings",
           "/templates",
           "/trash",

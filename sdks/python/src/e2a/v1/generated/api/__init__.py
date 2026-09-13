@@ -2,6 +2,7 @@
 
 # import apis into api package
 from e2a.v1.generated.api.account_api import AccountApi
+from e2a.v1.generated.api.agent_signup_api import AgentSignupApi
 from e2a.v1.generated.api.agents_api import AgentsApi
 from e2a.v1.generated.api.contacts_api import ContactsApi
 from e2a.v1.generated.api.conversations_api import ConversationsApi

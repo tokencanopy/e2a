@@ -49,10 +49,10 @@ func recipientGate(agent *identity.AgentIdentity, req outbound.SendRequest) (fla
 	case identity.OutboundPolicyAllowlist:
 		allow := make(map[string]struct{}, len(agent.OutboundAllowlist))
 		for _, a := range agent.OutboundAllowlist {
-			allow[strings.ToLower(strings.TrimSpace(a))] = struct{}{}
+			allow[identity.NormalizeMailboxAddress(a)] = struct{}{}
 		}
 		for _, r := range allRecipients(req) {
-			if _, ok := allow[strings.ToLower(strings.TrimSpace(r))]; !ok {
+			if _, ok := allow[identity.NormalizeMailboxAddress(r)]; !ok {
 				return true, r
 			}
 		}

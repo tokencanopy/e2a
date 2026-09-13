@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { E2AClient } from "../../src/v1/client.js";
+import { E2AClient, signupAgent } from "../../src/v1/client.js";
 import {
   E2AError,
   E2ANotFoundError,
@@ -156,6 +156,54 @@ describe("E2AClient", () => {
     expect(client.account).toBeDefined();
     expect(client.account.suppressions).toBeDefined();
     expect(client.templates).toBeDefined();
+    expect(client.agentSignup).toBeDefined();
+  });
+
+  it("creates a provisional agent without an Authorization header", async () => {
+    globalThis.fetch = mockFetch(201, {
+      id: "as_1",
+      inbox: "build-bot@agents.example.test",
+      human_email: "owner@example.test",
+      display_name: "Build Bot",
+      status: "pending",
+      api_key: "e2a_agt_signup",
+    });
+
+    const result = await signupAgent(
+      { humanEmail: "owner@example.test", displayName: "Build Bot", harness: "codex", currentApiKey: "e2a_agt_current" },
+      { baseUrl: BASE },
+    );
+
+    expect(result.apiKey).toBe("e2a_agt_signup");
+    const { url, init, headers } = lastCall();
+    expect(url).toBe(`${BASE}/v1/agent-signup`);
+    expect(init.method).toBe("POST");
+    expect(headers.Authorization).toBeUndefined();
+    expect(JSON.parse(init.body as string)).toEqual({
+      human_email: "owner@example.test",
+      display_name: "Build Bot",
+      harness: "codex",
+      current_api_key: "e2a_agt_current",
+    });
+  });
+
+  it("verifies a provisional agent with its bearer key", async () => {
+    globalThis.fetch = mockFetch(200, {
+      id: "as_1",
+      inbox: "build-bot@agents.example.test",
+      human_email: "owner@example.test",
+      display_name: "Build Bot",
+      status: "verified",
+    });
+
+    const result = await client.agentSignup.verify({ code: "123456", reviewOutbound: true });
+
+    expect(result.status).toBe("verified");
+    const { url, init, headers } = lastCall();
+    expect(url).toBe(`${BASE}/v1/agent-signup/verify`);
+    expect(init.method).toBe("POST");
+    expect(headers.Authorization).toBe("Bearer e2a_test");
+    expect(JSON.parse(init.body as string)).toEqual({ code: "123456", review_outbound: true });
   });
 
   // ── Auth + transport ────────────────────────────────────────────

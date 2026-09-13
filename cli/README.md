@@ -18,6 +18,21 @@ use the **MCP tools** or the **SDK** (`@e2a/sdk`, `e2a`) instead.
 | Manage domains, webhooks, HITL review queues | the **web dashboard**, MCP tools, or SDK |
 | React to inbound mail in production | **webhooks** (public URL) or `client.listen()` (SDK) |
 
+## Start without an API key
+
+An agent can create a provisional hosted inbox and verify the six-digit code
+sent to its human:
+
+```bash
+e2a signup create --human-email owner@example.com --display-name scout
+e2a signup verify --api-key 'e2a_agt_...' --code 123456 --review-outbound
+```
+
+Save the key printed by `signup create`; it is shown once. Until verification,
+the inbox can receive mail but can send only to the named human, up to five
+messages per rolling 24 hours. See the complete
+[agent signup guide](https://e2a.dev/agent-signup.md).
+
 ## Install
 
 ```bash

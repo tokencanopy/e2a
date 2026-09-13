@@ -13,6 +13,23 @@ pip install e2a          # add the [ws] extra for client.listen(): pip install "
 The SDK major version tracks the SDK package's own breaking changes and is
 independent of the API version path (`/v1`): SDK 5.x targets the e2a v1 API.
 
+## Start without an API key
+
+```python
+from e2a.v1 import E2AClient, signup_agent
+
+signup = signup_agent({
+    "human_email": "owner@example.com",
+    "display_name": "scout",
+})
+with E2AClient(api_key=signup.api_key) as client:
+    client.agent_signup.verify({"code": "123456", "review_outbound": True})
+```
+
+The key is shown once. The six-digit code is sent to `human_email`; see the
+[agent signup guide](https://e2a.dev/agent-signup.md) for provisional limits
+and human approval or rejection.
+
 ## Upgrading to 5.2
 
 Inbound sender and authentication fields now use the final DMARC-aligned

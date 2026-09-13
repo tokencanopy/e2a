@@ -81,7 +81,9 @@ perl -0pi -e 's/\A# coding: utf-8\n\n/# coding: utf-8\n/' \
   "$DEST/models/delete_domain_result.py"
 
 # Keep the expanded agents surface deterministic and diff-check clean.
-perl -pi -e 's/[ \t]+$//' "$DEST/api/agents_api.py"
+perl -pi -e 's/[ \t]+$//' \
+  "$DEST/api/agents_api.py" \
+  "$DEST/api/agent_signup_api.py"
 
 # The newly appended message filter query block otherwise receives whitespace-
 # only blank lines from OpenAPI Generator. Normalize this exact block without
@@ -94,6 +96,15 @@ perl -0pi -e 's/\n+\z/\n/' \
   "$DEST/models/agent_suppression_view.py" \
   "$DEST/models/create_agent_suppression_request.py" \
   "$DEST/models/page_agent_suppression_view.py" \
+  "$DEST/api/agent_signup_api.py" \
+  "$DEST/models/agent_signup_create_response.py" \
+  "$DEST/models/agent_signup_request.py" \
+  "$DEST/models/agent_signup_restrictions_view.py" \
+  "$DEST/models/agent_signup_view.py" \
+  "$DEST/models/approve_agent_signup_input_body.py" \
+  "$DEST/models/page_agent_signup_view.py" \
+  "$DEST/models/reject_agent_signup_output_body.py" \
+  "$DEST/models/verify_agent_signup_request.py" \
   "$DEST/models/unsubscribe_options.py"
 
 # Preserve the pre-existing positional transport options; append the newly
