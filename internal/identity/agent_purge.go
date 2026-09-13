@@ -97,7 +97,7 @@ func (s *Store) agentPurgeDecisionTx(
 
 func lockAgentMessagesTx(ctx context.Context, tx pgx.Tx, agentID string) error {
 	rows, err := tx.Query(ctx,
-		`SELECT id FROM messages WHERE agent_id = $1 FOR UPDATE`, agentID)
+		`SELECT id FROM messages WHERE agent_id = $1 ORDER BY id FOR UPDATE`, agentID)
 	if err != nil {
 		return err
 	}
@@ -335,7 +335,7 @@ func lockResidualEngagementChunkTx(
 
 func lockResidualMessageChunkTx(ctx context.Context, tx pgx.Tx, agentID string, limit int) ([]string, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT id FROM messages WHERE agent_id = $1 LIMIT $2 FOR UPDATE`,
+		`SELECT id FROM messages WHERE agent_id = $1 ORDER BY id LIMIT $2 FOR UPDATE`,
 		agentID, limit)
 	if err != nil {
 		return nil, err

@@ -32,6 +32,7 @@ type fakeConsumerStore struct {
 	pending     bool
 	applicable  bool
 	preflights  int
+	lockOrder   []string
 }
 
 func newFakeConsumerStore() *fakeConsumerStore {
@@ -56,7 +57,12 @@ func (f *fakeConsumerStore) RecordProviderAcceptEvidence(ctx context.Context, me
 func (f *fakeConsumerStore) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return fn(nil)
 }
+func (f *fakeConsumerStore) LockAgentTx(context.Context, pgx.Tx, string) (bool, error) {
+	f.lockOrder = append(f.lockOrder, "agent")
+	return true, nil
+}
 func (f *fakeConsumerStore) HasApplicableRecipientTx(context.Context, pgx.Tx, string, []string) (bool, error) {
+	f.lockOrder = append(f.lockOrder, "preflight")
 	f.preflights++
 	return f.applicable, nil
 }
@@ -70,8 +76,33 @@ func (f *fakeConsumerStore) RecordProviderRejectTx(context.Context, pgx.Tx, stri
 	return nil
 }
 func (f *fakeConsumerStore) RecordDeliveryOutcomeTx(ctx context.Context, _ pgx.Tx, messageID, address string, st Status, detail string) (bool, error) {
+	f.lockOrder = append(f.lockOrder, "message")
 	err := f.RecordDeliveryOutcome(ctx, messageID, address, st, detail)
 	return err == nil, err
+}
+
+func TestConsumerLocksAgentBeforeMessageRows(t *testing.T) {
+	store := newFakeConsumerStore()
+	store.corr["ses-order"] = &CorrelatedMessage{MessageID: "msg-order", UserID: "u-order", AgentID: "bot@example.test"}
+	consumer := NewConsumer(store, nil)
+
+	if err := consumer.Process(context.Background(), &Event{
+		ProviderEventID: "sns-order", OccurredAt: testFeedbackOccurredAt,
+		Kind: KindDelivery, SESMessageID: "ses-order",
+		Recipients: []RecipientOutcome{{Address: "recipient@example.test", Status: StatusDelivered}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"agent", "preflight", "message"}
+	if len(store.lockOrder) != len(want) {
+		t.Fatalf("lock order = %v, want %v", store.lockOrder, want)
+	}
+	for i := range want {
+		if store.lockOrder[i] != want[i] {
+			t.Fatalf("lock order = %v, want %v", store.lockOrder, want)
+		}
+	}
 }
 func (f *fakeConsumerStore) AddSuppressionTx(ctx context.Context, _ pgx.Tx, userID, address, reason, source, srcMsg string) (string, bool, error) {
 	added, err := f.AddSuppression(ctx, userID, address, reason, source, srcMsg)

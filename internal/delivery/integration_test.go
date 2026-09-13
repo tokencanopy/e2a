@@ -1101,6 +1101,84 @@ func TestConcurrentRollupMonotonic(t *testing.T) {
 	}
 }
 
+// TestDeliveryTakesAgentLockBeforeMessageLock proves the cross-path lock
+// protocol against PostgreSQL. A purge-like transaction holds the agent row;
+// delivery feedback must wait there, leaving the message row available until
+// the parent lock is acquired. The old message-first path would fail the
+// NOWAIT probe below.
+func TestDeliveryTakesAgentLockBeforeMessageLock(t *testing.T) {
+	pool := testutil.TestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store := identity.NewStore(pool)
+	_, messageID, agentEmail := seedOutbound(t, store, "lock-order", "ses-lock-order", []string{"recipient@example.test"})
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(context.Background())
+	if err := holder.QueryRow(ctx, `SELECT id FROM agent_identities WHERE id = $1 FOR UPDATE`, agentEmail).Scan(&agentEmail); err != nil {
+		t.Fatalf("lock agent row: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- delivery.NewConsumer(store, nil).Process(ctx, &delivery.Event{
+			Kind: delivery.KindDelivery, SESMessageID: "ses-lock-order", ProviderEventID: "sns-lock-order",
+			OccurredAt: time.Date(2026, 7, 21, 17, 0, 0, 0, time.UTC),
+			Recipients: []delivery.RecipientOutcome{{Address: "recipient@example.test", Status: delivery.StatusDelivered}},
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM pg_stat_activity
+				 WHERE pid <> pg_backend_pid()
+				   AND wait_event_type = 'Lock'
+				   AND query LIKE '%agent_identities%'
+				   AND query LIKE '%FOR UPDATE%'
+			)`).Scan(&waiting); err != nil {
+			t.Fatalf("inspect delivery lock wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("delivery completed before waiting on the agent lock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("delivery never waited on the agent lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	probe, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probedMessageID string
+	if err := probe.QueryRow(ctx, `SELECT id FROM messages WHERE id = $1 FOR UPDATE NOWAIT`, messageID).Scan(&probedMessageID); err != nil {
+		probe.Rollback(context.Background())
+		t.Fatalf("delivery locked the message before the agent: %v", err)
+	}
+	if err := probe.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("delivery after agent lock release: %v", err)
+	}
+}
+
 // TestDetailNotClobberedByLaterEvent pins the review low fix: a later
 // lower-rank event carrying a detail must not overwrite the terminal
 // diagnostic.

@@ -187,9 +187,41 @@ func (s *Store) RecordProviderRejectTx(ctx context.Context, tx pgx.Tx, messageID
 // can never create state or lifecycle for this message.
 func (s *Store) RecordDeliveryOutcome(ctx context.Context, messageID, address string, status delivery.Status, detail string) error {
 	return s.WithTx(ctx, func(tx pgx.Tx) error {
-		_, err := s.RecordDeliveryOutcomeTx(ctx, tx, messageID, address, status, detail)
+		var agentID string
+		err := tx.QueryRow(ctx, `SELECT agent_id FROM messages WHERE id = $1`, messageID).Scan(&agentID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found, err := s.LockAgentTx(ctx, tx, agentID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
+		_, err = s.RecordDeliveryOutcomeTx(ctx, tx, messageID, address, status, detail)
 		return err
 	})
+}
+
+// LockAgentTx is the parent-row serialization gate shared by agent purge and
+// delivery feedback. It must be acquired before any message row in the
+// transaction so those paths cannot form a parent/message lock cycle.
+func (s *Store) LockAgentTx(ctx context.Context, tx pgx.Tx, agentID string) (bool, error) {
+	var foundID string
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM agent_identities WHERE id = $1 FOR UPDATE`, agentID,
+	).Scan(&foundID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // HasApplicableRecipientTx locks the message and checks candidate provider

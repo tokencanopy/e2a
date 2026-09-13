@@ -32,6 +32,9 @@ func (s *crossPathStore) AddSuppression(ctx context.Context, userID, address, re
 	return false, nil
 }
 func (s *crossPathStore) WithTx(ctx context.Context, fn func(pgx.Tx) error) error { return fn(nil) }
+func (s *crossPathStore) LockAgentTx(context.Context, pgx.Tx, string) (bool, error) {
+	return true, nil
+}
 func (s *crossPathStore) HasApplicableRecipientTx(context.Context, pgx.Tx, string, []string) (bool, error) {
 	return true, nil
 }

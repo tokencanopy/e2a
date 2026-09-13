@@ -53,6 +53,12 @@ type Store interface {
 	// crash window. Idempotent. The worker/terminal-reconciler guards read
 	// this evidence before declaring a terminal failure.
 	WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error
+	// LockAgentTx takes the owning agent row lock before this transaction takes
+	// any message-row locks. Agent purge uses the same parent-first protocol;
+	// every message-backed delivery transaction must enter through this gate.
+	// found=false means the agent was purged after correlation, so the event is
+	// a harmless no-op.
+	LockAgentTx(ctx context.Context, tx pgx.Tx, agentID string) (found bool, err error)
 	// HasApplicableRecipientTx locks and checks the persisted immutable
 	// envelope. Recipient-bearing feedback must pass this preflight before it
 	// can establish provider acceptance or trigger canonical sent finalization.
@@ -203,6 +209,18 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 		// Evidence, recipient rollup, canonical lifecycle, causal suppression,
 		// and event outbox rows share this transaction. A notification retry can
 		// therefore never expose a state/event contradiction.
+		//
+		// Correlation happened before the transaction, so the message may have
+		// been permanently purged in the meantime. Lock the parent first: this
+		// is the same order as agent purge and prevents a delivery update from
+		// holding a message row while waiting for the agent row.
+		found, err := c.store.LockAgentTx(ctx, tx, m.AgentID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
 		if ev.Kind.requiresApplicableRecipient() {
 			addresses := make([]string, 0, len(ev.Recipients))
 			for _, recipient := range ev.Recipients {
