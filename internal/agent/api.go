@@ -232,6 +232,7 @@ type API struct {
 	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
 	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
 	agentSignupSecret     []byte                // verification-code HMAC key; empty disables public signup
+	agentSignupNotifyEnq  AgentSignupNotificationEnqueuer
 
 	delegatedLookup DelegatedIdentityLookup // external-principal store seam; defaults to store
 	billingHookURL  string                  // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
@@ -315,6 +316,7 @@ func prepareManagedUnsubscribe(ctx context.Context, issuer ManagedUnsubscribeIss
 type WebSocketHub interface {
 	IsConnected(agentID string) bool
 	Send(agentID string, msg []byte) bool
+	Disconnect(agentID string) bool
 }
 
 func (a *API) SetWebSocketHub(h WebSocketHub) { a.wsHub = h }

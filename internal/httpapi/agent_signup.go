@@ -34,7 +34,7 @@ type AgentSignupRestrictionsView struct {
 
 type AgentSignupView struct {
 	ID                 string    `json:"id"`
-	Inbox              string    `json:"inbox" doc:"Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain."`
+	Inbox              string    `json:"inbox" doc:"Provisioned inbox on the deployment shared agent domain."`
 	HumanEmail         string    `json:"human_email"`
 	DisplayName        string    `json:"display_name"`
 	NoteToHuman        string    `json:"note_to_human,omitempty"`
@@ -53,8 +53,9 @@ type AgentSignupCreateResponse struct {
 }
 
 type agentSignupCreateOutput struct {
-	Status int
-	Body   AgentSignupCreateResponse
+	Status       int
+	CacheControl string `header:"Cache-Control"`
+	Body         AgentSignupCreateResponse
 }
 
 type VerifyAgentSignupRequest struct {
@@ -181,7 +182,7 @@ func (s *Server) handleCreateAgentSignup(ctx context.Context, in *agentSignupInp
 	if result.Created {
 		status = http.StatusCreated
 	}
-	return &agentSignupCreateOutput{Status: status, Body: AgentSignupCreateResponse{
+	return &agentSignupCreateOutput{Status: status, CacheControl: "no-store", Body: AgentSignupCreateResponse{
 		AgentSignupView: signupView(result.Signup), APIKey: result.APIKey.PlaintextKey, ConsoleURL: s.deps.AgentSignupConsoleURL,
 		Restrictions: AgentSignupRestrictionsView{CanReceiveFrom: "anyone", SendTo: []string{result.Signup.HumanEmail}, SendsPer24h: identity.AgentSignupSendLimit, CanCreateIdentities: false},
 	}}, nil

@@ -35,7 +35,7 @@ class AgentSignupCreateResponse(BaseModel):
     harness: Optional[StrictStr] = None
     human_email: StrictStr
     id: StrictStr
-    inbox: StrictStr = Field(description="Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain.")
+    inbox: StrictStr = Field(description="Provisioned inbox on the deployment shared agent domain.")
     note_to_human: Optional[StrictStr] = None
     restrictions: AgentSignupRestrictionsView
     review_outbound: StrictBool

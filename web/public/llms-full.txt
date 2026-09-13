@@ -749,10 +749,10 @@ inbox and receive its own agent-scoped API key before a human has an e2a
 account. The human named during signup receives a six-digit code and can also
 approve or reject the request from the e2a dashboard.
 
-New humans receive an inbox on the hosted shared domain. If the named human
-already has an e2a account with a verified custom domain, signup uses that
-account's primary verified domain (or its oldest verified domain when no
-primary is set).
+Public self-signup always creates the provisional inbox on the deployment's
+shared agent domain. An unauthenticated request never claims an address on an
+account-owned custom domain; custom-domain inbox creation remains an
+authenticated account operation.
 
 The hosted API base is `https://api.e2a.dev`. Self-hosters replace that URL
 with their deployment's API URL; signup is available only when the deployment

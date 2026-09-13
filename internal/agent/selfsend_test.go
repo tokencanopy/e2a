@@ -27,6 +27,7 @@ import (
 type captureHub struct{ payload []byte }
 
 func (h *captureHub) IsConnected(string) bool { return true }
+func (h *captureHub) Disconnect(string) bool  { return true }
 func (h *captureHub) Send(_ string, payload []byte) bool {
 	h.payload = append([]byte(nil), payload...)
 	return true

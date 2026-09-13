@@ -413,7 +413,7 @@ components:
         id:
           type: string
         inbox:
-          description: Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain.
+          description: Provisioned inbox on the deployment shared agent domain.
           type: string
         note_to_human:
           type: string
@@ -510,7 +510,7 @@ components:
         id:
           type: string
         inbox:
-          description: Provisioned inbox on the human account's verified custom domain when available, otherwise the deployment shared domain.
+          description: Provisioned inbox on the deployment shared agent domain.
           type: string
         note_to_human:
           type: string

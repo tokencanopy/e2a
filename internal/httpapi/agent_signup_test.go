@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +99,19 @@ func TestCreateAgentSignupIsPublicAndReturnsOneTimeKey(t *testing.T) {
 	restrictions := body["restrictions"].(map[string]any)
 	if restrictions["sends_per_24h"] != float64(5) || restrictions["can_create_identities"] != false {
 		t.Fatalf("restrictions = %#v", restrictions)
+	}
+}
+
+func TestCreateAgentSignupCredentialResponseIsNotCacheable(t *testing.T) {
+	calls := signupHTTPFixture(t)
+	srv := testServer(t, withSignupDeps(calls))
+	resp, err := http.Post(srv.URL+"/v1/agent-signup", "application/json", strings.NewReader(`{"human_email":"owner@example.test","display_name":"Build Bot"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
 

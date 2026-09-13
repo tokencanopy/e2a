@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/agentauth"
+	"github.com/tokencanopy/e2a/internal/agentsignupnotify"
 	"github.com/tokencanopy/e2a/internal/apiserver"
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
@@ -322,6 +323,8 @@ func main() {
 	// the shutdown sequence drains it under the shared deadline.
 	var jobsClient *jobs.Client
 	var registrars []jobs.Registrar
+	agentSignupNotifyJobs := agentsignupnotify.NewJobs()
+	registrars = append(registrars, agentSignupNotifyJobs)
 
 	// Read-side usage store. Built up here rather than beside the limits
 	// enforcer that also consumes it, because the sender-identity registrar
@@ -558,6 +561,7 @@ func main() {
 			log.Fatalf("jobs: build shared river client: %v", jerr)
 		}
 		jobsClient = jc
+		agentSignupNotifyJobs.SetEnqueuer(jobsClient)
 		store.SetOutboundJobCanceller(jobsClient)
 		if senderMgr != nil {
 			senderMgr.SetEnqueuer(jobsClient)
@@ -669,6 +673,8 @@ func main() {
 	router := mux.NewRouter()
 	api := agent.NewAPI(store, sender, smtpRelay, userAuth, usageTracker, cfg.SMTP.Domain, cfg.OutboundSMTP.FromDomain, cfg.SharedDomain, cfg.HTTP.PublicURL, cfg.IsProduction())
 	api.SetAgentSignupSecret(cfg.Signing.HMACSecret)
+	agentSignupNotifyJobs.SetDeliverer(api)
+	api.SetAgentSignupNotificationEnqueuer(agentSignupNotifyJobs)
 	// The programmatic API host (OAuth issuer + token/jwks). Defaults to
 	// public_url; set api_url to serve the API/MCP on a different host than
 	// the web app (the authorization_endpoint + login/consent stay on

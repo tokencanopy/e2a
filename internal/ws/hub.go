@@ -123,6 +123,24 @@ func (h *Hub) IsConnected(agentID string) bool {
 	return h.conns[agentID] != nil
 }
 
+// Disconnect closes the current connection after a credential lifecycle
+// change. Removing it before Close ensures no concurrent Send can select it.
+func (h *Hub) Disconnect(agentID string) bool {
+	h.mu.Lock()
+	conn := h.conns[agentID]
+	if conn != nil {
+		delete(h.conns, agentID)
+		h.metrics.SetWSActive(len(h.conns))
+		h.metrics.WSDisconnected("credential_revoked")
+	}
+	h.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	_ = conn.Close(StatusCredentialRevoked, ReasonCredentialRevoked)
+	return true
+}
+
 // Close closes all active connections.
 func (h *Hub) Close() {
 	h.mu.Lock()

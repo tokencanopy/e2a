@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
 )
@@ -67,6 +68,13 @@ func TestRegisterAgentSignupIsIdempotentAndRotatesKey(t *testing.T) {
 	if _, err := store.GetPrincipalByAPIKey(ctx, first.APIKey.PlaintextKey); err == nil {
 		t.Fatal("old API key still authenticates after rotation")
 	}
+	rotatedAgent, err := store.GetAgentByID(ctx, first.Signup.AgentID)
+	if err != nil {
+		t.Fatalf("load rotated agent: %v", err)
+	}
+	if rotatedAgent.AssertionVersion != 2 {
+		t.Fatalf("assertion version after rotation = %d, want 2", rotatedAgent.AssertionVersion)
+	}
 	if p, err := store.GetPrincipalByAPIKey(ctx, second.APIKey.PlaintextKey); err != nil || p.AgentID != first.Signup.AgentID || p.Scope != identity.ScopeAgent {
 		t.Fatalf("new principal = %#v, err=%v", p, err)
 	}
@@ -79,7 +87,7 @@ func TestRegisterAgentSignupNotificationFailureRollsBack(t *testing.T) {
 		CodeHash: "hash", CodeExpiresAt: time.Now().Add(time.Hour),
 	}
 	want := errors.New("mail unavailable")
-	if _, err := store.RegisterAgentSignup(ctx, in, func(*identity.AgentSignup) error { return want }); !errors.Is(err, want) {
+	if _, err := store.RegisterAgentSignup(ctx, in, func(context.Context, pgx.Tx, *identity.AgentSignup) error { return want }); !errors.Is(err, want) {
 		t.Fatalf("notification failure = %v", err)
 	}
 	// A clean retry without current_api_key proves the failed transaction left
@@ -128,7 +136,7 @@ func TestRegisterAgentSignupNeverClaimsReservedSharedMailbox(t *testing.T) {
 	}
 }
 
-func TestRegisterAgentSignupUsesExistingHumansVerifiedCustomDomain(t *testing.T) {
+func TestRegisterAgentSignupDoesNotClaimExistingHumansCustomDomain(t *testing.T) {
 	store, ctx, user := signupFixture(t)
 	if _, err := store.ClaimOrCreateDomain(ctx, "bots.example.test", user.ID); err != nil {
 		t.Fatal(err)
@@ -143,14 +151,14 @@ func TestRegisterAgentSignupUsesExistingHumansVerifiedCustomDomain(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Signup.AgentID != "domain-bot@bots.example.test" {
-		t.Fatalf("signup inbox = %q, want verified custom domain", created.Signup.AgentID)
+	if created.Signup.AgentID != "domain-bot@agents.test" {
+		t.Fatalf("signup inbox = %q, want isolated shared domain", created.Signup.AgentID)
 	}
 	verified, err := store.VerifyAgentSignup(ctx, created.Signup.AgentID, "hash", false, time.Now(), func(*identity.AgentSignup) (string, int, error) {
 		return user.ID, 3, nil
 	})
 	if err != nil || verified.UserID != user.ID {
-		t.Fatalf("verify custom-domain signup = %#v, err=%v", verified, err)
+		t.Fatalf("verify shared-domain signup = %#v, err=%v", verified, err)
 	}
 }
 

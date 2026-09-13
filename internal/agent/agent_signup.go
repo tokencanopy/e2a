@@ -5,15 +5,16 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
-	"math/big"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
@@ -22,6 +23,14 @@ import (
 const AgentSignupCodeTTL = 48 * time.Hour
 
 var ErrAgentSignupUnavailable = errors.New("agent signup is unavailable")
+
+type AgentSignupNotificationEnqueuer interface {
+	EnqueueAgentSignupVerificationTx(context.Context, pgx.Tx, string, string) error
+}
+
+func (a *API) SetAgentSignupNotificationEnqueuer(e AgentSignupNotificationEnqueuer) {
+	a.agentSignupNotifyEnq = e
+}
 
 // SetAgentSignupSecret enables verification-code hashing. It is deliberately
 // the deployment signing secret: no new secret distribution path is needed.
@@ -33,32 +42,50 @@ func (a *API) hashAgentSignupCode(code string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func generateAgentSignupCode() (string, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
-	if err != nil {
+func generateAgentSignupNonce() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%06d", n.Int64()), nil
+	return hex.EncodeToString(b), nil
+}
+
+func (a *API) agentSignupCode(nonce string) string {
+	mac := hmac.New(sha256.New, a.agentSignupSecret)
+	_, _ = mac.Write([]byte("agent-signup-code:v2:" + nonce))
+	return fmt.Sprintf("%06d", binary.BigEndian.Uint64(mac.Sum(nil)[:8])%1_000_000)
 }
 
 // RegisterAgentSignup provisions or rotates one pending signup and sends the
 // human verification mail before returning the one-time plaintext key.
 func (a *API) RegisterAgentSignup(ctx context.Context, humanEmail, displayName, noteToHuman, harness, currentAPIKey string) (*identity.AgentSignupResult, error) {
-	if a.store == nil || a.sharedDomain == "" || len(a.agentSignupSecret) == 0 || a.submitter == nil || a.gate == nil || a.smtpRelay == nil || !a.smtpRelay.Configured() || a.fromDomain == "" {
+	if a.store == nil || a.sharedDomain == "" || len(a.agentSignupSecret) == 0 || a.agentSignupNotifyEnq == nil || a.submitter == nil || a.gate == nil || a.smtpRelay == nil || !a.smtpRelay.Configured() || a.fromDomain == "" {
 		return nil, ErrAgentSignupUnavailable
 	}
-	code, err := generateAgentSignupCode()
+	nonce, err := generateAgentSignupNonce()
 	if err != nil {
 		return nil, err
 	}
+	code := a.agentSignupCode(nonce)
 	result, err := a.store.RegisterAgentSignup(ctx, identity.AgentSignupRegistration{
 		HumanEmail: humanEmail, DisplayName: displayName, NoteToHuman: noteToHuman,
-		Harness: harness, SharedDomain: a.sharedDomain, CodeHash: a.hashAgentSignupCode(code),
+		Harness: harness, SharedDomain: a.sharedDomain, CodeNonce: nonce, CodeHash: a.hashAgentSignupCode(code),
 		CodeExpiresAt: time.Now().UTC().Add(AgentSignupCodeTTL), CurrentAPIKey: currentAPIKey,
-	}, func(signup *identity.AgentSignup) error {
-		return a.sendAgentSignupVerification(ctx, signup, code)
+	}, func(ctx context.Context, tx pgx.Tx, signup *identity.AgentSignup) error {
+		return a.agentSignupNotifyEnq.EnqueueAgentSignupVerificationTx(ctx, tx, signup.ID, nonce)
 	})
+	if err == nil && result != nil && !result.Created && a.wsHub != nil {
+		a.wsHub.Disconnect(result.Signup.AgentID)
+	}
 	return result, err
+}
+
+func (a *API) DeliverAgentSignupVerification(ctx context.Context, signupID, nonce string) error {
+	signup, err := a.store.GetPendingAgentSignupNotification(ctx, signupID, nonce)
+	if err != nil || signup == nil {
+		return err
+	}
+	return a.sendAgentSignupVerification(ctx, signup, a.agentSignupCode(nonce))
 }
 
 func (a *API) VerifyAgentSignup(ctx context.Context, agentID, code string, reviewOutbound bool) (*identity.AgentSignup, error) {

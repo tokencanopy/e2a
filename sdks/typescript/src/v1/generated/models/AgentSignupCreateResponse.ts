@@ -25,7 +25,7 @@ export class AgentSignupCreateResponse {
     'humanEmail': string;
     'id': string;
     /**
-    * Provisioned inbox on the human account\'s verified custom domain when available, otherwise the deployment shared domain.
+    * Provisioned inbox on the deployment shared agent domain.
     */
     'inbox': string;
     'noteToHuman'?: string;

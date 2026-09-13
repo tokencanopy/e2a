@@ -36,12 +36,14 @@ const (
 	// benign from the server's perspective, but the superseded client must NOT
 	// auto-reconnect: reconnecting would steal the socket back from its
 	// replacement and loop.
-	StatusReplaced websocket.StatusCode = 4000
+	StatusReplaced          websocket.StatusCode = 4000
+	StatusCredentialRevoked websocket.StatusCode = 4001
 )
 
 // Stable close-reason tokens (the machine-readable part of the contract).
 const (
-	ReasonReplaced     = "replaced"
-	ReasonShuttingDown = "shutting_down"
-	ReasonPingTimeout  = "ping_timeout"
+	ReasonReplaced          = "replaced"
+	ReasonShuttingDown      = "shutting_down"
+	ReasonPingTimeout       = "ping_timeout"
+	ReasonCredentialRevoked = "credential_revoked"
 )
