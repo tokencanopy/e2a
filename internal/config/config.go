@@ -26,6 +26,18 @@ const defaultSenderIdentityFixtureTTL = 24 * time.Hour
 // abandoned rather than merely idle.
 const defaultSenderIdentityReclaimMinAge = 168 * time.Hour
 
+// defaultWebhookWarnThreshold and defaultWebhookSweepMaxPerTick mirror
+// identity.WarnThreshold and identity.WarnSweepMaxPerTick/
+// DisableSweepMaxPerTick exactly, so an operator who configures no
+// `webhook:` block at all keeps today's compiled behavior. Not imported
+// directly: internal/identity does not (and should not) depend on
+// internal/config, so this pair must be kept in sync with those constants
+// by hand if either changes.
+const (
+	defaultWebhookWarnThreshold   = 5
+	defaultWebhookSweepMaxPerTick = 100
+)
+
 // defaultSenderIdentityReclaimMaxPerSweep bounds deletions per reaper job. Set
 // so a systematic mistake costs a handful of identities and a loud log rather
 // than an account's worth, while still draining a realistic leak backlog
@@ -409,6 +421,24 @@ type WebhookFanoutConfig struct {
 // (the default) disables the exemption.
 type WebhookConfig struct {
 	InternalSinkURL string `yaml:"internal_sink_url"`
+	// WarnThreshold overrides identity.WarnThreshold: the number of
+	// attempt-level delivery failures in identity.WarnWindow that trips the
+	// early-warning notification (issue #863). Volume-dependent: a webhook
+	// receiving a handful of events a day can never accumulate the compiled
+	// default's failures in 24h, so it could never warn no matter how
+	// thoroughly broken. Defaults to identity.WarnThreshold (5) when unset.
+	// Must be >= 1 when set (Validate); a threshold of 0 would trip on any
+	// single recorded failure. Override with E2A_WEBHOOK_WARN_THRESHOLD.
+	WarnThreshold int `yaml:"warn_threshold"`
+	// SweepMaxPerTick overrides both identity.WarnSweepMaxPerTick and
+	// identity.DisableSweepMaxPerTick, the incident-response levers that cap
+	// how many webhooks one maintenance sweep may warn or disable (issue
+	// #863): during a real e2a-side outage every active webhook can satisfy
+	// both conditions at once, and turning this down stops a mass-mail
+	// without shipping a release. Defaults to 100 (both compiled constants)
+	// when unset. Must be >= 1 when set (Validate); 0 would silently disable
+	// the sweep. Override with E2A_WEBHOOK_SWEEP_MAX_PER_TICK.
+	SweepMaxPerTick int `yaml:"sweep_max_per_tick"`
 }
 
 // DeliveryFeedbackConfig controls outbound delivery feedback (decision 9 /
@@ -645,6 +675,10 @@ func Load(path string) (*Config, error) {
 		},
 		Inbound:       InboundConfig{Mode: "sync"},
 		WebhookFanout: WebhookFanoutConfig{Mode: "legacy"},
+		Webhook: WebhookConfig{
+			WarnThreshold:   defaultWebhookWarnThreshold,
+			SweepMaxPerTick: defaultWebhookSweepMaxPerTick,
+		},
 		SendingRamp: SendingRampConfig{
 			StartDaily:  50,
 			TargetDaily: 2000,
@@ -852,6 +886,16 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_WEBHOOK_INTERNAL_SINK_URL"); v != "" {
 		cfg.Webhook.InternalSinkURL = v
 	}
+	if v := os.Getenv("E2A_WEBHOOK_WARN_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Webhook.WarnThreshold = n
+		}
+	}
+	if v := os.Getenv("E2A_WEBHOOK_SWEEP_MAX_PER_TICK"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Webhook.SweepMaxPerTick = n
+		}
+	}
 	if v := os.Getenv("E2A_OUTBOUND_SMTP_REQUIRE_TLS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.OutboundSMTP.RequireTLS = &b
@@ -964,6 +1008,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Trash.RetentionDays < 1 {
 		return fmt.Errorf("config: trash.retention_days must be at least 1 (got %d) — the stable API promises soft-deleted resources stay restorable", c.Trash.RetentionDays)
+	}
+	if c.Webhook.WarnThreshold < 1 {
+		return fmt.Errorf("config: webhook.warn_threshold (or E2A_WEBHOOK_WARN_THRESHOLD) must be at least 1 (got %d): 0 would warn on any single recorded delivery failure", c.Webhook.WarnThreshold)
+	}
+	if c.Webhook.SweepMaxPerTick < 1 {
+		return fmt.Errorf("config: webhook.sweep_max_per_tick (or E2A_WEBHOOK_SWEEP_MAX_PER_TICK) must be at least 1 (got %d): 0 would silently disable the warn/auto-disable sweep", c.Webhook.SweepMaxPerTick)
 	}
 	for _, cidr := range c.SMTP.ProxyTrustedCIDRs {
 		p, err := netip.ParsePrefix(cidr)
