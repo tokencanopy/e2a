@@ -1040,6 +1040,20 @@ scenarios:
               delivery_status: accepted
               scheduled_at: "{future_rfc3339}"
 
+      - id: list_via_scheduled_queue
+        action: request
+        method: GET
+        path: /v1/scheduled-messages
+        expect:
+          status: 200
+          body_array_contains:
+            items:
+              id: "{scheduled_message_id}"
+              agent_email: "{agent_email}"
+              direction: outbound
+              delivery_status: accepted
+              scheduled_at: "{future_rfc3339}"
+
       - id: trash_scheduled_message
         action: request
         method: DELETE
