@@ -590,6 +590,12 @@ const (
 // TUNABLE: 5 / 24h are the design's proposed values, not yet frozen —
 // low enough to fire within one sweep of a real hard-failure burst, high
 // enough that a single transient blip mails nobody.
+//
+// WarnThreshold is also this package's compiled DEFAULT: an operator can
+// override it per-deployment via Store.SetWebhookHealthLimits (issue #863),
+// since a count that's right at one traffic volume is wrong at 100x or
+// 1/100x. WarnWindow stays compile-time only; see the deferral note on
+// DisableSweepMaxPerTick below.
 const (
 	WarnThreshold = 5
 	WarnWindow    = 24 * time.Hour
@@ -655,7 +661,12 @@ var E2AAttributableLastErrors = []string{
 // disabled are never queued for that webhook, so they cannot be replayed).
 // Applied INSIDE the candidate subquery alongside the eligibility filter, so
 // the cap bounds rows we might actually disable and drains across sweeps.
-// TUNABLE.
+// TUNABLE, and, together with WarnSweepMaxPerTick, the compiled default for
+// the one operator-facing incident-response lever: Store.SetWebhookHealthLimits
+// (issue #863) lets an operator turn both caps down during a real e2a-side
+// outage without shipping a release. AutoDisableThreshold/AutoDisableWindow
+// above stay compile-time only: they interact with the GA-frozen 8-attempt /
+// 29h21m retry envelope and want more thought before being exposed.
 const DisableSweepMaxPerTick = 100
 
 // WarnSweepMaxPerTick bounds how many webhooks one warn pass may stamp +
@@ -663,8 +674,27 @@ const DisableSweepMaxPerTick = 100
 // active webhook satisfy the warn condition at once; an unbounded pass
 // would mass-mail the entire customer base copy blaming THEIR endpoints,
 // inside one lock-holding transaction. The cap drains legitimately over
-// subsequent 5-minute sweeps. TUNABLE.
+// subsequent 5-minute sweeps. TUNABLE; overridable, see DisableSweepMaxPerTick.
 const WarnSweepMaxPerTick = 100
+
+// warnThresholdOrDefault and sweepMaxPerTickOrDefault resolve the effective
+// per-sweep limits: the operator override from SetWebhookHealthLimits when
+// set, otherwise the compiled package default. A zero-value Store (every
+// existing NewStore(pool) call site and test) never called the setter, so
+// both fall through to the unchanged compiled constants.
+func (s *Store) warnThresholdOrDefault() int {
+	if s.webhookWarnThreshold > 0 {
+		return s.webhookWarnThreshold
+	}
+	return WarnThreshold
+}
+
+func (s *Store) sweepMaxPerTickOrDefault(compiledDefault int) int {
+	if s.webhookSweepMaxPerTick > 0 {
+		return s.webhookSweepMaxPerTick
+	}
+	return compiledDefault
+}
 
 // WebhookNotifyTx enqueues one webhook health-notification job inside the
 // sweep's transaction, so the state transition and its notification commit
@@ -725,7 +755,7 @@ func (s *Store) AutoDisableFailingWebhooks(ctx context.Context, notifyTx Webhook
 		 )
 		 AND enabled = true
 		 RETURNING id`,
-		AutoDisableThreshold, AutoDisableWindow, E2AAttributableLastErrors, DisableSweepMaxPerTick,
+		AutoDisableThreshold, AutoDisableWindow, E2AAttributableLastErrors, s.sweepMaxPerTickOrDefault(DisableSweepMaxPerTick),
 	)
 }
 
@@ -798,7 +828,7 @@ func (s *Store) WarnFailingWebhooks(ctx context.Context, notifyTx WebhookNotifyT
 		 AND enabled = true
 		 AND warn_notified_at IS NULL
 		 RETURNING id`,
-		WarnThreshold, WarnWindow, E2AAttributableLastErrors, WarnSweepMaxPerTick,
+		s.warnThresholdOrDefault(), WarnWindow, E2AAttributableLastErrors, s.sweepMaxPerTickOrDefault(WarnSweepMaxPerTick),
 	)
 }
 

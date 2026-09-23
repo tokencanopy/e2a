@@ -576,6 +576,14 @@ type Store struct {
 	// surface for topology resolution and lazy legacy adoption. Optional so
 	// stores in tests and embedded deployments remain inert by default.
 	threadIdentityMetrics ThreadIdentityMetrics
+	// webhookWarnThreshold and webhookSweepMaxPerTick override WarnThreshold
+	// and WarnSweepMaxPerTick/DisableSweepMaxPerTick (webhooks.go) from
+	// operator config (see SetWebhookHealthLimits). Zero, the value every
+	// zero-value and NewStore-only Store has, means "use the compiled
+	// default", so the many tests that call NewStore(pool) directly keep
+	// today's behavior unchanged.
+	webhookWarnThreshold   int
+	webhookSweepMaxPerTick int
 }
 
 // OutboundJobCanceller is the narrow River cancellation surface identity needs
@@ -620,6 +628,19 @@ func (s *Store) SetScheduledSendFinalizer(f ScheduledSendFinalizer) {
 // Production wires the same telemetry backend used by the janitor gauges.
 func (s *Store) SetThreadMetrics(metrics ThreadIdentityMetrics) {
 	s.threadIdentityMetrics = metrics
+}
+
+// SetWebhookHealthLimits overrides the compiled WarnThreshold and
+// WarnSweepMaxPerTick/DisableSweepMaxPerTick defaults (webhooks.go) from
+// operator config (issue #863: these are volume-dependent and e2a is
+// self-hostable, so one compiled value cannot serve every deployment).
+// Either argument left at 0 leaves the matching compiled default in place.
+// cmd/e2a wires this from cfg.Webhook after Config.Validate has already
+// rejected any configured value below 1, so the only zero this method sees
+// there is "unset".
+func (s *Store) SetWebhookHealthLimits(warnThreshold, sweepMaxPerTick int) {
+	s.webhookWarnThreshold = warnThreshold
+	s.webhookSweepMaxPerTick = sweepMaxPerTick
 }
 
 func (s *Store) cancelOutboundJobIDsTx(ctx context.Context, tx pgx.Tx, jobIDs []int64) error {

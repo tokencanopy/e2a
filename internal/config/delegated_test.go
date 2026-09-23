@@ -33,6 +33,7 @@ func baseConfigWithDelegated(d DelegatedConfig, env string) *Config {
 		Env:       env,
 		Signing:   SigningConfig{HMACSecret: strings.Repeat("x", 64)},
 		Trash:     TrashConfig{RetentionDays: 30},
+		Webhook:   WebhookConfig{WarnThreshold: defaultWebhookWarnThreshold, SweepMaxPerTick: defaultWebhookSweepMaxPerTick},
 		Delegated: d,
 	}
 }

@@ -250,6 +250,10 @@ func main() {
 	if err := store.EnsureSharedDomain(ctx, cfg.SharedDomain); err != nil {
 		log.Fatalf("Failed to seed shared domain row: %v", err)
 	}
+	// Config-controlled webhook health thresholds (issue #863): Validate has
+	// already rejected anything below 1, so this always carries either the
+	// operator's override or the compiled default.
+	store.SetWebhookHealthLimits(cfg.Webhook.WarnThreshold, cfg.Webhook.SweepMaxPerTick)
 	// deliveryStore backs the legacy webhook_deliveries table. The
 	// legacy per-agent push path (Deliverer/RetryWorker) is gone — push
 	// now flows exclusively through the /v1/webhooks subscriber resource
