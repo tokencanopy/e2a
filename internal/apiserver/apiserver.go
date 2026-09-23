@@ -310,7 +310,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		VerifyDomain:       verifyDomainFunc(p),
 		VerifyProbe: func(domain, token, dkimSel, dkimKey string) httpapi.DomainCheckResult {
 			c := agent.CheckDomainRecords(domain, p.SMTPDomain, token, dkimSel, dkimKey, p.Production)
-			return httpapi.DomainCheckResult{TXTFound: c.TXTFound, MX: c.MX, SPF: c.SPF, DKIM: c.DKIM}
+			return httpapi.DomainCheckResult{TXTFound: c.TXTFound, MX: c.MX, SPF: c.SPF, DKIM: c.DKIM, DNSError: c.DNSError}
 		},
 		EnqueueSenderProvision: enqueueSenderProvisionFunc(p),
 

@@ -251,12 +251,15 @@ func (s *Server) enqueueSenderProvision(ctx context.Context, domain string) {
 	}
 }
 
-// DomainCheckResult is the live-DNS diagnostic surfaced by verify.
+// DomainCheckResult is the live-DNS diagnostic surfaced by verify. DNSError
+// is empty unless a probe hit a genuine resolver failure rather than an
+// ordinary not-yet-published record.
 type DomainCheckResult struct {
 	TXTFound bool
 	MX       string
 	SPF      string
 	DKIM     string
+	DNSError string
 }
 
 // VerifyDomainView mirrors the legacy VerifyDomainResponse.
@@ -275,6 +278,7 @@ type VerifyDomainView struct {
 	MX         string     `json:"mx,omitempty" doc:"Live DNS probe outcome for the inbound MX record from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Open set; tolerate unknown values. Known values: found (an MX record on the apex domain points at the e2a relay host), missing (no apex MX points at the relay, or the DNS lookup failed). The MX probe gates verification together with the ownership TXT: verified flips true only when both are present."`
 	SPF        string     `json:"spf,omitempty" doc:"Live DNS probe outcome for the apex SPF record from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Advisory diagnostic only: SPF does not gate verified. Open set; tolerate unknown values. Known values: found (an apex TXT record starts with v=spf1 and includes the e2a relay's send domain), missing (no such TXT record, or the DNS lookup failed). This probes the APEX SPF authorizing the relay; it is not the mail_from_spf record (the custom MAIL FROM subdomain's SPF), whose persisted state is reported in dns_records[].status."`
 	DKIM       string     `json:"dkim,omitempty" doc:"Live DNS probe outcome for the domain's DKIM record ({selector}._domainkey.{domain}) from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Advisory diagnostic: DKIM does not gate verified. Open set; tolerate unknown values. Known values: found (a TXT at the selector carries a p= key equal to the issued one; a match wins over a stale key during rotation), missing (a keypair is issued but no p= payload is published at the selector, or the DNS lookup failed), deferred (the probe was skipped because no per-domain DKIM keypair is stored for this domain yet — legacy pre-keying rows; NOT a DNS-propagation wait), mismatch (a DKIM record IS published at the selector but its key doesn't match the issued one — almost always a truncated/clipped TXT: the value is ~400 chars and must be published in full, ending in 'AQAB'; re-publish the complete DKIM record, do not just wait)."`
+	DNSError   string     `json:"dns_error,omitempty" doc:"Set only when a probe above hit a genuine resolver failure (timeout, SERVFAIL, unreachable resolver) rather than an ordinary not-yet-published record. mx/spf/dkim still read missing in that case, but the cause is a DNS infrastructure problem, not a configuration gap: retry instead of re-publishing records."`
 }
 
 // listDomainsOutput uses the shared Page[T] envelope (items + next_cursor). The
@@ -376,7 +380,7 @@ func (s *Server) handleVerifyDomain(ctx context.Context, in *DomainParam) (*veri
 		s.enqueueSenderProvision(ctx, d.Domain)
 		return &verifyDomainOutput{Body: VerifyDomainView{
 			Domain: d.Domain, Verified: true, VerifiedAt: d.VerifiedAt,
-			MX: check.MX, SPF: check.SPF, DKIM: check.DKIM,
+			MX: check.MX, SPF: check.SPF, DKIM: check.DKIM, DNSError: check.DNSError,
 		}}, nil
 	}
 	// Verification requires BOTH the ownership TXT and the inbound MX. The MX
@@ -392,7 +396,7 @@ func (s *Server) handleVerifyDomain(ctx context.Context, in *DomainParam) (*veri
 	// poll by re-calling and branching on `verified`, never on the status code.
 	if !check.TXTFound || check.MX != "found" {
 		return &verifyDomainOutput{Body: VerifyDomainView{
-			Domain: d.Domain, Verified: false, MX: check.MX, SPF: check.SPF, DKIM: check.DKIM,
+			Domain: d.Domain, Verified: false, MX: check.MX, SPF: check.SPF, DKIM: check.DKIM, DNSError: check.DNSError,
 		}}, nil
 	}
 	if err := s.deps.VerifyDomain(ctx, in.Domain, user.ID); err != nil {

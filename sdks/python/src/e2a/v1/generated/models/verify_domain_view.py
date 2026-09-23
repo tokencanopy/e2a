@@ -28,13 +28,14 @@ class VerifyDomainView(BaseModel):
     VerifyDomainView
     """ # noqa: E501
     dkim: Optional[StrictStr] = Field(default=None, description="Live DNS probe outcome for the domain's DKIM record ({selector}._domainkey.{domain}) from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Advisory diagnostic: DKIM does not gate verified. Open set; tolerate unknown values. Known values: found (a TXT at the selector carries a p= key equal to the issued one; a match wins over a stale key during rotation), missing (a keypair is issued but no p= payload is published at the selector, or the DNS lookup failed), deferred (the probe was skipped because no per-domain DKIM keypair is stored for this domain yet — legacy pre-keying rows; NOT a DNS-propagation wait), mismatch (a DKIM record IS published at the selector but its key doesn't match the issued one — almost always a truncated/clipped TXT: the value is ~400 chars and must be published in full, ending in 'AQAB'; re-publish the complete DKIM record, do not just wait).")
+    dns_error: Optional[StrictStr] = Field(default=None, description="Set only when a probe above hit a genuine resolver failure (timeout, SERVFAIL, unreachable resolver) rather than an ordinary not-yet-published record. mx/spf/dkim still read missing in that case, but the cause is a DNS infrastructure problem, not a configuration gap: retry instead of re-publishing records.")
     domain: StrictStr
     mx: Optional[StrictStr] = Field(default=None, description="Live DNS probe outcome for the inbound MX record from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Open set; tolerate unknown values. Known values: found (an MX record on the apex domain points at the e2a relay host), missing (no apex MX points at the relay, or the DNS lookup failed). The MX probe gates verification together with the ownership TXT: verified flips true only when both are present.")
     spf: Optional[StrictStr] = Field(default=None, description="Live DNS probe outcome for the apex SPF record from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Advisory diagnostic only: SPF does not gate verified. Open set; tolerate unknown values. Known values: found (an apex TXT record starts with v=spf1 and includes the e2a relay's send domain), missing (no such TXT record, or the DNS lookup failed). This probes the APEX SPF authorizing the relay; it is not the mail_from_spf record (the custom MAIL FROM subdomain's SPF), whose persisted state is reported in dns_records[].status.")
     verified: StrictBool
     verified_at: Optional[datetime] = None
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["dkim", "domain", "mx", "spf", "verified", "verified_at"]
+    __properties: ClassVar[List[str]] = ["dkim", "dns_error", "domain", "mx", "spf", "verified", "verified_at"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -95,6 +96,7 @@ class VerifyDomainView(BaseModel):
 
         _obj = cls.model_validate({
             "dkim": obj.get("dkim"),
+            "dns_error": obj.get("dns_error"),
             "domain": obj.get("domain"),
             "mx": obj.get("mx"),
             "spf": obj.get("spf"),

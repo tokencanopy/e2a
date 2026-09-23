@@ -1056,12 +1056,14 @@ func (a *API) WWWAuthenticateChallenge(r *http.Request) string {
 // "deferred" (per-domain DKIM not provisioned yet, legacy rows
 // pre-migration 014) and "mismatch" (a DKIM record is published at the
 // selector but doesn't match the issued key — almost always a truncated
-// or mis-copied TXT).
+// or mis-copied TXT). DNSError is empty unless a probe hit a genuine
+// resolver failure (not a not-found answer); see checkDomainRecords.
 type dnsRecordCheck struct {
 	TXTFound bool
 	MX       string
 	SPF      string
 	DKIM     string
+	DNSError string
 }
 
 // checkDomainRecords runs the three per-record probes plus the TXT
@@ -1087,13 +1089,14 @@ type DNSRecordCheck struct {
 	MX       string
 	SPF      string
 	DKIM     string
+	DNSError string
 }
 
 // CheckDomainRecords is the exported seam over checkDomainRecords so the v1
 // httpapi layer reuses the exact DNS-probe logic for domain verification.
 func CheckDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dkimPublicKey string, production bool) DNSRecordCheck {
 	c := checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dkimPublicKey, production)
-	return DNSRecordCheck{TXTFound: c.TXTFound, MX: c.MX, SPF: c.SPF, DKIM: c.DKIM}
+	return DNSRecordCheck{TXTFound: c.TXTFound, MX: c.MX, SPF: c.SPF, DKIM: c.DKIM, DNSError: c.DNSError}
 }
 
 func checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dkimPublicKey string, production bool) dnsRecordCheck {
@@ -1122,6 +1125,7 @@ func checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dki
 		}
 	}
 	check := dnsRecordCheck{DKIM: "deferred", MX: "missing", SPF: "missing"}
+	var lookupErrs []string
 
 	// TXT ownership + SPF live in the same record set
 	if txts, err := net.LookupTXT(domain); err == nil {
@@ -1134,6 +1138,8 @@ func checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dki
 				check.SPF = "found"
 			}
 		}
+	} else if !isDNSNotFound(err) {
+		lookupErrs = append(lookupErrs, fmt.Sprintf("TXT lookup: %v", err))
 	}
 
 	if mxs, err := net.LookupMX(domain); err == nil {
@@ -1143,6 +1149,8 @@ func checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dki
 				break
 			}
 		}
+	} else if !isDNSNotFound(err) {
+		lookupErrs = append(lookupErrs, fmt.Sprintf("MX lookup: %v", err))
 	}
 
 	// DKIM: only probe if we have a stored keypair for the domain. The
@@ -1154,10 +1162,27 @@ func checkDomainRecords(domain, smtpDomain, verificationToken, dkimSelector, dki
 		dkimName := fmt.Sprintf("%s._domainkey.%s", dkimSelector, domain)
 		if txts, err := net.LookupTXT(dkimName); err == nil {
 			check.DKIM = classifyDKIM(txts, dkimPublicKey)
+		} else if !isDNSNotFound(err) {
+			lookupErrs = append(lookupErrs, fmt.Sprintf("DKIM lookup: %v", err))
 		}
 	}
 
+	// isDNSNotFound already filtered out the ordinary not-yet-published case;
+	// anything collected here is a genuine resolver failure.
+	if len(lookupErrs) > 0 {
+		check.DNSError = strings.Join(lookupErrs, "; ")
+		log.Printf("checkDomainRecords: DNS lookup failure for domain=%q: %s", domain, check.DNSError)
+	}
+
 	return check
+}
+
+// isDNSNotFound reports whether err is a resolver "not found" answer
+// (NXDOMAIN, or NOERROR with no matching records) rather than a genuine
+// lookup failure (timeout, SERVFAIL, network unreachable).
+func isDNSNotFound(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
 }
 
 // classifyDKIM maps the TXT records found at a domain's DKIM selector name
