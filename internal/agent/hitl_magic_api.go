@@ -300,7 +300,7 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 		return
 	}
 	if supErr := a.checkSuppressionStrict(r.Context(), userID, agent.ID, sendReq); supErr != nil {
-		writeMagicMessage(w, supErr.Status, "Cannot send", html.EscapeString(supErr.Msg))
+		writeMagicMessage(w, supErr.Status, "Cannot send", supErr.Msg)
 		return
 	}
 	// Flow-cap re-check — same rationale and ordering as ApprovePendingCore
@@ -308,11 +308,11 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 	// metered at accept, so approve time is the enforcement point.
 	if qerr := a.checkApproveQuota(r.Context(), userID,
 		identity.UniqueRecipientCount(sendReq.To, sendReq.CC, sendReq.BCC)); qerr != nil {
-		writeMagicMessage(w, qerr.Status, "Cannot send", html.EscapeString(qerr.Msg))
+		writeMagicMessage(w, qerr.Status, "Cannot send", qerr.Msg)
 		return
 	}
 	if uerr := prepareManagedUnsubscribe(r.Context(), a.unsubscribeIssuer, a.fromDomain, userID, agent, &sendReq, true); uerr != nil {
-		writeMagicMessage(w, uerr.Status, "Cannot send", html.EscapeString(uerr.Msg))
+		writeMagicMessage(w, uerr.Status, "Cannot send", uerr.Msg)
 		return
 	}
 	sent, handled, aerr := a.approveOutboundAsyncWithRequest(r.Context(), agent, messageID, userID, draft, identity.PendingApprovalEdit{}, sendReq, nil)
@@ -324,7 +324,7 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 		log.Printf("[mail:%s] dir=outbound type=%s status=%s agent=%s to_count=%d to_domains=%v approved=magic-link:user:%s delivery=async",
 			sent.ID, sent.Type, sent.Status, agent.EmailAddress(), len(sent.ToRecipients), logredact.AddressDomains(sent.ToRecipients), userID)
 		writeMagicResult(w, http.StatusOK, "Approved",
-			fmt.Sprintf("Your message to %s has been queued for delivery.", html.EscapeString(firstRecipient(sent.ToRecipients))),
+			fmt.Sprintf("Your message to %s has been queued for delivery.", firstRecipient(sent.ToRecipients)),
 			viewMessageCTA(agent.EmailAddress(), draft.ConversationID, sent.ID))
 		return
 	}
@@ -343,8 +343,7 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 		default:
 			var ve *outbound.ValidationError
 			if errors.As(err, &ve) {
-				writeMagicMessage(w, http.StatusBadRequest, "Cannot send",
-					html.EscapeString(ve.Error()))
+				writeMagicMessage(w, http.StatusBadRequest, "Cannot send", ve.Error())
 				return
 			}
 			log.Printf("[api] magic-approve send failed: msg=%s err=%v", messageID, err)
@@ -361,7 +360,7 @@ func (a *API) magicApprove(w http.ResponseWriter, r *http.Request, messageID, us
 
 	writeMagicResult(w, http.StatusOK,
 		"Approved",
-		fmt.Sprintf("Your message to %s has been sent.", html.EscapeString(firstRecipient(sent.ToRecipients))),
+		fmt.Sprintf("Your message to %s has been sent.", firstRecipient(sent.ToRecipients)),
 		viewMessageCTA(agent.EmailAddress(), draft.ConversationID, sent.ID))
 }
 
@@ -380,7 +379,7 @@ func writeMagicApproveError(w http.ResponseWriter, messageID string, err error) 
 	default:
 		var ve *outbound.ValidationError
 		if errors.As(err, &ve) {
-			writeMagicMessage(w, http.StatusBadRequest, "Cannot send", html.EscapeString(ve.Error()))
+			writeMagicMessage(w, http.StatusBadRequest, "Cannot send", ve.Error())
 			return
 		}
 		log.Printf("[api] magic-approve accept failed: msg=%s err=%v", messageID, err)
@@ -777,6 +776,11 @@ func setMagicHeaders(w http.ResponseWriter, status int) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Discourage indexing if a link ever leaks publicly.
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	// Defense in depth: these pages emit no <script> and only an inline
+	// <style> block, so a CSP costs nothing today and blocks any future
+	// contributor from silently reintroducing an injectable sink.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'none'; base-uri 'self'; form-action 'self'")
 	w.WriteHeader(status)
 }
 
@@ -836,10 +840,10 @@ func writeMagicResult(w http.ResponseWriter, status int, title, body string, cta
 `,
 		html.EscapeString(bannerEyebrowFor(status)),
 		html.EscapeString(title),
-		// `body` is sometimes a pre-escaped fragment (the validation-error
-		// path runs html.EscapeString itself before calling us). Don't
-		// double-escape.
-		body,
+		// writeMagicResult is the sole place that escapes body: every
+		// caller passes the raw string, so there is exactly one place
+		// that can forget to.
+		html.EscapeString(body),
 		html.EscapeString(cta.Href),
 		html.EscapeString(cta.Label),
 	)
@@ -889,6 +893,7 @@ func writeConfirmPage(w http.ResponseWriter, status int, action, token string, m
 	if bodyPreview == "" && msg.BodyHTML != "" {
 		bodyPreview = "(HTML only; view full message in the dashboard)"
 	}
+	bodyPreview = truncatePreviewBytes(bodyPreview, maxBodyPreviewBytes)
 
 	toList := strings.Join(msg.ToRecipients, ", ")
 	ccList := strings.Join(msg.CC, ", ")
@@ -957,6 +962,32 @@ func writeConfirmPage(w http.ResponseWriter, status int, action, token string, m
 		submitClass,
 		html.EscapeString(submitLabel),
 	)
+}
+
+// maxBodyPreviewBytes caps the confirm page's body preview so a reviewer
+// opening a held message with an unusually large body doesn't pull the
+// whole thing into one HTTP response every time the page loads. The
+// preview is a decision aid, not the message itself: the full body stays
+// reachable from the dashboard.
+const maxBodyPreviewBytes = 16384
+
+// truncatePreviewBytes returns a prefix of s at most maxBytes long,
+// stopping at a rune boundary so a multi-byte UTF-8 sequence is never
+// split. Byte length, not rune count: bodyPreview renders inside a
+// bounded HTTP response and the concern is response size, not display
+// width.
+func truncatePreviewBytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if i > maxBytes {
+			break
+		}
+		n = i
+	}
+	return s[:n] + "\n[truncated]"
 }
 
 func firstRecipient(rs []string) string {
