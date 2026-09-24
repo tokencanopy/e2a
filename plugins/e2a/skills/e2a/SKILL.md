@@ -56,10 +56,12 @@ that inbox with:
 
 ```json
 {
-  "outbound_gate_policy": "allowlist",
-  "outbound_gate_allowlist": [],
-  "outbound_gate_action": "review",
-  "holds_on_expiry": "reject"
+  "inbound": { "gate": {}, "scan": {} },
+  "outbound": {
+    "gate": { "policy": "allowlist", "allowlist": [], "action": "review" },
+    "scan": {}
+  },
+  "holds": { "on_expiry": "reject" }
 }
 ```
 
