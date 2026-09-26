@@ -50,6 +50,13 @@ func FromConfig(cfg *config.Config) (RuntimePolicy, error) {
 		ViolationOperationalDailyRecip:   sp.ViolationOperationalDaily,
 	}
 
+	if esa := sp.ExternalSendingAccess; esa != nil {
+		policy.ExternalSendingAccess = &ExternalSendingAccessPolicy{
+			Mode:                     Mode(esa.Mode),
+			AccountsCreatedAtOrAfter: esa.AccountsCreatedAtOrAfter,
+		}
+	}
+
 	if err := policy.Validate(); err != nil {
 		return RuntimePolicy{}, fmt.Errorf("sending_protection: %w", err)
 	}

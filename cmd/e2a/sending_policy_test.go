@@ -329,7 +329,7 @@ func TestSendingProtectionCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("capabilities: %v", err)
 		}
-		for _, want := range []string{`"sending_protection_contract":0`, `"runtime_policy_source":"config"`, `"operator_notice_recipient_commitments":{}`} {
+		for _, want := range []string{`"sending_protection_contract":0`, `"runtime_policy_source":"config"`, `"operator_notice_recipient_commitments":{}`, `"runtime_policy_features":["external_sending_access"]`} {
 			if !strings.Contains(out, want) {
 				t.Errorf("capabilities missing %s in %s", want, out)
 			}

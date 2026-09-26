@@ -135,6 +135,10 @@ func TestBuildCapabilitiesShape(t *testing.T) {
 		}
 	}
 
+	if len(caps.PolicyFeatures) != 1 || caps.PolicyFeatures[0] != PolicyFeatureExternalSendingAccess {
+		t.Errorf("policy features = %v, want [external_sending_access]", caps.PolicyFeatures)
+	}
+
 	empty := BuildCapabilities(PolicySourceConfig, Secrets{})
 	if empty.OperatorCommitments == nil || len(empty.OperatorCommitments) != 0 {
 		t.Error("absent operator map must yield an empty, non-nil commitments object")
