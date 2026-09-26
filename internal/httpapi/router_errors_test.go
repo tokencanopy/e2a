@@ -246,3 +246,36 @@ func TestMagicLinkRoutesAbsentWithoutDeps(t *testing.T) {
 		t.Fatalf("legacy handler called %d times for magic-link paths", legacyCalls)
 	}
 }
+
+// #792: a dot-segment collapse resolves to a destructive route (deleteAccount,
+// deleteAgent) with a trailing slash. Pins the current safe 404 so a future
+// chi upgrade or RedirectSlashes/StripSlashes addition fails this test first.
+func TestDestructiveRouteCollapseTargetsStay404OnTrailingSlash(t *testing.T) {
+	s := New(Deps{})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "account delete", method: http.MethodDelete, path: "/v1/account/?confirm=DELETE"},
+		{name: "agent delete", method: http.MethodDelete, path: "/v1/agents/foo%40bar.com/?confirm=DELETE"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			s.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.path, nil))
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404 (a collapsed-slash hit on a destructive route); body=%q", rr.Code, rr.Body.String())
+			}
+			var env ErrorEnvelope
+			if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode envelope: %v; body=%q", err, rr.Body.String())
+			}
+			if env.Err.Code != "not_found" {
+				t.Fatalf("error.code = %q, want not_found", env.Err.Code)
+			}
+		})
+	}
+}
