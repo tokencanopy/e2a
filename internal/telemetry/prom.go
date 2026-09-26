@@ -30,6 +30,7 @@ type Prom struct {
 	outAttempts        *prometheus.CounterVec
 	outAttemptDur      prometheus.Histogram
 	outRateDeferred    prometheus.Counter
+	externalAccess     *prometheus.CounterVec
 	whAttempts         *prometheus.CounterVec
 	whAttemptDur       prometheus.Histogram
 	whTerminal         *prometheus.CounterVec
@@ -97,6 +98,11 @@ var (
 	outTermSet = set("sent", "failed_suppressed", "failed_provider",
 		"failed_local_retries", "failed_cancelled")
 	outAttemptSet = set("success", "temporary_failure", "permanent_failure")
+
+	externalAccessStageSet = set("preflight", "acceptance", "authorization", "redemption")
+	externalAccessRouteSet = set("not_applicable", "custom_identity", "operator_approval",
+		"paid_entitlement", "restricted_recipients", "denied")
+	externalAccessModeSet = set("shadow", "enforce")
 	whSet         = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
 	whTerminalSet = set("delivered", "e2a_failure", "endpoint_failure", "excluded")
@@ -261,6 +267,10 @@ func NewProm(build string) *Prom {
 			Help:    "Upstream submission attempt duration.",
 			Buckets: fastBuckets,
 		}),
+		externalAccess: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_external_access_decisions_total",
+			Help: "External-sending-access evaluations by stage, deciding route and policy mode (shadow route=denied = sends enforcement would refuse).",
+		}, []string{"stage", "route", "mode"}),
 		outRateDeferred: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_outbound_rate_deferred_total",
 			Help: "Outbound submissions deferred by the per-agent fire-time rate limiter (snoozed, re-fired when the window frees capacity).",
@@ -426,7 +436,7 @@ func NewProm(build string) *Prom {
 	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
-		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred,
+		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred, p.externalAccess,
 		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whNotify, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.delegatedFailures, p.delegatedRefresh, p.oidcDiscovery, p.oidcCallback, p.provisioning,
@@ -498,6 +508,10 @@ func (p *Prom) OutboundAttempt(outcome string, seconds float64) {
 }
 
 func (p *Prom) OutboundRateDeferred() { p.outRateDeferred.Inc() }
+
+func (p *Prom) ExternalAccessDecision(stage, route, mode string) {
+	p.externalAccess.WithLabelValues(enum(externalAccessStageSet, stage), enum(externalAccessRouteSet, route), enum(externalAccessModeSet, mode)).Inc()
+}
 
 func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	p.whAttempts.WithLabelValues(enum(whSet, outcome), enum(classSet, statusClass)).Inc()

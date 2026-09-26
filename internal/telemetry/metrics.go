@@ -139,6 +139,15 @@ type Metrics interface {
 	// 60/min budget.
 	OutboundRateDeferred()
 
+	// ExternalAccessDecision records one external-sending-access evaluation
+	// (internal/sendingpolicy). stage ∈ {preflight, acceptance,
+	// authorization, redemption}; route ∈ {not_applicable, custom_identity,
+	// operator_approval, paid_entitlement, restricted_recipients, denied};
+	// mode ∈ {shadow, enforce}. In shadow mode route=denied counts the sends
+	// enforcement WOULD refuse — the impact evidence for moving to enforce.
+	// Bounded labels only: never an account id, address or domain.
+	ExternalAccessDecision(stage, route, mode string)
+
 	// WebhookAttempt records one webhook delivery attempt. outcome ∈
 	// {delivered, retryable_failure, exhausted, webhook_deleted,
 	// skipped_disabled}. statusClass is the HTTP status class of the
@@ -308,6 +317,7 @@ func (NoOp) OutboundTerminal(string)                      {}
 func (NoOp) OutboundTerminalLatency(float64)              {}
 func (NoOp) OutboundAttempt(string, float64)              {}
 func (NoOp) OutboundRateDeferred()                        {}
+func (NoOp) ExternalAccessDecision(string, string, string) {}
 func (NoOp) WebhookAttempt(string, string, float64)       {}
 func (NoOp) WebhookTerminal(string, string, int)          {}
 func (NoOp) WebhookNotify(string, string)                 {}
@@ -436,6 +446,10 @@ func (l *Log) OutboundAttempt(outcome string, seconds float64) {
 
 func (l *Log) OutboundRateDeferred() {
 	log.Printf("[metrics] event=outbound.rate_deferred")
+}
+
+func (l *Log) ExternalAccessDecision(stage, route, mode string) {
+	log.Printf("[metrics] event=external_access.decision stage=%s route=%s mode=%s", stage, route, mode)
 }
 
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {

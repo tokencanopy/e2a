@@ -306,6 +306,9 @@ func TestExternalAccessRevocationBeforeRedemptionInvalidates(t *testing.T) {
 		"owner email change": func(f *fixture, user, _ string) {
 			f.exec(`UPDATE users SET email = 'new-' || email WHERE id = $1`, user)
 		},
+		"domain verification lost": func(f *fixture, user, _ string) {
+			f.exec(`UPDATE domains SET sending_status = 'failed' WHERE user_id = $1`, user)
+		},
 	} {
 		revoke := revoke
 		t.Run(name, func(t *testing.T) {

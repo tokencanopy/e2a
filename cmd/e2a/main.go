@@ -300,6 +300,9 @@ func main() {
 		metrics = promBackend
 	}
 	store.SetThreadMetrics(metrics)
+	// External-sending-access decisions (shadow impact / enforce refusals)
+	// as bounded counters; a no-op while the control is disabled.
+	sendingpolicy.SetExternalAccessObserver(metrics.ExternalAccessDecision)
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)
 	smtpRelay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
 	sender := outbound.NewSenderWithDKIM(smtpRelay, cfg.OutboundSMTP.FromDomain, store)

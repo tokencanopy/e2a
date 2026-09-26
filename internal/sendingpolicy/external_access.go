@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -262,6 +263,7 @@ func evaluateExternalAccess(ctx context.Context, q dbQuerier, policy RuntimePoli
 		return ExternalAccessVerdict{}, err
 	}
 	v := ExternalAccessVerdict{Mode: mode, Route: route, Allowed: route != RouteDenied}
+	observeExternalAccess(in.stage, route, mode)
 	if route == RouteDenied && mode == ModeShadow {
 		// Shadow computes the same decision and never blocks. Bounded fields
 		// only: no account id, address, domain or content.
@@ -475,3 +477,21 @@ type ExternalAccess interface {
 }
 
 var _ ExternalAccess = (*Module)(nil)
+
+// ExternalAccessObserver receives one bounded (stage, route, mode) sample per
+// evaluation in shadow or enforce mode. Set once at startup by the
+// composition root (telemetry.Metrics.ExternalAccessDecision); nil = no-op.
+type ExternalAccessObserver func(stage, route, mode string)
+
+var externalAccessObserver atomic.Value // ExternalAccessObserver
+
+// SetExternalAccessObserver installs the process-wide decision observer.
+func SetExternalAccessObserver(o ExternalAccessObserver) {
+	externalAccessObserver.Store(o)
+}
+
+func observeExternalAccess(stage string, route ExternalAccessRoute, mode Mode) {
+	if o, ok := externalAccessObserver.Load().(ExternalAccessObserver); ok && o != nil {
+		o(stage, string(route), string(mode))
+	}
+}

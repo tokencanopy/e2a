@@ -204,6 +204,8 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.InboundProcess("processed", 0.4)
 	p.SetQueueDepth("outbound", "available", 12)
 	p.SetQueueOldestAge("outbound", 45.5)
+	p.ExternalAccessDecision("authorization", "denied", "shadow")
+	p.ExternalAccessDecision("preflight", "attacker-controlled", "enforce")
 
 	out := scrape(t, p)
 	for _, want := range []string{
@@ -219,6 +221,8 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_webhook_notify_total{kind="disabled",outcome="permanent"} 1`,
 		`e2a_webhook_notify_total{kind="disabled",outcome="skipped"} 1`,
 		`e2a_outbound_rate_deferred_total 1`,
+		`e2a_external_access_decisions_total{mode="shadow",route="denied",stage="authorization"} 1`,
+		`e2a_external_access_decisions_total{mode="enforce",route="other",stage="preflight"} 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
 		`e2a_webhook_delivery_terminal_total{outcome="delivered",scope="initial"} 1`,
