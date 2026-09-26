@@ -7,9 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/tokencanopy/e2a/internal/auth"
@@ -80,11 +82,20 @@ func (a *API) DeleteUserDataCore(ctx context.Context, user *identity.User, perma
 		res *identity.DeleteUserDataResult
 		err error
 	)
-	if permanent || !identity.AccountTrashEnabled() {
+	erase := permanent || !identity.AccountTrashEnabled()
+	if erase {
 		res, err = a.store.EraseAccount(ctx, user.ID, a.domainTeardownHook)
-		if err != nil {
+		// A deployment with account trash disabled has no trash to fall back
+		// to on an explicit request, but a plain delete of a paused account
+		// still goes to the trash: the janitor purges it at once (retention
+		// 0) with the abuse classification intact.
+		if errors.Is(err, identity.ErrEraseHeld) && !permanent {
+			erase = false
+		} else if err != nil {
 			return nil, err
 		}
+	}
+	if erase {
 		res.OAuthAuthCodesDeleted = oauthCounts.AuthCodes
 		res.OAuthAccessTokensDeleted = oauthCounts.AccessTokens
 		res.OAuthRefreshTokensDeleted = oauthCounts.RefreshTokens
@@ -135,26 +146,57 @@ func (a *API) DeleteExpiredDeletedAccountSummaries(ctx context.Context) (int64, 
 	return a.store.DeleteExpiredDeletedAccountSummaries(ctx)
 }
 
-// Billing hook modes. The payload is additive over the original
-// {"user_id": …} call: a sidecar that predates the mode field treats every
-// call as "cancel", which is exactly right for purge.
+// Billing notifications. Purge keeps the ORIGINAL call — {"user_id"} to
+// billing_hook_url, which every billing service treats as "cancel". Trash and
+// restore go to a separate account-state endpoint, because a billing service
+// that predates account trash cancels (and deletes the customer) on ANY call
+// to the hook URL; an old service answers 404 there, which is logged and
+// never blocks the trash or restore.
 const (
-	billingModeTrash   = "trash"   // set cancel_at_period_end
-	billingModeRestore = "restore" // revert cancel_at_period_end
-	billingModePurge   = "purge"   // cancel now (the original behaviour)
+	billingModeTrash   = "trash"   // account-state: set cancel_at_period_end
+	billingModeRestore = "restore" // account-state: revert cancel_at_period_end
+	billingModePurge   = "purge"   // hook URL: cancel now (the original behaviour)
 )
 
 func (a *API) notifyBilling(ctx context.Context, userID, mode string) {
-	if a.billingHookURL == "" {
+	var (
+		target string
+		body   map[string]string
+	)
+	if mode == billingModePurge {
+		target, body = a.billingHookURL, map[string]string{"user_id": userID}
+	} else {
+		target, body = a.accountStateURL(), map[string]string{"user_id": userID, "mode": mode}
+	}
+	if target == "" {
 		return
 	}
-	if err := a.notifyBillingUserDeleted(ctx, userID, mode); err != nil {
-		log.Printf("[api] billing-hook user-%s failed (continuing): user=%s err=%v", mode, userID, err)
+	if err := a.postBilling(ctx, target, body); err != nil {
+		log.Printf("[api] billing notify (%s) failed (continuing): user=%s err=%v", mode, userID, err)
 	}
 }
 
-func (a *API) notifyBillingUserDeleted(ctx context.Context, userID, mode string) error {
-	body, err := json.Marshal(map[string]string{"user_id": userID, "mode": mode})
+// accountStateURL is the configured account-state endpoint, or the sibling
+// path "account-state" of the billing hook URL.
+func (a *API) accountStateURL() string {
+	if a.billingAccountStateURL != "" {
+		return a.billingAccountStateURL
+	}
+	if a.billingHookURL == "" {
+		return ""
+	}
+	base, err := url.Parse(a.billingHookURL)
+	if err != nil {
+		return ""
+	}
+	return base.ResolveReference(&url.URL{Path: "account-state"}).String()
+}
+
+// postBilling HMAC-POSTs a JSON body to a billing endpoint after the account
+// change commits. Any non-204 (including an old service's 404 on the
+// account-state path) is returned as an error the caller logs and ignores.
+func (a *API) postBilling(ctx context.Context, target string, payload map[string]string) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -162,7 +204,7 @@ func (a *API) notifyBillingUserDeleted(ctx context.Context, userID, mode string)
 	h.Write(body)
 	sig := hex.EncodeToString(h.Sum(nil))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.billingHookURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -187,7 +229,7 @@ func (a *API) notifyBillingUserDeleted(ctx context.Context, userID, mode string)
 // session (one issued to a sign-in that resolved to a trashed account) and
 // its trashed user. It never resolves an ordinary session.
 func (a *API) RestrictedSession(r *http.Request) (*identity.User, string, error) {
-	c, err := r.Cookie(auth.SessionCookieName)
+	c, err := r.Cookie(auth.RestoreSessionCookieName)
 	if err != nil {
 		return nil, "", err
 	}
@@ -215,4 +257,25 @@ func (a *API) WriteSessionCookie(w http.ResponseWriter, token string, maxAge tim
 		c.MaxAge = -1
 	}
 	http.SetCookie(w, c)
+}
+
+// SameOriginDashboardRequest is the CSRF check for the cookie-authenticated
+// restore/erase routes: the request must provably come from the deployment's
+// public dashboard origin (the same Origin/Referer rule logout uses).
+func (a *API) SameOriginDashboardRequest(r *http.Request) bool {
+	return auth.IsSameOriginRequest(r, a.publicURL)
+}
+
+// ClearRestoreSessionCookie expires the restricted-session cookie (after a
+// restore re-issued an ordinary e2a_session, or after an erase).
+func (a *API) ClearRestoreSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.RestoreSessionCookieName,
+		Value:    "",
+		Path:     "/api/account/",
+		HttpOnly: true,
+		Secure:   a.production,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
 }

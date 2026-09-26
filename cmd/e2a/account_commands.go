@@ -23,13 +23,14 @@ type accountCommandFlags struct {
 	inspectTombstoneKeys bool
 	extendTombstones     bool
 	revokeTombstones     bool
+	escalateAbuse        bool
 	deletedAccountID     string
 	holdDays             int
 }
 
 func (f *accountCommandFlags) selected() int {
 	n := 0
-	for _, b := range []bool{f.inspectDeleted, f.inspectTombstoneKeys, f.extendTombstones, f.revokeTombstones} {
+	for _, b := range []bool{f.inspectDeleted, f.inspectTombstoneKeys, f.extendTombstones, f.revokeTombstones, f.escalateAbuse} {
 		if b {
 			n++
 		}
@@ -68,7 +69,10 @@ func runAccountCommand(ctx context.Context, store *identity.Store, f *accountCom
 		if f.holdDays <= 0 {
 			return errors.New("-extend-identity-tombstones requires a positive -tombstone-hold-days")
 		}
-		n, err := store.ExtendAccountTombstones(ctx, id, time.Now().Add(time.Duration(f.holdDays)*24*time.Hour))
+		if strings.TrimSpace(reason) == "" {
+			return errors.New("-extend-identity-tombstones requires a nonblank -reason")
+		}
+		n, err := store.ExtendAccountTombstones(ctx, id, time.Now().Add(time.Duration(f.holdDays)*24*time.Hour), cliActor(), reason)
 		if err != nil {
 			return err
 		}
@@ -78,11 +82,24 @@ func runAccountCommand(ctx context.Context, store *identity.Store, f *accountCom
 		if strings.TrimSpace(reason) == "" {
 			return errors.New("-revoke-identity-tombstones requires a nonblank -reason")
 		}
-		n, err := store.RevokeAccountTombstones(ctx, id)
+		n, kept, err := store.RevokeAccountTombstones(ctx, id, cliActor(), reason)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "tombstones_revoked: %d\nactor: %s\nreason: %s\n", n, cliActor(), reason)
+		fmt.Fprintf(stdout, "tombstones_revoked: %d\ntombstones_kept_shared: %d\nactor: %s\nreason: %s\n", n, kept, cliActor(), reason)
+		return nil
+	case f.escalateAbuse:
+		if strings.TrimSpace(reason) == "" {
+			return errors.New("-escalate-deleted-account-to-abuse requires a nonblank -reason")
+		}
+		n, err := store.EscalateDeletedAccountToAbuse(ctx, id, cliActor(), reason)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("no deleted-account summary is retained for %s; nothing to escalate", id)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "abuse_tombstones_written: %d\nsummary_retention: abuse\nactor: %s\nreason: %s\n", n, cliActor(), reason)
 		return nil
 	}
 	return errors.New("no account command selected")

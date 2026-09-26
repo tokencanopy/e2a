@@ -143,8 +143,9 @@ export class RetryHttpLibrary implements HttpLibrary {
   // is returned, and a blind retry creates a SECOND row. So we only retry:
   //   - reads (GET/HEAD/OPTIONS) — no side effects;
   //   - HTTP-idempotent writes (PUT/PATCH/DELETE) — repeating reaches the same
-  //     end state — EXCEPT account deletion, which is irreversible and whose
-  //     post-success retry would surface a spurious 404 to the caller;
+  //     end state — EXCEPT account deletion, which revokes the very key it
+  //     runs on (trash) or erases the account (permanent=true), so a
+  //     post-success retry would surface a spurious 401 to the caller;
   //   - server-deduped POSTs (send/reply/forward/approve, rotate-secret,
   //     create-api-key, create-webhook),
   //     recognised by the Idempotency-Key header the generated layer emits ONLY
@@ -206,7 +207,8 @@ export class RetryHttpLibrary implements HttpLibrary {
     };
   }
 
-  // DELETE /v1/account (account deletion) — irreversible; exclude from retry.
+  // DELETE /v1/account (account deletion) — revokes the calling key even in
+  // the default trash mode; exclude from retry.
   private isAccountDeletion(url: string): boolean {
     const path = url.split("?")[0];
     return path.endsWith("/v1/account") || path.endsWith("/account");

@@ -345,6 +345,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `not_in_trash` | 409 | Restore or permanent-delete was requested for a resource that is not currently in trash. |
 | `purge_in_progress` | 409 | Permanent agent deletion has been claimed and can no longer be reversed; retry deletion to resume it. |
 | `send_in_progress` | 409 | The message send is already executing; wait for its terminal outcome. |
+| `erase_held` | 409 | Permanent deletion (`DELETE /v1/account?permanent=true`, or `DELETE /v1/agents/{email}?permanent=true`) is held while the account's sending is paused. Delete without `permanent` to move it to the trash instead. |
 | `webhook_disabled` | 409 | Operation requires an enabled webhook. |
 | `webhook_cooldown` | 409 | The webhook was auto-disabled and cannot be re-enabled until the cooldown elapses. SDKs do not automatically retry it; retry manually only after the cooldown. |
 | `precondition_failed` | 412 | The resource changed since the supplied `If-Match` value was read. Fetch the latest representation and retry the edit deliberately. |
@@ -670,7 +671,8 @@ or on the deployment's shared domain (see `GET /v1/info`).
   review queue. Restore it via `POST /v1/agents/{email}/restore` within the trash
   retention window (30 days by default, deployment-configurable), after which
   it's purged permanently. Pass `?permanent=true` to skip the trash and delete
-  irreversibly right away (accepts live and trashed agents).
+  irreversibly right away (accepts live and trashed agents; `409 erase_held`
+  while the account's sending is paused).
 - `POST /v1/agents/{email}/restore` — bring a trashed agent back into service,
   messages and configuration intact. For drafts still held for review,
   `approval_expires_at` is shifted forward by the time the agent spent in trash

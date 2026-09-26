@@ -1286,7 +1286,7 @@ func (a *API) issueOAuthCodeWithNewAgent(ctx context.Context, w http.ResponseWri
 			})
 			return nil
 		}
-		if isUniqueViolation(err) {
+		if isUniqueViolation(err) || errors.Is(err, identity.ErrAgentAddressHeld) {
 			http.Error(w, "that slug is already taken; pick another", http.StatusConflict)
 			return nil
 		}

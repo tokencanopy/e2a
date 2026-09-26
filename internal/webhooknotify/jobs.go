@@ -158,7 +158,21 @@ func (j *Jobs) ResolveLegacyOperation(ctx context.Context, webhookID, kind strin
 // With a gate wired the notification's operation is prepared here, against
 // the locked webhook row, so the owning account is charged and the worker
 // never derives attribution.
+//
+// A webhook whose owning account is in the trash gets no notice (0, nil): the
+// account is inert, its deliveries are held, and a notice would be a send the
+// gate refuses anyway. The sweep's own state transition still commits.
 func (j *Jobs) EnqueueWebhookNotifyTx(ctx context.Context, tx pgx.Tx, webhookID, kind string) (int64, error) {
+	var ownerTrashed bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM webhooks w JOIN users u ON u.id = w.user_id
+		                WHERE w.id = $1 AND u.deleted_at IS NOT NULL)`, webhookID,
+	).Scan(&ownerTrashed); err != nil {
+		return 0, fmt.Errorf("read webhook owner state: %w", err)
+	}
+	if ownerTrashed {
+		return 0, nil
+	}
 	args := WebhookNotifyArgs{WebhookID: webhookID, NotifyKind: kind}
 	if j.gate != nil {
 		ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewWebhookHealthNotificationRef(webhookID, kind))

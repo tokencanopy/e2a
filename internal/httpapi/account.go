@@ -105,11 +105,11 @@ func (s *Server) registerAccount() {
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteAccount", Method: http.MethodDelete, Path: "/v1/account",
 		Summary: "Delete your account (trash by default; permanent=true erases now)", Tags: []string{"account"},
-		Description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.",
+		Description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.",
 		Security:    []map[string][]string{{"bearer": {}}},
 		Responses: map[string]*huma.Response{
 			"409": s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
-				"Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes."),
+				"Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes. Code erase_held: permanent=true while the account's sending is paused; delete without permanent to move it to the trash."),
 			"default": s.errorEnvelopeResponse(),
 		},
 	}, s.handleDeleteAccount)
@@ -308,6 +308,9 @@ func accountDeleteError(err error) error {
 	case errors.Is(err, identity.ErrSendInProgress):
 		return NewError(http.StatusConflict, "send_in_progress",
 			"an outbound provider call is still in progress; retry after it finishes")
+	case errors.Is(err, identity.ErrEraseHeld):
+		return NewError(http.StatusConflict, "erase_held",
+			"sending is paused for this account, so permanent erasure is held; delete without permanent=true to move the account to the trash")
 	case errors.Is(err, identity.ErrPurgeInProgress):
 		return NewError(http.StatusConflict, "purge_in_progress",
 			"permanent erasure of this account is already in progress")

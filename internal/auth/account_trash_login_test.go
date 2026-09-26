@@ -47,7 +47,10 @@ func TestGoogleCallbackOnATrashedAccountIssuesOnlyARestrictedSession(t *testing.
 	if loc := w.Header().Get("Location"); loc == "" || !endsWith(loc, auth.AccountRestorePath) {
 		t.Fatalf("Location = %q, want the restore interstitial", loc)
 	}
-	session := findCookie(w.Result().Cookies(), auth.SessionCookieName)
+	if findCookie(w.Result().Cookies(), auth.SessionCookieName) != nil {
+		t.Fatal("a trashed sign-in received the ordinary e2a_session cookie")
+	}
+	session := findCookie(w.Result().Cookies(), auth.RestoreSessionCookieName)
 	if session == nil || session.Value == "" {
 		t.Fatal("no restricted session cookie")
 	}
@@ -123,7 +126,10 @@ func TestOIDCCallbackOnATrashedAccountIssuesOnlyARestrictedSession(t *testing.T)
 	if w.Code != http.StatusFound || w.Header().Get("Location") != "http://app.example.com"+auth.AccountRestorePath {
 		t.Fatalf("callback = %d Location=%q", w.Code, w.Header().Get("Location"))
 	}
-	session := findCookie(w.Result().Cookies(), auth.SessionCookieName)
+	if findCookie(w.Result().Cookies(), auth.SessionCookieName) != nil {
+		t.Fatal("OIDC gave a trashed sign-in the ordinary e2a_session cookie")
+	}
+	session := findCookie(w.Result().Cookies(), auth.RestoreSessionCookieName)
 	if session == nil {
 		t.Fatal("no restricted session cookie")
 	}
@@ -131,4 +137,21 @@ func TestOIDCCallbackOnATrashedAccountIssuesOnlyARestrictedSession(t *testing.T)
 		t.Fatal("OIDC issued an ordinary session to a trashed account")
 	}
 	assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "account_trashed", trust: "trusted", statusClass: "3xx"})
+}
+
+func TestGoogleCallbackEmailCollisionWithATrashedAccountLandsOnThePage(t *testing.T) {
+	ua, store, _ := setupUserAuthWithFakeOAuth(t)
+	ctx := context.Background()
+	// A different subject already holds the fake IdP's email and is trashed.
+	holder, err := store.CreateOrGetUser(ctx, "cliuser@test.com", "Holder", "google-sub-original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TrashAccount(ctx, holder.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	w := googleCallback(t, ua, &auth.OAuthState{Nonce: "n-collide"})
+	if w.Code != http.StatusFound || !endsWith(w.Header().Get("Location"), auth.AccountUnavailablePath+"?code=account_trashed") {
+		t.Fatalf("callback = %d Location=%q, want the unavailable page (not a 500)", w.Code, w.Header().Get("Location"))
+	}
 }

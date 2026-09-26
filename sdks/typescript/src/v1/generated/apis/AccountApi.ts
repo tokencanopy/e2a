@@ -129,7 +129,7 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
-     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead. On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account\'s sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
      * Delete your account (trash by default; permanent=true erases now)
      * @param confirm Must be the literal DELETE. The default action moves the account to the trash; permanent&#x3D;true is irreversible.
      * @param permanent Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
@@ -631,7 +631,7 @@ export class AccountApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ErrorEnvelope", ""
             ) as ErrorEnvelope;
-            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes.", body, response.headers);
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Conflict — code send_in_progress: an outbound provider call has a fresh lease. Retry after it finishes. Code erase_held: permanent&#x3D;true while the account\&#39;s sending is paused; delete without permanent to move it to the trash.", body, response.headers);
         }
         if (isCodeInRange("0", response.httpStatusCode)) {
             const body: ErrorEnvelope = ObjectSerializer.deserialize(

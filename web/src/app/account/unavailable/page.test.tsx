@@ -33,7 +33,8 @@ describe("/account/unavailable", () => {
     ["registration_refused", /this sign-in can.t be used right now/i, /recently deleted or closed/i, false],
     ["purge_in_progress", /this account is being erased/i, /can.t be restored/i, false],
     ["temporarily_unavailable", /sign-in is temporarily unavailable/i, /try again in a few minutes/i, true],
-    ["account_trashed", /this account is in the trash/i, /sign in again to restore it/i, true],
+    ["account_trashed", /this account is in the trash/i, /originally used to restore it/i, true],
+    ["email_conflict", /already belongs to another account/i, /sign in the way you originally did/i, true],
   ])("explains code=%s", (code, title, body, offersSignIn) => {
     renderWithCode(`code=${code}`);
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(title);

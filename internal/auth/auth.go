@@ -38,8 +38,14 @@ func writeJSON(w http.ResponseWriter, payload any) {
 
 const (
 	SessionCookieName = "e2a_session"
-	StateCookieName   = "e2a_oauth_state"
-	SessionMaxAge     = 7 * 24 * time.Hour
+	// RestoreSessionCookieName carries the RESTRICTED session a sign-in gets
+	// when it resolves to a trashed account. It is a different cookie on
+	// purpose: nothing that reads e2a_session (the dashboard, the billing
+	// sidecar) can ever mistake it for a full session. Only the three
+	// /api/account/{deletion,restore,erase} routes read it.
+	RestoreSessionCookieName = "e2a_restore_session"
+	StateCookieName          = "e2a_oauth_state"
+	SessionMaxAge            = 7 * 24 * time.Hour
 )
 
 const defaultUserInfoURL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -602,6 +608,16 @@ func (ua *UserAuth) isSameOriginLogoutRequest(r *http.Request) bool {
 	if expected == "" {
 		expected = normalizeHTTPOrigin(ua.baseURL)
 	}
+	return IsSameOriginRequest(r, expected)
+}
+
+// IsSameOriginRequest reports whether a browser request provably comes from
+// expectedOrigin (scheme://host[:port]): Origin is preferred, Referer is the
+// fallback for browsers that omit Origin on form posts, and an absent or
+// unparsable provenance fails closed. Cookie-authenticated state-changing
+// dashboard routes use it as their CSRF check on top of SameSite=Lax.
+func IsSameOriginRequest(r *http.Request, expectedOrigin string) bool {
+	expected := normalizeHTTPOrigin(expectedOrigin)
 	if expected == "" {
 		return false
 	}
@@ -1189,6 +1205,8 @@ func accountUnavailableCode(err error) (string, bool) {
 		return "temporarily_unavailable", true
 	case errors.Is(err, identity.ErrAccountTrashed):
 		return "account_trashed", true
+	case errors.Is(err, identity.ErrEmailConflict):
+		return "email_conflict", true
 	}
 	return "", false
 }
@@ -1209,9 +1227,9 @@ func issueRestrictedSession(ctx context.Context, w http.ResponseWriter, r *http.
 		return false
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     SessionCookieName,
+		Name:     RestoreSessionCookieName,
 		Value:    token,
-		Path:     "/",
+		Path:     "/api/account/",
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,

@@ -393,6 +393,12 @@ type Deps struct {
 	RestrictedSession func(r *http.Request) (*identity.User, string, error)
 	// RestoreAccount restores the trashed account and upgrades the session.
 	RestoreAccount func(ctx context.Context, userID, sessionToken string) (*identity.User, error)
+	// ClearRestoreSessionCookie expires the restricted-session cookie.
+	ClearRestoreSessionCookie func(w http.ResponseWriter)
+	// SameOriginRequest is the CSRF check for the state-changing restore and
+	// erase routes (Origin/Referer must be the dashboard origin). Required:
+	// without it the routes are not registered.
+	SameOriginRequest func(r *http.Request) bool
 	// WriteSessionCookie sets the dashboard session cookie on the response:
 	// a restore re-issues the upgraded session with its full lifetime (the
 	// restricted cookie was short-lived), and an erase expires it (maxAge < 0).

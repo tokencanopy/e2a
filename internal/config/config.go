@@ -606,6 +606,15 @@ type LimitsConfig struct {
 	// — appropriate for self-host without billing. The same
 	// InternalAPISecret signs the POST body.
 	BillingHookURL string `yaml:"billing_hook_url"`
+	// BillingAccountStateURL receives account-trash transitions ({user_id,
+	// mode: "trash"|"restore"}), HMAC-signed like the hook. It is a
+	// DIFFERENT path on purpose: a billing service that predates account
+	// trash treats every call to billing_hook_url as "cancel and delete the
+	// customer", so trash/restore must never reach it; an old service answers
+	// 404 here, which is logged and ignored. Empty derives the sibling path
+	// "account-state" of billing_hook_url (…/billing/cancel →
+	// …/billing/account-state). Override with E2A_BILLING_ACCOUNT_STATE_URL.
+	BillingAccountStateURL string `yaml:"billing_account_state_url"`
 }
 
 // RateLimitsConfig tunes server-side request rate limits. A zero value
@@ -940,13 +949,25 @@ func Load(path string) (*Config, error) {
 			cfg.Trash.RetentionDays = d
 		}
 	}
+	if v := os.Getenv("E2A_BILLING_ACCOUNT_STATE_URL"); v != "" {
+		cfg.Limits.BillingAccountStateURL = v
+	}
+	// A malformed value must not silently fall back to the default: the
+	// difference between "trash for 30 days" and "erase immediately" is the
+	// whole point of the knob.
 	if v := os.Getenv("E2A_TRASH_ACCOUNT_RETENTION_DAYS"); v != "" {
-		if d, err := strconv.Atoi(v); err == nil {
-			cfg.Trash.AccountRetentionDays = &d
+		d, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("config: E2A_TRASH_ACCOUNT_RETENTION_DAYS must be a whole number of days, got %q", v)
 		}
+		cfg.Trash.AccountRetentionDays = &d
 	}
 	if v := os.Getenv("E2A_TRASH_IDENTITY_TOMBSTONES"); v != "" {
-		cfg.Trash.IdentityTombstones = v == "true" || v == "1"
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("config: E2A_TRASH_IDENTITY_TOMBSTONES must be true or false, got %q", v)
+		}
+		cfg.Trash.IdentityTombstones = b
 	}
 	if v := os.Getenv("E2A_DELIVERY_SES_CONFIGURATION_SET"); v != "" {
 		cfg.DeliveryFeedback.SESConfigurationSet = v

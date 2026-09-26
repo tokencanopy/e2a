@@ -53,6 +53,7 @@ func TestDeleteAccountMapsEraseFailures(t *testing.T) {
 		"tombstone key": {identity.ErrTombstoneKeyUnavailable, 503, "internal_error"},
 		"purge claimed": {identity.ErrPurgeInProgress, 409, "purge_in_progress"},
 		"send lease":    {identity.ErrSendInProgress, 409, "send_in_progress"},
+		"paused":        {identity.ErrEraseHeld, 409, "erase_held"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := testServer(t, func(d *Deps) {
@@ -91,7 +92,7 @@ func restoreServer(t *testing.T, restoreErr error, eraseErr error) (*http.Client
 	deleted := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
 	srv := testServer(t, func(d *Deps) {
 		d.RestrictedSession = func(r *http.Request) (*identity.User, string, error) {
-			c, err := r.Cookie("e2a_session")
+			c, err := r.Cookie("e2a_restore_session")
 			if err != nil {
 				return nil, "", err
 			}
@@ -118,6 +119,10 @@ func restoreServer(t *testing.T, restoreErr error, eraseErr error) (*http.Client
 			}
 			return &identity.DeleteUserDataResult{Mode: identity.AccountDeleteModePermanent, UserDeleted: true}, nil
 		}
+		d.SameOriginRequest = func(r *http.Request) bool { return r.Header.Get("Origin") == "https://app.example.test" }
+		d.ClearRestoreSessionCookie = func(w http.ResponseWriter) {
+			http.SetCookie(w, &http.Cookie{Name: "e2a_restore_session", Value: "", MaxAge: -1})
+		}
 		d.WriteSessionCookie = func(w http.ResponseWriter, token string, maxAge time.Duration) {
 			if maxAge <= 0 {
 				http.SetCookie(w, &http.Cookie{Name: "e2a_session", Value: "", MaxAge: -1})
@@ -133,8 +138,9 @@ func doCookie(t *testing.T, c *http.Client, method, url, cookie string) (int, ma
 	t.Helper()
 	req, _ := http.NewRequest(method, url, nil)
 	if cookie != "" {
-		req.AddCookie(&http.Cookie{Name: "e2a_session", Value: cookie})
+		req.AddCookie(&http.Cookie{Name: "e2a_restore_session", Value: cookie})
 	}
+	req.Header.Set("Origin", "https://app.example.test")
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -180,6 +186,43 @@ func TestAccountRestoreInterstitial(t *testing.T) {
 	if code, _, _ := doCookie(t, c, "GET", base+"/v1/account", "sess_restricted"); code != 401 {
 		t.Fatalf("restricted session reached /v1/account: %d", code)
 	}
+	// The restricted cookie is dropped once the ordinary one is issued.
+	dropped := false
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "e2a_restore_session" && ck.MaxAge < 0 {
+			dropped = true
+		}
+	}
+	if !dropped {
+		t.Fatal("restore did not clear the restricted-session cookie")
+	}
+}
+
+// TestAccountRestoreAndEraseRejectCrossSitePosts: SameSite=Lax still lets a
+// top-level cross-site POST carry the cookie, so the state-changing routes
+// enforce the Origin/Referer check.
+func TestAccountRestoreAndEraseRejectCrossSitePosts(t *testing.T) {
+	c, base, calls := restoreServer(t, nil, nil)
+	for _, path := range []string{"/api/account/restore", "/api/account/erase"} {
+		for _, origin := range []string{"https://evil.example.test", ""} {
+			req, _ := http.NewRequest("POST", base+path, nil)
+			req.AddCookie(&http.Cookie{Name: "e2a_restore_session", Value: "sess_restricted"})
+			if origin != "" {
+				req.Header.Set("Origin", origin)
+			}
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != 403 {
+				t.Fatalf("%s from origin %q = %d, want 403", path, origin, resp.StatusCode)
+			}
+		}
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("a cross-site POST reached the store: %v", *calls)
+	}
 }
 
 func TestAccountRestoreRefusals(t *testing.T) {
@@ -193,6 +236,7 @@ func TestAccountRestoreRefusals(t *testing.T) {
 		"not trashed":     {identity.ErrNotInTrash, 409, "not_in_trash"},
 		"gone":            {pgx.ErrNoRows, 401, "unauthorized"},
 		"store failure":   {errors.New("boom"), 500, "internal_error"},
+		"too soon":        {identity.ErrRestoreRateLimited, 429, "rate_limited"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c, base, _ := restoreServer(t, tc.err, nil)
@@ -215,7 +259,7 @@ func TestAccountEraseThroughRestrictedSession(t *testing.T) {
 	}
 	cleared := false
 	for _, ck := range resp.Cookies() {
-		if ck.Name == "e2a_session" && ck.MaxAge < 0 {
+		if ck.Name == "e2a_restore_session" && ck.MaxAge < 0 {
 			cleared = true
 		}
 	}

@@ -66,6 +66,9 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "not_in_trash", Status: "409", Family: "state"},
 	{Code: "purge_in_progress", Status: "409", Family: "state"},
 	{Code: "send_in_progress", Status: "409", Family: "state"},
+	// Permanent erasure (account or agent) is held while the account's
+	// sending is paused; the trash path stays available.
+	{Code: "erase_held", Status: "409", Family: "state"},
 	{Code: "webhook_disabled", Status: "409", Family: "state"},
 	{Code: "webhook_cooldown", Status: "409", Family: "state"},
 	{Code: "domain_not_registered", Status: "400", Family: "state"},

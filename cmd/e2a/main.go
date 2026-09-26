@@ -141,8 +141,9 @@ func main() {
 	flag.BoolVar(&acctFlags.inspectDeleted, "inspect-deleted-account", false, "print the retained abuse-evidence summary of a purged account (requires -deleted-account-id), then exit")
 	flag.StringVar(&acctFlags.deletedAccountID, "deleted-account-id", "", "purged account (user) id for the deleted-account / tombstone commands")
 	flag.BoolVar(&acctFlags.inspectTombstoneKeys, "inspect-tombstone-keys", false, "print the tombstone key versions and how many live tombstones depend on each, then exit")
-	flag.BoolVar(&acctFlags.extendTombstones, "extend-identity-tombstones", false, "extend every live tombstone of an account to at least -tombstone-hold-days from now (requires -deleted-account-id), then exit")
+	flag.BoolVar(&acctFlags.extendTombstones, "extend-identity-tombstones", false, "extend every live tombstone of an account to at least -tombstone-hold-days from now (requires -deleted-account-id, -reason; audited), then exit")
 	flag.BoolVar(&acctFlags.revokeTombstones, "revoke-identity-tombstones", false, "delete every tombstone of an account, reopening its identifiers (requires -deleted-account-id, -reason), then exit")
+	flag.BoolVar(&acctFlags.escalateAbuse, "escalate-deleted-account-to-abuse", false, "after purge: write abuse-class tombstones for every identifier digest in a purged account's summary and extend the summary to the abuse hold (requires -deleted-account-id, -reason), then exit")
 	flag.IntVar(&acctFlags.holdDays, "tombstone-hold-days", 0, "hold length in days for -extend-identity-tombstones")
 	flag.Parse()
 
@@ -180,7 +181,9 @@ func main() {
 	// Identity tombstones (hosted policy). The key is env-only; a malformed
 	// value is fatal, an absent one leaves tombstone operations failing
 	// closed (signup 503, purge skipped) while the flag is on.
-	tombstoneKeyring, err := identity.ParseTombstoneKeyring(os.Getenv("E2A_TOMBSTONE_KEY"))
+	// E2A_TOMBSTONE_KEY_ACTIVE (optional, v<N>) pins the active version so a
+	// rotation can deploy a new version known-but-inactive first.
+	tombstoneKeyring, err := identity.ParseTombstoneKeyringWithActive(os.Getenv("E2A_TOMBSTONE_KEY"), os.Getenv("E2A_TOMBSTONE_KEY_ACTIVE"))
 	if err != nil {
 		log.Fatalf("Invalid E2A_TOMBSTONE_KEY: %v", err)
 	}
@@ -876,6 +879,7 @@ func main() {
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
 	api.ConfigureProvisioning(cfg.Provisioning.Enabled, cfg.Provisioning.Secret)
 	api.SetBillingHookURL(cfg.Limits.BillingHookURL)
+	api.SetBillingAccountStateURL(cfg.Limits.BillingAccountStateURL)
 	api.SetSubscriberStore(subscriberStore)
 	// Account-delete cascade (decision 4 / Slice 4): when SES is configured,
 	// DELETE /account enqueues an SES teardown job for every owned domain in

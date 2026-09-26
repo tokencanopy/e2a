@@ -34,7 +34,7 @@ type AccountRestoreView struct {
 
 func (s *Server) registerAccountRestoreRoutes() {
 	d := s.deps
-	if d.RestrictedSession == nil || d.RestoreAccount == nil || d.DeleteUserData == nil {
+	if d.RestrictedSession == nil || d.RestoreAccount == nil || d.DeleteUserData == nil || d.SameOriginRequest == nil {
 		return
 	}
 	s.Router.Get("/api/account/deletion", s.handleAccountDeletionState)
@@ -75,7 +75,20 @@ func (s *Server) handleAccountDeletionState(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// requireSameOrigin is the CSRF check for the state-changing routes: SameSite
+// Lax alone still lets a top-level cross-site POST carry the cookie.
+func (s *Server) requireSameOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if !s.deps.SameOriginRequest(r) {
+		WriteError(w, r, http.StatusForbidden, "forbidden", "request origin is not allowed")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	u, token, ok := s.restrictedUser(w, r)
 	if !ok {
 		return
@@ -83,14 +96,21 @@ func (s *Server) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 	restored, err := s.deps.RestoreAccount(r.Context(), u.ID, token)
 	switch {
 	case err == nil:
-		// The restricted cookie was short-lived; the upgraded session now
-		// carries the ordinary lifetime, so re-issue the cookie to match.
+		// The restricted session is now an ordinary one: hand it over as the
+		// ordinary e2a_session cookie (full lifetime) and drop the restricted
+		// cookie.
 		if s.deps.WriteSessionCookie != nil {
 			s.deps.WriteSessionCookie(w, token, identity.SessionTTL)
+		}
+		if s.deps.ClearRestoreSessionCookie != nil {
+			s.deps.ClearRestoreSessionCookie(w)
 		}
 		writeAccountJSON(w, http.StatusOK, AccountRestoreView{Restored: true, RestoredAt: restored.RestoredAt})
 	case errors.Is(err, identity.ErrNotInTrash):
 		WriteError(w, r, http.StatusConflict, "not_in_trash", "the account is not in the trash")
+	case errors.Is(err, identity.ErrRestoreRateLimited):
+		w.Header().Set("Retry-After", "600")
+		WriteError(w, r, http.StatusTooManyRequests, "rate_limited", "this account was restored moments ago; try again in a few minutes")
 	case errors.Is(err, identity.ErrPurgeInProgress):
 		WriteError(w, r, http.StatusConflict, "purge_in_progress", "permanent erasure of this account has already begun and cannot be undone")
 	case errors.Is(err, identity.ErrRegistrationRefused):
@@ -105,6 +125,9 @@ func (s *Server) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAccountErase(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	u, _, ok := s.restrictedUser(w, r)
 	if !ok {
 		return
@@ -120,8 +143,8 @@ func (s *Server) handleAccountErase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.Deleted = true
-	if s.deps.WriteSessionCookie != nil {
-		s.deps.WriteSessionCookie(w, "", -1)
+	if s.deps.ClearRestoreSessionCookie != nil {
+		s.deps.ClearRestoreSessionCookie(w)
 	}
 	writeAccountJSON(w, http.StatusOK, res)
 }

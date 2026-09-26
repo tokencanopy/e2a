@@ -45,7 +45,13 @@ const UNAVAILABLE_COPY: Record<string, Copy> = {
   account_trashed: {
     title: "This account is in the trash",
     body:
-      "It was scheduled for deletion. Sign in again to restore it or erase it now, before the trash window ends.",
+      "It was scheduled for deletion. Sign in again with the login you originally used to restore it or erase it now, before the trash window ends.",
+    offerSignIn: true,
+  },
+  email_conflict: {
+    title: "This email already belongs to another account",
+    body:
+      "An existing account uses this email address with a different sign-in. Sign in the way you originally did.",
     offerSignIn: true,
   },
 };

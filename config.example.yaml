@@ -401,15 +401,21 @@ limits:
   # without a provisioner — the endpoint will 503. Generate with:
   # openssl rand -hex 32. Override with E2A_INTERNAL_API_SECRET.
   internal_api_secret: ""
-  # URL the OSS server POSTs (HMAC-signed) after an account deletion
-  # commits, so an external billing service can act on the subscription.
-  # Body: {"user_id": "...", "mode": "trash" | "restore" | "purge"} — trash
-  # asks for cancel-at-period-end, restore reverts it, purge cancels (a
-  # receiver that ignores mode treats every call as purge). Empty disables
-  # the call (self-host without billing). Example for a
-  # docker compose deployment alongside the hosted billing sidecar:
+  # URL the OSS server POSTs (HMAC-signed) when an account is PURGED, with
+  # body {"user_id": "..."}, so an external billing service can cancel the
+  # subscription. Empty disables billing notifications (self-host without
+  # billing). Example for a docker compose deployment alongside the hosted
+  # billing sidecar:
   # billing_hook_url: "http://billing:9000/api/internal/billing/cancel"
   billing_hook_url: ""
+  # Account-trash transitions go to a DIFFERENT endpoint, never the cancel
+  # hook: {"user_id": "...", "mode": "trash" | "restore"} (trash = cancel at
+  # period end, restore = revert). A billing service that predates account
+  # trash answers 404 there, which is logged and ignored. Empty derives the
+  # sibling path "account-state" of billing_hook_url
+  # (…/billing/cancel → …/billing/account-state).
+  # Override with E2A_BILLING_ACCOUNT_STATE_URL.
+  # billing_account_state_url: ""
 
 # Per-user budget shared by authenticated message, conversation, and webhook
 # reads across every agent client and dashboard session on the account. The
@@ -440,8 +446,14 @@ rate_limits:
 # re-register, and keeps a compact deleted-account summary for the same
 # period. Requires the E2A_TOMBSTONE_KEY secret (env only):
 #   E2A_TOMBSTONE_KEY=v1:<base64 of >=32 random bytes>
-# Rotation: prepend a higher version (v2:...,v1:...); keep the old version
-# until -inspect-tombstone-keys shows no live tombstone still uses it.
+# Rotation is two-phase: add the new version while pinning the old one
+# active (E2A_TOMBSTONE_KEY=v2:...,v1:... with E2A_TOMBSTONE_KEY_ACTIVE=v1)
+# everywhere, then promote it (E2A_TOMBSTONE_KEY_ACTIVE=v2, or unset =
+# highest). A keyed digest cannot be re-keyed: keep EVERY version configured
+# for at least 2 years (the abuse hold) — dropping a version that live
+# tombstones still use makes every signup fail closed (503) until restored.
+# -inspect-tombstone-keys shows the active version, the known versions and
+# how many live tombstones depend on each.
 # E2A_TRASH_IDENTITY_TOMBSTONES=true overrides the flag.
 trash:
   retention_days: 30

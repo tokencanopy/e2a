@@ -1,6 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { ApiClient } from "../harness/client.ts";
+import { isProductionTarget } from "../harness/env.ts";
 import { info, writeReport } from "../harness/report.ts";
 
 // Black-box conformance for the /v1/account surface (account ops in the
@@ -292,6 +293,11 @@ test("unauth: every account op rejects an unauthenticated caller with 401", asyn
 // account_delete_trash_receipt, where the database is disposable.)
 // ---------------------------------------------------------------------------
 const disposableKey = process.env.E2A_DISPOSABLE_API_KEY?.trim() ?? "";
+const disposableSkip = disposableKey
+  ? false
+  : "E2A_DISPOSABLE_API_KEY is not set — deleteAccount runs only against a throwaway account the release pipeline mints per run " +
+    "(-bootstrap-email with an @example.test address); the coverage gate allowlists deleteAccount while the key is absent";
+if (disposableSkip) console.log(`[${SUITE}] skipping deleteAccount: ${disposableSkip}`);
 
 interface DeleteAccountReceipt {
   deleted: boolean;
@@ -301,16 +307,28 @@ interface DeleteAccountReceipt {
   agents_deleted: number;
 }
 
-test("deleteAccount: DELETE /v1/account?permanent=true erases a disposable account and revokes its key", async () => {
-  assert.ok(
-    disposableKey,
-    "E2A_DISPOSABLE_API_KEY is not set — the release pipeline must mint a throwaway account per run " +
-      "(-bootstrap-email in the staging container) so deleteAccount can be exercised without touching the conformance account",
-  );
+interface DomainsPage {
+  items: unknown[];
+}
+
+test("deleteAccount: DELETE /v1/account?permanent=true erases a disposable account and revokes its key", { skip: disposableSkip }, async () => {
   const env = client.env;
+  // Defence in depth before a destructive call: the key must not be the
+  // conformance key, must resolve to a DIFFERENT account whose email is the
+  // synthetic @example.test pattern the pipeline mints, own no domains, and a
+  // production target needs its own explicit opt-in.
   assert.notEqual(disposableKey, env.apiKey, "E2A_DISPOSABLE_API_KEY must not be the conformance key");
+  if (isProductionTarget(env.apiUrl)) {
+    assert.equal(
+      process.env.E2E_ALLOW_DISPOSABLE_DELETE_PROD,
+      "1",
+      "refusing to erase an account on a production origin without E2E_ALLOW_DISPOSABLE_DELETE_PROD=1",
+    );
+  }
   const disposable = await client.request<AccountView>("GET", "/v1/account", { apiKey: disposableKey });
   assert.equal(disposable.status, 200, `disposable whoami expected 200, got ${disposable.status}: ${disposable.raw.slice(0, 200)}`);
+  assert.equal(disposable.body!.scope, "account", "the disposable key must be account-scoped");
+  assert.match(disposable.body!.user.email, /@example\.test$/i, "refusing to delete: the disposable account's email is not a synthetic @example.test address");
   const conformance = await client.get<AccountView>("/v1/account");
   assert.equal(conformance.status, 200);
   assert.notEqual(
@@ -318,6 +336,9 @@ test("deleteAccount: DELETE /v1/account?permanent=true erases a disposable accou
     conformance.body!.user.id,
     "refusing to delete: E2A_DISPOSABLE_API_KEY resolves to the conformance account",
   );
+  const domains = await client.request<DomainsPage>("GET", "/v1/domains", { apiKey: disposableKey });
+  assert.equal(domains.status, 200);
+  assert.equal(domains.body!.items.length, 0, "refusing to delete: the disposable account owns domains");
 
   const r = await client.request<DeleteAccountReceipt>("DELETE", "/v1/account", {
     apiKey: disposableKey,
