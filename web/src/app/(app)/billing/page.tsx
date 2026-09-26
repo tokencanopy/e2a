@@ -45,7 +45,17 @@ type PlanEntry = {
   max_storage_bytes: number;
 };
 
+type BillingChange = {
+  status: "payment_required" | "scheduled";
+  url?: string;
+  effective_at?: string;
+  expires_at?: string;
+  plan_code?: string;
+  addon_quantity?: number;
+};
+
 type CurrentState = {
+  change?: BillingChange;
   code: string;
   status: string;
   current_period_end?: string;
@@ -314,6 +324,10 @@ export default function BillingPage() {
   // while the others disable. Tier CTAs are keyed `tier-<code>`; the
   // banner's Manage-billing button is "manage".
   const [actionPending, setActionPending] = useState<string | null>(null);
+  const [submittedChange, setSubmittedChange] = useState<BillingChange | null>(null);
+  const planTargetRef = useRef<string | null>(null);
+  const upcomingChange = planData?.current.change ?? submittedChange;
+  useEffect(() => { setSubmittedChange(null); }, [planData]);
 
   // Both Upgrade and Manage Billing POST to the sidecar and follow the
   // returned `url`. POST (not GET) because the OSS session cookie is
@@ -338,11 +352,23 @@ export default function BillingPage() {
         const text = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
       }
-      const json = (await res.json()) as { url?: string };
-      if (!json.url) {
-        throw new Error("billing endpoint returned no url");
+      const json = (await res.json()) as { url?: string; updated?: boolean; status?: string } & Omit<Partial<BillingChange>, "status">;
+      if (json.url) {
+        window.location.href = json.url;
+        return;
       }
-      window.location.href = json.url;
+      if (json.status === "scheduled") {
+        setSubmittedChange(json as BillingChange);
+      } else if (json.status === "applied" || json.updated) {
+        setSubmittedChange(null);
+        planTargetRef.current = (body as { plan?: string } | undefined)?.plan ?? null;
+        if (planTargetRef.current) setReconcile("pending");
+      } else {
+        throw new Error("billing endpoint returned no change outcome");
+      }
+      setActionPending(null);
+      void mutate();
+      void mutatePlan();
     } catch (err) {
       // Best-effort recovery: surface the error to the user, clear
       // the pending state, and let them retry. We don't reset SWR
@@ -438,7 +464,7 @@ export default function BillingPage() {
 
   // Webhook landed — stop polling and let the page render normally.
   useEffect(() => {
-    if (reconcile === "pending" && planData?.current.status === "active") {
+    if (reconcile === "pending" && planData?.current.status === "active" && (!planTargetRef.current || planData.current.code === planTargetRef.current)) {
       setReconcile("idle");
     }
   }, [reconcile, planData]);
@@ -545,13 +571,20 @@ export default function BillingPage() {
         const text = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}${text ? `: ${text}` : ""}`);
       }
-      const json = (await res.json()) as { url?: string; updated?: boolean };
+      const json = (await res.json()) as { url?: string; updated?: boolean; status?: string } & Omit<Partial<BillingChange>, "status">;
       if (json.url) {
         // Keep the pending state through navigation, like postBilling.
         window.location.href = json.url;
         return;
       }
-      if (json.updated) {
+      if (json.status === "scheduled") {
+        setSubmittedChange(json as BillingChange);
+        setAddonDesired(null);
+        setActionPending(null);
+        void mutatePlan();
+        return;
+      }
+      if (json.updated || json.status === "applied") {
         addonTargetRef.current = target;
         // Stamp a FRESH deadline here rather than relying on the sync
         // effect's `??=`: a second update issued while the first is
@@ -604,16 +637,26 @@ export default function BillingPage() {
       return null;
     }
     if (hasSub) {
-      // Existing subscribers change or cancel their plan through the
-      // Stripe Billing Portal (it owns proration). Both "switch up/down"
-      // and "downgrade to Free" route there.
+      // Paid plan changes use Stripe pending updates/schedules through the
+      // sidecar. Cancellation to Free remains in the billing portal.
       const label =
         tier.monthly_price_cents <= 0 ? "Downgrade" : `Switch to ${tier.display_name}`;
       const key = `tier-${tier.code}`;
       return {
         label: actionPending === key ? "Opening…" : label,
-        onClick: () => postBilling(data!.upgrade_url, key),
-        disabled: actionPending !== null,
+        onClick: () => {
+          if (tier.monthly_price_cents <= 0) {
+            void postBilling(data!.upgrade_url, key);
+            return;
+          }
+          const current = planData?.catalog.find((p) => p.code === currentCode);
+          const increase = tier.monthly_price_cents > (current?.monthly_price_cents ?? 0);
+          const message = increase
+            ? `Switch to ${tier.display_name} (${formatPrice(tier.monthly_price_cents)})? The prorated difference is charged now. Your plan changes after payment succeeds.`
+            : `Switch to ${tier.display_name} at your next renewal? Your current plan remains available until then.`;
+          if (window.confirm(message)) void postBilling(`${BILLING_API}/api/billing/checkout`, key, { plan: tier.code });
+        },
+        disabled: actionPending !== null || !!upcomingChange,
       };
     }
     // No subscription yet. The Free tier is already their plan (handled
@@ -626,7 +669,7 @@ export default function BillingPage() {
       label: actionPending === key ? "Opening…" : `Upgrade to ${tier.display_name}`,
       onClick: () =>
         postBilling(`${BILLING_API}/api/billing/checkout`, key, { plan: tier.code }),
-      disabled: actionPending !== null,
+      disabled: actionPending !== null || !!upcomingChange,
     };
   }
 
@@ -684,6 +727,21 @@ export default function BillingPage() {
         >
           Couldn&apos;t load your limits. {String(error.message ?? error)}
         </div>
+      )}
+
+      {upcomingChange && (
+        <section role="status" className="rounded-xl border p-4 space-y-3">
+          <p>
+            {upcomingChange.status === "payment_required"
+              ? "Payment is required to complete your upgrade. Your current plan and limits remain active."
+              : `Your subscription change is scheduled for ${upcomingChange.effective_at ? new Date(upcomingChange.effective_at).toLocaleDateString() : "your next renewal"}. Your current plan and limits remain active until then.`}
+          </p>
+          {upcomingChange.plan_code && <p className="text-sm text-muted">Requested plan: {planData?.catalog.find((p) => p.code === upcomingChange.plan_code)?.display_name ?? upcomingChange.plan_code}{typeof upcomingChange.addon_quantity === "number" ? ` · ${upcomingChange.addon_quantity} inbox add-ons` : ""}</p>}
+          {upcomingChange.status === "payment_required" && upcomingChange.url && <a className="underline" href={upcomingChange.url}>Complete payment</a>}
+          <button type="button" disabled={actionPending !== null} onClick={() => void postBilling(`${BILLING_API}/api/billing/change/cancel`, "cancel-change")} className="text-sm underline">
+            {actionPending === "cancel-change" ? "Cancelling…" : "Cancel pending change"}
+          </button>
+        </section>
       )}
 
       {/* Post-checkout reconciliation. Rendered outside the `data` gate so
@@ -762,7 +820,7 @@ export default function BillingPage() {
                 // upgrade_url present → user has an active Stripe
                 // subscription. Clicking POSTs to the sidecar, which
                 // returns a fresh Stripe Billing Portal URL. From the
-                // Portal, users switch plans (Pro ↔ Scale) and cancel.
+                // Portal, users manage cards, invoices and cancellation.
                 <div className="flex items-center gap-2 flex-wrap justify-end">
                   <button
                     type="button"
@@ -965,7 +1023,7 @@ export default function BillingPage() {
                   <button
                     type="button"
                     aria-label="Decrease add-on quantity"
-                    disabled={actionPending !== null || addonQty <= 0}
+                    disabled={!!upcomingChange || actionPending !== null || addonQty <= 0}
                     onClick={() => stageAddonQty(Math.max(0, addonQty - 1))}
                     className="px-3 py-1.5 text-sm hover:bg-background transition disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -979,7 +1037,7 @@ export default function BillingPage() {
                     min={0}
                     max={planData.addon.max_quantity}
                     value={addonQty}
-                    disabled={actionPending !== null}
+                    disabled={!!upcomingChange || actionPending !== null}
                     onChange={(e) => {
                       const n = Number.parseInt(e.target.value, 10);
                       // A cleared field mid-retype must NOT stage 0 —
@@ -997,7 +1055,7 @@ export default function BillingPage() {
                     type="button"
                     aria-label="Increase add-on quantity"
                     disabled={
-                      actionPending !== null ||
+                      !!upcomingChange || actionPending !== null ||
                       addonQty >= planData.addon.max_quantity
                     }
                     onClick={() =>
@@ -1018,7 +1076,7 @@ export default function BillingPage() {
                 <button
                   type="button"
                   disabled={
-                    actionPending !== null ||
+                    !!upcomingChange || actionPending !== null ||
                     addonSync === "pending" ||
                     addonQty === addonServerQty
                   }
@@ -1049,7 +1107,7 @@ export default function BillingPage() {
                     and the delta says what this click actually changes. */}
                 {addonQty !== addonServerQty && (
                   <span className="text-xs text-foreground font-medium">
-                    New monthly total:{" "}
+                    {addonQty < addonServerQty ? "At next renewal: " : "New monthly total: "}
                     {addonQty === 0
                       ? "$0/mo"
                       : formatPrice(

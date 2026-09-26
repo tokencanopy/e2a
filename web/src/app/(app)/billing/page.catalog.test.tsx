@@ -106,6 +106,7 @@ beforeEach(() => {
 // unexpected error path doesn't surface a jsdom dialog.
 beforeAll(() => {
   window.alert = jest.fn();
+  window.confirm = jest.fn(() => true);
 });
 
 type StageOpts = {
@@ -215,14 +216,14 @@ describe("BillingPage — tier comparison", () => {
     expect(screen.getByRole("button", { name: "Downgrade" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Switch to Pro|Upgrade/ })).not.toBeInTheDocument();
 
-    // A switch routes to the Stripe portal (upgrade_url), not checkout.
+    // Existing plan changes use the controlled subscription-change endpoint.
     await userEvent.click(switchBtn);
     await waitFor(() =>
       expect(
-        mockFetch.mock.calls.some(([u, i]) => u === PORTAL_URL && i?.method === "POST"),
+        mockFetch.mock.calls.some(([u, i]) => u === CHECKOUT_URL && i?.method === "POST"),
       ).toBe(true),
     );
-    expect(mockFetch.mock.calls.some(([u]) => u === CHECKOUT_URL)).toBe(false);
+    expect(mockFetch.mock.calls.some(([u]) => u === PORTAL_URL)).toBe(false);
   });
 
   it("offers no plan-change actions when the current plan can't be determined", async () => {
@@ -252,5 +253,30 @@ describe("BillingPage — tier comparison", () => {
     // The Plans section shows a retry notice rather than tier cards.
     expect(screen.getByText(/Couldn't load plans/i)).toBeInTheDocument();
     expect(screen.queryByText("Scale")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("Stripe-owned pending changes", () => {
+  it("keeps the effective plan and billing management available while payment is pending", async () => {
+    stage({ limits: PRO_LIMITS, plan: { catalog: CATALOG, current: {
+      code: "pro", status: "active", has_stripe_customer: true,
+      change: { status: "payment_required", plan_code: "scale", addon_quantity: 0, url: "https://invoice.stripe.com/i/synthetic" },
+    } } });
+    renderPage();
+    expect(await screen.findByRole("link", {name: "Complete payment"})).toHaveAttribute("href", "https://invoice.stripe.com/i/synthetic");
+    expect(screen.getByRole("button", {name: "Manage billing"})).toBeEnabled();
+    expect(screen.getByRole("button", {name: "Switch to Scale"})).toBeDisabled();
+    expect(screen.getAllByText("Pro").length).toBeGreaterThan(0);
+  });
+  it("shows a renewal change separately from current capacity and offers cancellation", async () => {
+    stage({ limits: PRO_LIMITS, plan: { catalog: CATALOG, current: {
+      code: "pro", status: "active", has_stripe_customer: true,
+      change: { status: "scheduled", plan_code: "free", addon_quantity: 0, effective_at: "2030-01-01T00:00:00Z" },
+    } } });
+    renderPage();
+    expect(await screen.findByText(/Your subscription change is scheduled/)).toHaveTextContent("Your current plan and limits remain active");
+    expect(screen.getByRole("button", {name: "Cancel pending change"})).toBeEnabled();
+    expect(screen.queryByRole("link", {name: "Complete payment"})).not.toBeInTheDocument();
   });
 });
