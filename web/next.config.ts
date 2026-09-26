@@ -15,6 +15,16 @@ const withMDX = createMDX({});
 
 const nextConfig: NextConfig = {
   output: isDev ? undefined : "export",
+  // Serve the static export's own assets (/_next/*) from a prefix instead of
+  // the site root. Unset everywhere by default, so the published image, the
+  // dev server and self-hosted builds are byte-identical to before.
+  //
+  // The hosted deployment sets it when it builds the marketing pages
+  // separately from the dashboard: the two builds then have different release
+  // cadences but would otherwise both claim /_next/*, and only one of them can
+  // own that path. A self-hoster serving assets from a CDN subpath can use it
+  // the same way.
+  assetPrefix: process.env.NEXT_ASSET_PREFIX || undefined,
   turbopack: { root: repoRoot },
   pageExtensions: ["ts", "tsx", "md", "mdx"],
   ...(isDev && {
