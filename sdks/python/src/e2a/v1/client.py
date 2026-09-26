@@ -1457,25 +1457,15 @@ class AccountResource:
         30 days). Filing a request never grants access by itself.
         Account-scoped credentials only.
 
-        The server answers a first filing with 201 and a resubmit-while-pending
-        with 200 (``internal/httpapi/sending_access.go``), but
-        ``api/openapi.yaml`` documents only the 201 response for this
-        operation, so the generated base has no case for 200 and returns no
-        body on that path even though the HTTP call succeeded (the identical
-        dual-status shape on ``upsertEngagement`` avoids this with an explicit
-        ``Responses["200"]`` entry — this operation is missing that). Recover
-        with a follow-up read rather than ever handing the caller a bare
-        ``None``; drop this fallback once the spec/generated layers add the
-        200 response.
+        A first filing answers 201 and a resubmit-while-pending answers 200
+        with the existing request; both are declared in the spec and decode
+        to the same view.
         """
         req = SendingAccessRequestInput(
             use_case=use_case,
             recipients=recipients,
             expected_daily_volume=expected_daily_volume,
         )
-        result = await self._c._write_unsafe(
+        return await self._c._write_unsafe(
             lambda h: self._api.create_sending_access_request(req, _headers=h)
         )
-        if result is None:
-            return await self.get_sending_access_request()
-        return result

@@ -1955,23 +1955,20 @@ async def test_request_sending_access_posts_body_and_returns_the_created_view(ht
 
 
 @pytest.mark.anyio
-async def test_request_sending_access_recovers_the_view_on_the_resubmit_200_gap(httpx_mock):
-    # The server answers a resubmit-while-pending with 200, but
-    # api/openapi.yaml only declares 201 for createSendingAccessRequest, so the
-    # generated base has no case for 200 and hands back no body (verified
-    # against the live generated client). The ergonomic method must recover
-    # the view with a follow-up GET rather than returning a bare None — this
-    # pins that recovery, not the underlying spec gap.
-    httpx_mock.add_response(status_code=200, json={"discarded": "the generated base can't type this"})
+async def test_request_sending_access_resubmit_200_returns_the_pending_request(httpx_mock):
+    # A resubmit while a request is pending answers 200 with the EXISTING
+    # request (the spec declares both 200 and 201). It must decode straight
+    # to the view in one call — no follow-up read.
     httpx_mock.add_response(
+        status_code=200,
         json={
             "id": "sar_3",
             "state": "pending",
-            "use_case": "a different reason",
-            "recipients": "someone else",
-            "expected_daily_volume": 99,
+            "use_case": "the original reason",
+            "recipients": "our customers",
+            "expected_daily_volume": 10,
             "created_at": "2026-07-01T00:00:00Z",
-        }
+        },
     )
     async with _client() as c:
         req = await c.account.request_sending_access(
@@ -1979,10 +1976,10 @@ async def test_request_sending_access_recovers_the_view_on_the_resubmit_200_gap(
         )
     assert req.id == "sar_3"
     assert req.state == "pending"
+    assert req.use_case == "the original reason"
     requests = httpx_mock.get_requests()
-    assert len(requests) == 2
+    assert len(requests) == 1
     assert requests[0].method == "POST"
-    assert requests[1].method == "GET"
 
 
 @pytest.mark.anyio
