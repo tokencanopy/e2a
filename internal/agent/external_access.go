@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/mail"
 	"os"
 	"strings"
 
@@ -42,9 +43,11 @@ func (a *API) preflightExternalAccess(ctx context.Context, userID, agentID strin
 		return nil
 	}
 	recipients := make([]string, 0, len(req.To)+len(req.CC)+len(req.BCC))
-	recipients = append(recipients, req.To...)
-	recipients = append(recipients, req.CC...)
-	recipients = append(recipients, req.BCC...)
+	for _, list := range [][]string{req.To, req.CC, req.BCC} {
+		for _, r := range list {
+			recipients = append(recipients, bareRecipient(r))
+		}
+	}
 	verdict, err := a.externalAccess.ExternalAccessPreflight(ctx, userID, agentID, recipients)
 	if err != nil {
 		// Fail closed: an unreadable decision is neither an allow nor a claim
@@ -56,6 +59,18 @@ func (a *API) preflightExternalAccess(ctx context.Context, userID, agentID strin
 		return a.externalSendingNotEnabledError(ctx, userID)
 	}
 	return nil
+}
+
+// bareRecipient reduces a request recipient to its addr-spec. The send API
+// accepts display-name forms ("Name <a@b>"); the composer persists only the
+// bare address, and the gate judges exactly that, so the preflight must too.
+// An unparseable value is passed through unchanged and fails closed in the
+// gate's own validation.
+func bareRecipient(raw string) string {
+	if addr, err := mail.ParseAddress(raw); err == nil {
+		return addr.Address
+	}
+	return strings.TrimSpace(raw)
 }
 
 // externalSendingNotEnabledError builds the structured 403. The message names

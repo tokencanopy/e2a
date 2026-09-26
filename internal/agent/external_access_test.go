@@ -66,9 +66,10 @@ func TestDeliverOutboundExternalAccessPreflight(t *testing.T) {
 		t.Fatalf("with proof the allowed destinations = %v", allowed)
 	}
 
-	// The verified owner mailbox alone is accepted and queued.
+	// The verified owner mailbox alone is accepted and queued — including in
+	// display-name form, which the composer reduces to the bare address.
 	res, oerr := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{
-		To: []string{user.Email}, Subject: "hi", Body: "body",
+		To: []string{"Owner <" + user.Email + ">"}, Subject: "hi", Body: "body",
 	}, "send", "", nil, nil)
 	if oerr != nil || res.MessageID == "" {
 		t.Fatalf("owner send = %+v %+v", res, oerr)
