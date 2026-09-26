@@ -329,6 +329,26 @@ export default function BillingPage() {
   const upcomingChange = planData?.current.change ?? submittedChange;
   useEffect(() => { setSubmittedChange(null); }, [planData]);
 
+  // Keep unfinished payments out of the normal page presentation. The same
+  // action resumes Stripe's existing invoice; a different action explains the
+  // conflict and lets the customer discard it before making a new request.
+  async function prepareChange(plan: string, quantity: number): Promise<boolean> {
+    if (upcomingChange?.status !== "payment_required" ||
+        (upcomingChange.plan_code === plan && upcomingChange.addon_quantity === quantity)) return true;
+    if (!window.confirm("You have an unfinished subscription change. Cancel it and continue with this change? Your current plan stays active.")) return false;
+    setActionPending("cancel-change");
+    try {
+      const response = await fetch(`${BILLING_API}/api/billing/change/cancel`, { method: "POST", credentials: "include" });
+      if (!response.ok) throw new Error("Could not cancel the unfinished change. Please retry.");
+      setSubmittedChange(null);
+      await mutatePlan();
+      return true;
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Could not cancel the unfinished change.");
+      return false;
+    } finally { setActionPending(null); }
+  }
+
   // Both Upgrade and Manage Billing POST to the sidecar and follow the
   // returned `url`. POST (not GET) because the OSS session cookie is
   // SameSite=Lax — Lax permits top-level GET navigations from third
@@ -541,6 +561,7 @@ export default function BillingPage() {
   async function applyAddon(target: number) {
     const addon = planData?.addon;
     if (!addon) return;
+    if (!(await prepareChange(planData?.current.code ?? "free", target))) return;
     // In-place increases charge the subscription immediately (prorated
     // by Stripe) with no hosted page in between — the one money action
     // on this page without a Stripe-owned review step. Make the total
@@ -644,7 +665,8 @@ export default function BillingPage() {
       const key = `tier-${tier.code}`;
       return {
         label: actionPending === key ? "Opening…" : label,
-        onClick: () => {
+        onClick: async () => {
+          if (!(await prepareChange(tier.code, planData?.current.addon_quantity ?? 0))) return;
           if (tier.monthly_price_cents <= 0) {
             void postBilling(data!.upgrade_url, key);
             return;
@@ -656,7 +678,7 @@ export default function BillingPage() {
             : `Switch to ${tier.display_name} at your next renewal? Your current plan remains available until then.`;
           if (window.confirm(message)) void postBilling(`${BILLING_API}/api/billing/checkout`, key, { plan: tier.code });
         },
-        disabled: actionPending !== null || !!upcomingChange,
+        disabled: actionPending !== null || (upcomingChange?.status === "scheduled"),
       };
     }
     // No subscription yet. The Free tier is already their plan (handled
@@ -669,7 +691,7 @@ export default function BillingPage() {
       label: actionPending === key ? "Opening…" : `Upgrade to ${tier.display_name}`,
       onClick: () =>
         postBilling(`${BILLING_API}/api/billing/checkout`, key, { plan: tier.code }),
-      disabled: actionPending !== null || !!upcomingChange,
+      disabled: actionPending !== null || (upcomingChange?.status === "scheduled"),
     };
   }
 
@@ -729,15 +751,12 @@ export default function BillingPage() {
         </div>
       )}
 
-      {upcomingChange && (
+      {upcomingChange?.status === "scheduled" && (
         <section role="status" className="rounded-xl border p-4 space-y-3">
           <p>
-            {upcomingChange.status === "payment_required"
-              ? "Payment is required to complete your upgrade. Your current plan and limits remain active."
-              : `Your subscription change is scheduled for ${upcomingChange.effective_at ? new Date(upcomingChange.effective_at).toLocaleDateString() : "your next renewal"}. Your current plan and limits remain active until then.`}
+            {`Your subscription change is scheduled for ${upcomingChange.effective_at ? new Date(upcomingChange.effective_at).toLocaleDateString() : "your next renewal"}. Your current plan and limits remain active until then.`}
           </p>
           {upcomingChange.plan_code && <p className="text-sm text-muted">Requested plan: {planData?.catalog.find((p) => p.code === upcomingChange.plan_code)?.display_name ?? upcomingChange.plan_code}{typeof upcomingChange.addon_quantity === "number" ? ` · ${upcomingChange.addon_quantity} inbox add-ons` : ""}</p>}
-          {upcomingChange.status === "payment_required" && upcomingChange.url && <a className="underline" href={upcomingChange.url}>Complete payment</a>}
           <button type="button" disabled={actionPending !== null} onClick={() => void postBilling(`${BILLING_API}/api/billing/change/cancel`, "cancel-change")} className="text-sm underline">
             {actionPending === "cancel-change" ? "Cancelling…" : "Cancel pending change"}
           </button>
@@ -1023,7 +1042,7 @@ export default function BillingPage() {
                   <button
                     type="button"
                     aria-label="Decrease add-on quantity"
-                    disabled={!!upcomingChange || actionPending !== null || addonQty <= 0}
+                    disabled={(upcomingChange?.status === "scheduled") || actionPending !== null || addonQty <= 0}
                     onClick={() => stageAddonQty(Math.max(0, addonQty - 1))}
                     className="px-3 py-1.5 text-sm hover:bg-background transition disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -1037,7 +1056,7 @@ export default function BillingPage() {
                     min={0}
                     max={planData.addon.max_quantity}
                     value={addonQty}
-                    disabled={!!upcomingChange || actionPending !== null}
+                    disabled={(upcomingChange?.status === "scheduled") || actionPending !== null}
                     onChange={(e) => {
                       const n = Number.parseInt(e.target.value, 10);
                       // A cleared field mid-retype must NOT stage 0 —
@@ -1055,7 +1074,7 @@ export default function BillingPage() {
                     type="button"
                     aria-label="Increase add-on quantity"
                     disabled={
-                      !!upcomingChange || actionPending !== null ||
+                      (upcomingChange?.status === "scheduled") || actionPending !== null ||
                       addonQty >= planData.addon.max_quantity
                     }
                     onClick={() =>
@@ -1076,7 +1095,7 @@ export default function BillingPage() {
                 <button
                   type="button"
                   disabled={
-                    !!upcomingChange || actionPending !== null ||
+                    (upcomingChange?.status === "scheduled") || actionPending !== null ||
                     addonSync === "pending" ||
                     addonQty === addonServerQty
                   }

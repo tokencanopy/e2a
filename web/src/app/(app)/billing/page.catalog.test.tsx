@@ -264,10 +264,26 @@ describe("Stripe-owned pending changes", () => {
       change: { status: "payment_required", plan_code: "scale", addon_quantity: 0, url: "https://invoice.stripe.com/i/synthetic" },
     } } });
     renderPage();
-    expect(await screen.findByRole("link", {name: "Complete payment"})).toHaveAttribute("href", "https://invoice.stripe.com/i/synthetic");
+    await screen.findByRole("button", {name: "Manage billing"});
+    expect(screen.queryByText(/Payment is required to complete/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", {name: "Complete payment"})).not.toBeInTheDocument();
     expect(screen.getByRole("button", {name: "Manage billing"})).toBeEnabled();
-    expect(screen.getByRole("button", {name: "Switch to Scale"})).toBeDisabled();
+    expect(screen.getByRole("button", {name: "Switch to Scale"})).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", {name: "Switch to Scale"}));
+    expect(mockFetch.mock.calls.some(([url, init]) => url === CHECKOUT_URL && JSON.parse(init.body).plan === "scale")).toBe(true);
     expect(screen.getAllByText("Pro").length).toBeGreaterThan(0);
+  });
+  it("explains a conflicting change only when selected and leaves it untouched if declined", async () => {
+    stage({ limits: PRO_LIMITS, plan: { catalog: CATALOG, current: {
+      code: "pro", status: "active", has_stripe_customer: true,
+      change: { status: "payment_required", plan_code: "scale", addon_quantity: 0 },
+    } } });
+    const confirm = jest.spyOn(window, "confirm").mockReturnValueOnce(false);
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", {name: "Downgrade"}));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("unfinished subscription change"));
+    expect(mockFetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    confirm.mockReturnValue(true);
   });
   it("shows a renewal change separately from current capacity and offers cancellation", async () => {
     stage({ limits: PRO_LIMITS, plan: { catalog: CATALOG, current: {
