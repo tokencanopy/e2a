@@ -143,18 +143,30 @@ func insertOperation(ctx context.Context, tx pgx.Tx, row operationRow, notBefore
 // created before this system existed and accounts created by a code path that
 // forgets. The row is the account's sending identity; a missing one must never
 // read as "no restrictions".
+//
+// The source-deletion check lives here too: the row is ensured only for a
+// LIVE account (users.deleted_at IS NULL). A trashed account yields
+// errAccountTrashed and nothing is written — trash never touches the control
+// row, so a pause and its class survive the trash and a restore exactly.
 func ensureAccountControl(ctx context.Context, tx pgx.Tx, userID string) (state string, tenantName string, tenantReady bool, err error) {
 	err = tx.QueryRow(ctx, `
 		INSERT INTO account_sending_controls (user_id)
-		VALUES ($1)
+		SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL
 		ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
 		RETURNING state, ses_tenant_name, ses_tenant_ready`, userID,
 	).Scan(&state, &tenantName, &tenantReady)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, errAccountTrashed
+	}
 	if err != nil {
 		return "", "", false, fmt.Errorf("sendingpolicy: ensure account control: %w", err)
 	}
 	return state, tenantName, tenantReady, nil
 }
+
+// errAccountTrashed is ensureAccountControl's answer for an account that is
+// absent or in the trash: it may not send.
+var errAccountTrashed = errors.New("sendingpolicy: account is deleted or in the trash")
 
 // PrepareExternalTx derives the provider operation for an accepted outbound
 // customer message, inside the same transaction that durably inserts it.
@@ -231,6 +243,9 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 	}
 
 	state, _, _, err := ensureAccountControl(ctx, tx, userID)
+	if errors.Is(err, errAccountTrashed) {
+		return "", OperationRef{}, ErrSourceUnavailable
+	}
 	if err != nil {
 		return "", OperationRef{}, err
 	}
@@ -359,6 +374,9 @@ func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref Notif
 	}
 
 	if _, _, _, err := ensureAccountControl(ctx, tx, userID); err != nil {
+		if errors.Is(err, errAccountTrashed) {
+			return OperationRef{}, ErrSourceUnavailable
+		}
 		return OperationRef{}, err
 	}
 
