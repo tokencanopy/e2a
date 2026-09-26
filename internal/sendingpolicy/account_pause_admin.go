@@ -37,8 +37,7 @@ const maxEvidenceRefLength = 200
 type AccountPauseChange struct {
 	AccountID string
 	Paused    bool
-	// Class is required for a pause; ignored for a resume (which resets it to
-	// operator).
+	// Class is required for a pause; ignored for a resume (which keeps it).
 	Class string
 	// EvidenceRef is an optional private reference (e.g. an incident id)
 	// carried into the deleted-account summary. Never customer-visible.
@@ -59,7 +58,9 @@ type AccountPauseRecord struct {
 }
 
 // SetAccountPause pauses or resumes an account's sending, recording the class,
-// the reason and an audit event. It deliberately works on accounts in ANY
+// the reason and an audit event. An abuse class is never downgraded by a later
+// pause, and a resume keeps the class and evidence reference (it appends a
+// resume event instead of erasing the history). It deliberately works on accounts in ANY
 // trash state: pausing a trashed account for abuse is the lever that makes its
 // eventual purge write abuse tombstones ("paused, then they deleted"). A
 // pause never touches external-sending approval, and a resume starts a new
@@ -81,7 +82,7 @@ func (m *Module) SetAccountPause(ctx context.Context, req AccountPauseChange) (A
 	if len([]rune(req.EvidenceRef)) > maxEvidenceRefLength {
 		return AccountPauseRecord{}, fmt.Errorf("sendingpolicy: an evidence reference is at most %d characters", maxEvidenceRefLength)
 	}
-	class := PauseClassOperator
+	class := ""
 	if req.Paused {
 		class = strings.TrimSpace(req.Class)
 		if !ValidPauseClass(class) {
@@ -128,7 +129,10 @@ func (m *Module) SetAccountPause(ctx context.Context, req AccountPauseChange) (A
 	if req.Paused {
 		if _, err := tx.Exec(ctx, `
 			UPDATE account_sending_controls
-			   SET state = 'paused', pause_class = $2, reason = $3, actor = $4,
+			   SET state = 'paused',
+			       -- abuse is never downgraded by a later pause
+			       pause_class = CASE WHEN pause_class = 'abuse' THEN 'abuse' ELSE $2 END,
+			       reason = $3, actor = $4,
 			       evidence_ref = COALESCE($5, evidence_ref), updated_at = now()
 			 WHERE user_id = $1`, req.AccountID, class, req.Reason, req.Actor, evidence,
 		); err != nil {
@@ -137,8 +141,10 @@ func (m *Module) SetAccountPause(ctx context.Context, req AccountPauseChange) (A
 	} else {
 		if _, err := tx.Exec(ctx, `
 			UPDATE account_sending_controls
-			   SET state = 'active', pause_class = 'operator', reason = $2, actor = $3,
-			       evidence_ref = NULL,
+			   SET state = 'active', reason = $2, actor = $3,
+			       -- pause_class and evidence_ref are kept: the class records
+			       -- what the account was last paused for (an abuse history
+			       -- must survive a resume) and the resume is its own event.
 			       outcome_epoch = CASE WHEN state = 'paused' THEN outcome_epoch + 1 ELSE outcome_epoch END,
 			       last_resumed_at = CASE WHEN state = 'paused' THEN now() ELSE last_resumed_at END,
 			       updated_at = now()
@@ -155,7 +161,7 @@ func (m *Module) SetAccountPause(ctx context.Context, req AccountPauseChange) (A
 		INSERT INTO account_sending_control_events
 		    (id, account_ref, old_state, new_state, reason, actor, pause_class, evidence_ref, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + $9::interval)`,
-		randomID("asce_"), req.AccountID, oldState, newState, req.Reason, req.Actor, class, evidence,
+		randomID("asce_"), req.AccountID, oldState, newState, req.Reason, req.Actor, nullIfEmpty(class), evidence,
 		fmt.Sprintf("%d seconds", int64(retention.Seconds())),
 	); err != nil {
 		return AccountPauseRecord{}, fmt.Errorf("sendingpolicy: record pause event: %w", err)
@@ -196,4 +202,11 @@ func (m *Module) InspectAccountPause(ctx context.Context, accountID string) (Acc
 		rec.UpdatedAt = *updated
 	}
 	return rec, nil
+}
+
+func nullIfEmpty(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }

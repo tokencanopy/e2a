@@ -159,7 +159,26 @@ func TestOperatorPauseCarriesClassAndWorksOnTrashedAccounts(t *testing.T) {
 	if err := f.pool.QueryRow(f.ctx, `SELECT outcome_epoch FROM account_sending_controls WHERE user_id = $1`, user).Scan(&epochAfter); err != nil {
 		t.Fatal(err)
 	}
-	if rec.State != "active" || rec.PauseClass != "operator" || rec.EvidenceRef != "" || epochAfter != epochBefore+1 {
+	// A resume keeps the class and the evidence reference (history), appends
+	// its own event, and starts a new detector epoch.
+	if rec.State != "active" || rec.PauseClass != "abuse" || rec.EvidenceRef != "INC-SYNTHETIC-9" || epochAfter != epochBefore+1 {
 		t.Fatalf("resume readback = %+v epoch %d→%d", rec, epochBefore, epochAfter)
+	}
+	var events int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM account_sending_control_events WHERE account_ref = $1`, user).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 2 {
+		t.Fatalf("control events = %d, want pause + resume", events)
+	}
+	// A later pause under a lesser class never downgrades abuse.
+	rec, err = m.SetAccountPause(f.ctx, sendingpolicy.AccountPauseChange{
+		AccountID: user, Paused: true, Class: sendingpolicy.PauseClassBilling, Actor: "op", Reason: "billing hold",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.PauseClass != "abuse" {
+		t.Fatalf("re-pause downgraded the class to %s", rec.PauseClass)
 	}
 }
