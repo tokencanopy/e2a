@@ -114,38 +114,38 @@ const maxBasisPoints = 9999
 // struct is hashed, reviewed by a human, and then required by hash at
 // activation, so renaming a key is a policy-breaking change.
 type RuntimePolicy struct {
-	AllCustomerGlobalDailyRecipients int              `json:"all_customer_global_daily_recipients"`
-	BounceMinOutcomes                int              `json:"bounce_min_outcomes"`
-	BouncePauseBasisPoints           int              `json:"bounce_pause_basis_points"`
-	BudgetHoldMaxDays                int              `json:"budget_hold_max_days"`
-	BudgetMode                       Mode             `json:"budget_mode"`
-	ComplaintPauseBasisPoints        int              `json:"complaint_pause_basis_points"`
-	CriticalOperationalDailyRecip    int              `json:"critical_operational_daily_recipients"`
-	DailyUnlimitedPlanCodes          []string         `json:"daily_unlimited_plan_codes"`
-	DefaultAccountDailyRecipients    int              `json:"default_account_daily_recipients"`
-	DetectorIntervalSeconds          int              `json:"detector_interval_seconds"`
-	DetectorMode                     Mode             `json:"detector_mode"`
-	DetectorWindowDays               int              `json:"detector_window_days"`
+	AllCustomerGlobalDailyRecipients int      `json:"all_customer_global_daily_recipients"`
+	BounceMinOutcomes                int      `json:"bounce_min_outcomes"`
+	BouncePauseBasisPoints           int      `json:"bounce_pause_basis_points"`
+	BudgetHoldMaxDays                int      `json:"budget_hold_max_days"`
+	BudgetMode                       Mode     `json:"budget_mode"`
+	ComplaintPauseBasisPoints        int      `json:"complaint_pause_basis_points"`
+	CriticalOperationalDailyRecip    int      `json:"critical_operational_daily_recipients"`
+	DailyUnlimitedPlanCodes          []string `json:"daily_unlimited_plan_codes"`
+	DefaultAccountDailyRecipients    int      `json:"default_account_daily_recipients"`
+	DetectorIntervalSeconds          int      `json:"detector_interval_seconds"`
+	DetectorMode                     Mode     `json:"detector_mode"`
+	DetectorWindowDays               int      `json:"detector_window_days"`
 	// ExternalSendingAccess is the optional external-sending-access control.
 	// It is a pointer with omitempty on purpose: a legacy payload without it
 	// must canonicalize to exactly the bytes it always had, so every stored
 	// policy hash stays valid across the upgrade. Absent means disabled.
-	ExternalSendingAccess *ExternalSendingAccessPolicy `json:"external_sending_access,omitempty"`
-	OperatorNoticeRecipientVersion   int              `json:"operator_notice_recipient_version"`
-	ProbationGlobalDailyRecipients   int              `json:"probation_global_daily_recipients"`
-	RampDays                         int              `json:"ramp_days"`
-	RampEnabled                      bool             `json:"ramp_enabled"`
-	RampStartDaily                   int              `json:"ramp_start_daily"`
-	RampTargetDaily                  int              `json:"ramp_target_daily"`
-	SendingControlAuditRetentionDays int              `json:"sending_control_audit_retention_days"`
-	SendingFeedbackPostAcctRetention int              `json:"sending_feedback_post_account_retention_days"`
-	SharedDomainAccountDailyRecip    int              `json:"shared_domain_account_daily_recipients"`
-	SharedReputationBounceMinOutcome int              `json:"shared_reputation_bounce_min_outcomes"`
-	TenantHeaderCanaryAccountIDs     []string         `json:"tenant_header_canary_account_ids"`
-	TenantHeaderMode                 TenantHeaderMode `json:"tenant_header_mode"`
-	TenantProvisioningMode           ToggleMode       `json:"tenant_provisioning_mode"`
-	TenantSuppressionSyncMode        ToggleMode       `json:"tenant_suppression_sync_mode"`
-	ViolationOperationalDailyRecip   int              `json:"violation_operational_daily_recipients"`
+	ExternalSendingAccess            *ExternalSendingAccessPolicy `json:"external_sending_access,omitempty"`
+	OperatorNoticeRecipientVersion   int                          `json:"operator_notice_recipient_version"`
+	ProbationGlobalDailyRecipients   int                          `json:"probation_global_daily_recipients"`
+	RampDays                         int                          `json:"ramp_days"`
+	RampEnabled                      bool                         `json:"ramp_enabled"`
+	RampStartDaily                   int                          `json:"ramp_start_daily"`
+	RampTargetDaily                  int                          `json:"ramp_target_daily"`
+	SendingControlAuditRetentionDays int                          `json:"sending_control_audit_retention_days"`
+	SendingFeedbackPostAcctRetention int                          `json:"sending_feedback_post_account_retention_days"`
+	SharedDomainAccountDailyRecip    int                          `json:"shared_domain_account_daily_recipients"`
+	SharedReputationBounceMinOutcome int                          `json:"shared_reputation_bounce_min_outcomes"`
+	TenantHeaderCanaryAccountIDs     []string                     `json:"tenant_header_canary_account_ids"`
+	TenantHeaderMode                 TenantHeaderMode             `json:"tenant_header_mode"`
+	TenantProvisioningMode           ToggleMode                   `json:"tenant_provisioning_mode"`
+	TenantSuppressionSyncMode        ToggleMode                   `json:"tenant_suppression_sync_mode"`
+	ViolationOperationalDailyRecip   int                          `json:"violation_operational_daily_recipients"`
 }
 
 // ExternalSendingAccessPolicy restricts which recipients an account inside the

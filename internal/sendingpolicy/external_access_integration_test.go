@@ -283,10 +283,14 @@ func TestExternalAccessRevocationBetweenAcceptanceAndAuthorizationIsTerminal(t *
 // token was minted but before the socket opens refuses the call.
 func TestExternalAccessRevocationBeforeRedemptionInvalidates(t *testing.T) {
 	for name, revoke := range map[string]func(f *fixture, user, sibling string){
-		"grant revoked":      func(f *fixture, user, _ string) { f.setApproved(user, false) },
-		"entitlement lost":   func(f *fixture, user, _ string) { f.setEntitled(user, false) },
-		"recipient trashed":  func(f *fixture, _, sibling string) { f.exec(`UPDATE agent_identities SET deleted_at = now() WHERE id = $1`, sibling) },
-		"owner email change": func(f *fixture, user, _ string) { f.exec(`UPDATE users SET email = 'new-' || email WHERE id = $1`, user) },
+		"grant revoked":    func(f *fixture, user, _ string) { f.setApproved(user, false) },
+		"entitlement lost": func(f *fixture, user, _ string) { f.setEntitled(user, false) },
+		"recipient trashed": func(f *fixture, _, sibling string) {
+			f.exec(`UPDATE agent_identities SET deleted_at = now() WHERE id = $1`, sibling)
+		},
+		"owner email change": func(f *fixture, user, _ string) {
+			f.exec(`UPDATE users SET email = 'new-' || email WHERE id = $1`, user)
+		},
 	} {
 		revoke := revoke
 		t.Run(name, func(t *testing.T) {
