@@ -979,6 +979,13 @@ export type AccountInfo = {
   };
   upgrade_url: string;
   sending_access?: SendingAccessStatus;
+  // Account soft deletion. restored_at (RFC3339) is present once the account
+  // was restored from the trash; it drives the one-time restored notice.
+  // deleted_at/purge_after describe a trashed account, which an ordinary
+  // dashboard session practically never sees.
+  restored_at?: string;
+  deleted_at?: string;
+  purge_after?: string;
 };
 
 export async function getAccountInfo(): Promise<AccountInfo> {
