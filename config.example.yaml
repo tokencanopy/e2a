@@ -401,10 +401,12 @@ limits:
   # without a provisioner — the endpoint will 503. Generate with:
   # openssl rand -hex 32. Override with E2A_INTERNAL_API_SECRET.
   internal_api_secret: ""
-  # URL the OSS server POSTs (HMAC-signed) when a user deletes their
-  # account, so an external billing service can cancel their
-  # subscription before the cascade drops the user row. Empty
-  # disables the call (self-host without billing). Example for a
+  # URL the OSS server POSTs (HMAC-signed) after an account deletion
+  # commits, so an external billing service can act on the subscription.
+  # Body: {"user_id": "...", "mode": "trash" | "restore" | "purge"} — trash
+  # asks for cancel-at-period-end, restore reverts it, purge cancels (a
+  # receiver that ignores mode treats every call as purge). Empty disables
+  # the call (self-host without billing). Example for a
   # docker compose deployment alongside the hosted billing sidecar:
   # billing_hook_url: "http://billing:9000/api/internal/billing/cancel"
   billing_hook_url: ""
