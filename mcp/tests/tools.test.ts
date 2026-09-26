@@ -477,6 +477,23 @@ describe("e2a MCP server", () => {
     }
   });
 
+  // A restricted account's send/reply/forward can be refused mid-flight with
+  // external_sending_not_enabled (403) — the tool description must tell an
+  // agent what that means (allowed destinations, recovery, no retry) BEFORE
+  // it ever calls the tool, not just leave it to the error text.
+  it("documents external_sending_not_enabled on every send-shaped tool, including the deprecated alias", async () => {
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    for (const name of ["send_message", "reply_to_message", "forward_message", "send_email"]) {
+      const description = byName.get(name)?.description ?? "";
+      expect(description, `${name} description`).toContain("external_sending_not_enabled");
+      expect(description, `${name} description`).toMatch(/verified account email/i);
+      expect(description, `${name} description`).toMatch(/agent inboxes/i);
+      expect(description, `${name} description`).toMatch(/recovery_url/);
+      expect(description, `${name} description`).toMatch(/do not retry/i);
+    }
+  });
+
   it("labels reply_to_message's quote_history as beta with the server default", async () => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((t) => [t.name, t]));
@@ -1782,6 +1799,35 @@ describe("e2a MCP server", () => {
     expect(parsed.plan).toBe("pro");
   });
 
+  it("whoami passes through the additive sending_access object, snake_cased", async () => {
+    // Beta, additive: GET /v1/account's sending_access object is present
+    // whenever the deployment reports it; whoami must surface it verbatim
+    // (through the same REST-naming conversion every field gets) rather than
+    // stripping unknown/new fields.
+    (stub.whoami as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      user: "owner@example.com",
+      scope: "account",
+      agentAddress: undefined,
+      plan: "pro",
+      limits: { messagesPerDay: 1000 },
+      sendingAccess: {
+        enforcementApplies: true,
+        sharedExternalApproved: false,
+        paidExternalSendingEntitled: false,
+        ownerRecipientVerified: true,
+      },
+    });
+    const res = await client.callTool({ name: "whoami", arguments: {} });
+    const content = res.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0]!.text) as Record<string, unknown>;
+    expect(parsed.sending_access).toEqual({
+      enforcement_applies: true,
+      shared_external_approved: false,
+      paid_external_sending_entitled: false,
+      owner_recipient_verified: true,
+    });
+  });
+
   it("create_agent forwards email only when name omitted", async () => {
     await client.callTool({
       name: "create_agent",
@@ -2764,6 +2810,44 @@ describe("e2a MCP server", () => {
       retryable: false,
       details,
     });
+  });
+
+  it("external_sending_not_enabled surfaces the allowed recipients and recovery_url", async () => {
+    // error.details is the raw wire object (snake_case), never renamed to the
+    // generated ExternalSendingNotEnabledDetails model's camelCase fields —
+    // structuredContent.details must pass it through byte-for-byte.
+    (stub.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new E2AError({
+        code: "external_sending_not_enabled",
+        message: "the account may not send to one or more of the recipients",
+        status: 403,
+        requestId: "req_esa1",
+        details: {
+          allowed_recipients: ["verified_owner_email", "same_account_agents"],
+          recovery_url: "https://e2a.dev/dashboard/sending-access",
+        },
+        retryable: false,
+      }),
+    );
+    const res = await client.callTool({
+      name: "send_message",
+      arguments: { to: ["outsider@example.net"], subject: "s", text: "b" },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toEqual({
+      code: "external_sending_not_enabled",
+      status: 403,
+      request_id: "req_esa1",
+      retryable: false,
+      details: {
+        allowed_recipients: ["verified_owner_email", "same_account_agents"],
+        recovery_url: "https://e2a.dev/dashboard/sending-access",
+      },
+    });
+    const text = (res.content as Array<{ text: string }>)[0]?.text ?? "";
+    expect(text).toBe(
+      "e2a error [external_sending_not_enabled]: the account may not send to one or more of the recipients",
+    );
   });
 
   it("a retryable API error carries retryable + retry_after_seconds in structuredContent", async () => {
