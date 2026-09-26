@@ -118,3 +118,31 @@ func TestDeliverOutboundPausedRestrictedAccountReportsPause(t *testing.T) {
 		t.Fatalf("paused restricted send = %+v, want sending_paused", oerr)
 	}
 }
+
+// Pause replaces only an enforced external-access denial: in shadow mode, and
+// for an account outside the cohort, a paused account's self-send loopback
+// behaves exactly as with the control disabled.
+func TestDeliverOutboundPausedLoopbackUnaffectedOutsideEnforcement(t *testing.T) {
+	shadow := esaEnforcePolicy()
+	shadow.ExternalSendingAccess.Mode = sendingpolicy.ModeShadow
+	outside := esaEnforcePolicy()
+	outside.ExternalSendingAccess.AccountsCreatedAtOrAfter = "2999-01-01T00:00:00Z"
+	for name, policy := range map[string]sendingpolicy.RuntimePolicy{"shadow": shadow, "out of cohort": outside} {
+		t.Run(name, func(t *testing.T) {
+			api, store, _, _, pool := setupAsyncAPIWithPool(t)
+			api.SetExternalAccess(sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, policy))
+			label := "esaloop" + map[string]string{"shadow": "sh", "out of cohort": "oc"}[name]
+			user, ag := selfAgent(t, store, label)
+			if _, err := pool.Exec(context.Background(), `INSERT INTO account_sending_controls (user_id, state, reason, actor) VALUES ($1, 'paused', 'test', 'test')
+				ON CONFLICT (user_id) DO UPDATE SET state = 'paused'`, user.ID); err != nil {
+				t.Fatal(err)
+			}
+			res, oerr := api.DeliverOutbound(context.Background(), user, ag, outbound.SendRequest{
+				To: []string{ag.EmailAddress()}, Subject: "note to self", Body: "body",
+			}, "send", "", nil, nil)
+			if oerr != nil || res.Method != "loopback" {
+				t.Fatalf("paused self-send loopback = %+v %+v, want unchanged loopback delivery", res, oerr)
+			}
+		})
+	}
+}

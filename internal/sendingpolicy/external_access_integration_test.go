@@ -739,12 +739,13 @@ func TestExternalAccessPreflightMalformedIsNotAPermissionAnswer(t *testing.T) {
 	}
 }
 
-// Pause wins at the preflight too, before any access answer.
+// A paused account the control would refuse is told it is paused (pause
+// replaces the enforced denial). An approved-but-paused account is refused
+// by the existing pause check at acceptance, not by this control.
 func TestExternalAccessPreflightReportsPauseFirst(t *testing.T) {
 	f := newFixture(t)
 	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, esaPolicy(sendingpolicy.ModeEnforce))
 	user := f.user("standard")
-	f.setApproved(user, true)
 	f.pause(user)
 	v, err := m.ExternalAccessPreflight(f.ctx, user, f.esaAgent(user, "agents.e2a.dev"), []string{external})
 	if err != nil || !v.Paused || v.Allowed {
@@ -769,5 +770,20 @@ func TestExternalAccessDisabledSurfaces(t *testing.T) {
 	var n int
 	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM external_sending_access_requests`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("rows = %d err=%v, want none filed", n, err)
+	}
+}
+
+func TestExternalAccessPreflightPauseOnlyReplacesEnforcedDenial(t *testing.T) {
+	f := newFixture(t)
+	user := f.user("standard")
+	agent := f.esaAgent(user, "agents.e2a.dev")
+	f.pause(user)
+	shadow := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, esaPolicy(sendingpolicy.ModeShadow))
+	if v, err := shadow.ExternalAccessPreflight(f.ctx, user, agent, []string{external}); err != nil || v.Paused || !v.Allowed {
+		t.Fatalf("shadow: %+v err=%v, want allowed and not paused", v, err)
+	}
+	enforce := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, esaPolicy(sendingpolicy.ModeEnforce))
+	if v, err := enforce.ExternalAccessPreflight(f.ctx, user, agent, []string{agent}); err != nil || v.Paused || !v.Allowed {
+		t.Fatalf("enforce allowed route: %+v err=%v, want allowed and not paused", v, err)
 	}
 }

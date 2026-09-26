@@ -261,6 +261,12 @@ func evaluateExternalAccess(ctx context.Context, q dbQuerier, policy RuntimePoli
 	if err != nil {
 		return ExternalAccessVerdict{}, err
 	}
+	return evaluateWithFacts(ctx, q, policy, facts, in)
+}
+
+// evaluateWithFacts is evaluateExternalAccess over already-loaded facts.
+func evaluateWithFacts(ctx context.Context, q dbQuerier, policy RuntimePolicy, facts accountAccessFacts, in externalAccessInput) (ExternalAccessVerdict, error) {
+	mode := policy.ExternalSendingMode()
 	route, err := decideExternalRoute(ctx, q, policy, facts, in)
 	if err != nil {
 		return ExternalAccessVerdict{}, err
@@ -422,9 +428,6 @@ func (m *Module) ExternalAccessPreflight(ctx context.Context, userID, agentID st
 	if err != nil {
 		return ExternalAccessVerdict{}, err
 	}
-	if facts.paused {
-		return ExternalAccessVerdict{Mode: policy.ExternalSendingMode(), Route: RouteNotApplicable, Allowed: false, Paused: true}, nil
-	}
 	envelope, err := normalizeEnvelope(recipients)
 	if err != nil {
 		// Malformed or empty recipients are a validation problem that the
@@ -436,9 +439,22 @@ func (m *Module) ExternalAccessPreflight(ctx context.Context, userID, agentID st
 	// The composer sends as the agent's own address exactly when its domain
 	// is ownership- and sending-verified, which is the step-3 predicate
 	// itself; the stored sent_as is re-checked at every later stage.
-	return evaluateExternalAccess(ctx, m.pool, policy, externalAccessInput{
+	v, err := evaluateWithFacts(ctx, m.pool, policy, facts, externalAccessInput{
 		userID: userID, agentID: agentID, claimsOwnIdentity: true, envelope: envelope, stage: "preflight",
 	})
+	if err != nil {
+		return ExternalAccessVerdict{}, err
+	}
+	// Pause wins only where this control would itself refuse: it replaces an
+	// ENFORCED denial (so a paused, restricted account is told it is paused,
+	// never pointed at approval or payment), but never an allow, a
+	// not-applicable, or a shadow answer — those sends (a self-send
+	// loopback, a review hold) behave exactly as with the control disabled,
+	// and the existing pause checks further down decide them.
+	if v.Denied() && facts.paused {
+		v.Paused = true
+	}
+	return v, nil
 }
 
 // ExternalAccessStatus is the account-eligibility readback behind the

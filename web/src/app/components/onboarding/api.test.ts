@@ -19,6 +19,7 @@ import {
   UNREAD_BADGE_CAP,
   getWebhook,
   listWebhookDeliveries,
+  getSendingAccessRequest,
   type MessageViewWire,
 } from "./api";
 
@@ -547,5 +548,23 @@ describe("listWebhookDeliveries", () => {
       status: "scheduled",
       last_status_code: 503,
     });
+  });
+});
+
+describe("getSendingAccessRequest", () => {
+  it("treats 404 (none filed) and 501 (control disabled) as no request", async () => {
+    for (const status of [404, 501]) {
+      mockFetch.mockImplementation(() =>
+        Promise.resolve({ ok: false, status, text: () => Promise.resolve("{}") }),
+      );
+      await expect(getSendingAccessRequest()).resolves.toBeNull();
+    }
+  });
+
+  it("still surfaces other failures", async () => {
+    mockFetch.mockImplementation(() =>
+      Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve("{}") }),
+    );
+    await expect(getSendingAccessRequest()).rejects.toMatchObject({ status: 500 });
   });
 });

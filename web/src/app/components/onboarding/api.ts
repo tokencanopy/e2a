@@ -1008,7 +1008,9 @@ export async function getSendingAccessRequest(): Promise<SendingAccessRequest | 
   try {
     return await request<SendingAccessRequest>("/v1/account/sending-access/request");
   } catch (err) {
-    if (err instanceof ApiError && err.status === 404) return null;
+    // 404: no request filed yet. 501: the deployment does not enable
+    // external sending access, so there is no request state to show.
+    if (err instanceof ApiError && (err.status === 404 || err.status === 501)) return null;
     throw err;
   }
 }
