@@ -281,7 +281,15 @@ function DangerZone() {
       if (!res.ok) {
         const err = await readApiError(res);
         setState("error");
-        setErrorMessage(err.message || `HTTP ${res.status}`);
+        if (err.code === "erase_held") {
+          setErrorMessage(
+            "Sending is paused on this account, so it can't be erased permanently right now. Choose “Move to trash” instead — the account is deleted permanently when the trash window ends.",
+          );
+        } else if (err.code === "rate_limited" || res.status === 429) {
+          setErrorMessage("Too many requests. Wait a few minutes and try again.");
+        } else {
+          setErrorMessage(err.message || `HTTP ${res.status}`);
+        }
         return;
       }
       // Every session is revoked server-side; a full navigation makes the

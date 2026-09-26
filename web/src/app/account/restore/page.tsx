@@ -255,6 +255,8 @@ function TrashedAccount({
         setError(
           "This account can't be restored because the identity you signed in with has been closed.",
         );
+      } else if (err.code === "rate_limited" || res.status === 429) {
+        setError("This account was restored moments ago. Wait a few minutes before restoring it again.");
       } else if (res.status === 503) {
         setError("Restoring is temporarily unavailable. Your account is still in the trash. Try again in a few minutes.");
       } else {
@@ -279,7 +281,11 @@ function TrashedAccount({
       const err = await readApiError(res);
       if (res.status === 401) return onPhase({ kind: "signed-out" });
       if (err.code === "purge_in_progress") return onPhase({ kind: "purging" });
-      if (res.status === 503) {
+      if (err.code === "erase_held") {
+        setError(
+          "Sending is paused on this account, so it can't be erased right now. It stays in the trash and is deleted permanently when the trash window ends.",
+        );
+      } else if (res.status === 503) {
         setError("Erasing is temporarily unavailable. Your account stays in the trash. Try again later.");
       } else {
         setError("Erasing didn't finish. Your account stays in the trash. Try again.");

@@ -190,6 +190,25 @@ describe("Settings — Danger zone (delete account)", () => {
     expect(screen.getByRole("checkbox", { name: /can.t be recovered/i })).not.toBeChecked();
   });
 
+  it.each([
+    [409, "erase_held", /sending is paused/i],
+    [429, "rate_limited", /wait a few minutes/i],
+  ])("maps a %i %s to specific copy", async (status, code, message) => {
+    global.fetch = jest.fn(async () => ({
+      ok: false,
+      status,
+      text: async () => JSON.stringify({ error: { code, message: "raw server text", request_id: "req_t" } }),
+    })) as unknown as typeof fetch;
+    render(<SettingsPage />);
+    openDeleteFlow();
+    fireEvent.click(screen.getByRole("radio", { name: /erase permanently now/i }));
+    fireEvent.change(screen.getByPlaceholderText("DELETE"), { target: { value: "DELETE" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /can.t be recovered/i }));
+    fireEvent.click(screen.getByRole("button", { name: /erase my account permanently/i }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByText(/raw server text/)).not.toBeInTheDocument();
+  });
+
   it("shows an error message when the server rejects the delete", async () => {
     global.fetch = jest.fn(async () => ({ ok: false, status: 400, text: async () => "nope" })) as unknown as typeof fetch;
     render(<SettingsPage />);

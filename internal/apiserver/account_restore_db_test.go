@@ -86,9 +86,6 @@ func TestRestoreEndpointRefusesAClosedIdentityOverHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if code, _, _ := postRestore(t, srv, tok, "https://evil.example.test"); code != http.StatusForbidden {
-		t.Fatalf("cross-site restore = %d, want 403", code)
-	}
 	code, body, _ := postRestore(t, srv, tok, "https://app.example.test")
 	if code != http.StatusForbidden || errorCode(body) != "registration_refused" {
 		t.Fatalf("restore of a closed identity = %d %v, want 403 registration_refused", code, body)
@@ -148,4 +145,36 @@ func realPool(t *testing.T, _ *identity.Store) interface {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// TestRestoreEndpointRejectsCrossSiteForARestorableAccount (M8a): the CSRF
+// refusal is proven on an identity that WOULD restore — the cross-site POST
+// is refused with code forbidden and changes nothing, and the same session
+// from the dashboard origin then restores.
+func TestRestoreEndpointRejectsCrossSiteForARestorableAccount(t *testing.T) {
+	srv, store, _ := restoreHTTP(t)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "csrf@example.test", "C", "sub-csrf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := store.CreateRestrictedUserSession(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, origin := range []string{"https://evil.example.test", ""} {
+		code, body, _ := postRestore(t, srv, tok, origin)
+		if code != http.StatusForbidden || errorCode(body) != "forbidden" {
+			t.Fatalf("restore from origin %q = %d %v, want 403 forbidden", origin, code, body)
+		}
+	}
+	if u, err := store.GetUserByIDAnyState(ctx, user.ID); err != nil || u.DeletedAt == nil {
+		t.Fatalf("a cross-site POST restored the account: %+v %v", u, err)
+	}
+	if code, body, _ := postRestore(t, srv, tok, "https://app.example.test"); code != http.StatusOK {
+		t.Fatalf("same-origin restore = %d %v, want 200 (the identity is restorable)", code, body)
+	}
 }

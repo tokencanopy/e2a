@@ -272,3 +272,31 @@ func TestAccountEraseThroughRestrictedSession(t *testing.T) {
 		t.Fatalf("erase without a tombstone key = %d %v", code, body)
 	}
 }
+
+// TestDeleteAgentPermanentIsHeldWhilePaused (M3c): the agent handler maps
+// ErrEraseHeld to 409 erase_held.
+func TestDeleteAgentPermanentIsHeldWhilePaused(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (int64, error) {
+			return 0, identity.ErrEraseHeld
+		}
+	})
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com?confirm=DELETE&permanent=true", "good", nil)
+	if code != 409 || errCode(body) != "erase_held" {
+		t.Fatalf("want 409 erase_held, got %d %v", code, body)
+	}
+}
+
+// TestCreateAgentOnAHeldAddressIsAgentTaken (M6e, REST half): an address an
+// abuse-closed account held answers agent_taken like any claimed address.
+func TestCreateAgentOnAHeldAddressIsAgentTaken(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		d.CreateAgentWithLimit = func(ctx context.Context, email, domain, name, userID string, maxAgents int) (*identity.AgentIdentity, error) {
+			return nil, identity.ErrAgentAddressHeld
+		}
+	})
+	code, body := postJSON(t, srv.URL+"/v1/agents", "good", map[string]any{"email": "held@acme.com"})
+	if code != 409 || errCode(body) != "agent_taken" {
+		t.Fatalf("want 409 agent_taken, got %d %v", code, body)
+	}
+}

@@ -255,6 +255,26 @@ describe("/account/restore", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(/temporarily unavailable.*stays in the trash/i);
       expect(screen.getByRole("button", { name: /erase permanently/i })).toBeEnabled();
     });
+
+    it("explains erase_held (paused account) instead of asking to retry", async () => {
+      installFetch({ erase: envelope(409, "erase_held") });
+      await renderReady();
+      fireEvent.click(screen.getByRole("button", { name: /erase now/i }));
+      fireEvent.click(screen.getByRole("button", { name: /erase permanently/i }));
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(/sending is paused/i);
+      expect(alert).toHaveTextContent(/deleted permanently when the trash window ends/i);
+      expect(alert).not.toHaveTextContent(/didn.t finish/i);
+    });
+  });
+
+  it("explains a restore cooldown (429 rate_limited) instead of asking to retry", async () => {
+    installFetch({ restore: envelope(429, "rate_limited") });
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: /restore account/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/restored moments ago/i);
+    expect(alert).not.toHaveTextContent(/didn.t finish/i);
   });
 });
 
