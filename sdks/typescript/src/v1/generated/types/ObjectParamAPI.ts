@@ -65,6 +65,7 @@ import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
+import { ExternalSendingNotEnabledDetails } from '../models/ExternalSendingNotEnabledDetails.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
@@ -132,6 +133,9 @@ import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
+import { SendingAccessRequestInput } from '../models/SendingAccessRequestInput.js';
+import { SendingAccessRequestView } from '../models/SendingAccessRequestView.js';
+import { SendingAccessView } from '../models/SendingAccessView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
 import { StarterTemplateVariableView } from '../models/StarterTemplateVariableView.js';
 import { StarterTemplateView } from '../models/StarterTemplateView.js';
@@ -183,6 +187,15 @@ export interface AccountApiCreateApiKeyRequest {
      * @memberof AccountApicreateApiKey
      */
     idempotencyKey?: string
+}
+
+export interface AccountApiCreateSendingAccessRequestRequest {
+    /**
+     *
+     * @type SendingAccessRequestInput
+     * @memberof AccountApicreateSendingAccessRequest
+     */
+    sendingAccessRequestInput: SendingAccessRequestInput
 }
 
 export interface AccountApiDeleteAccountRequest {
@@ -266,6 +279,9 @@ export interface AccountApiGetAccountMetricsRequest {
     groupBy?: 'agent'
 }
 
+export interface AccountApiGetSendingAccessRequestRequest {
+}
+
 export interface AccountApiListApiKeysRequest {
     /**
      * Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
@@ -327,6 +343,24 @@ export class ObjectAccountApi {
      */
     public createApiKey(param: AccountApiCreateApiKeyRequest, options?: ConfigurationOptions): Promise<CreateAPIKeyResponse> {
         return this.api.createApiKey(param.createAPIKeyRequest, param.idempotencyKey,  options).toPromise();
+    }
+
+    /**
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param param the request object
+     */
+    public createSendingAccessRequestWithHttpInfo(param: AccountApiCreateSendingAccessRequestRequest, options?: ConfigurationOptions): Promise<HttpInfo<SendingAccessRequestView>> {
+        return this.api.createSendingAccessRequestWithHttpInfo(param.sendingAccessRequestInput,  options).toPromise();
+    }
+
+    /**
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param param the request object
+     */
+    public createSendingAccessRequest(param: AccountApiCreateSendingAccessRequestRequest, options?: ConfigurationOptions): Promise<SendingAccessRequestView> {
+        return this.api.createSendingAccessRequest(param.sendingAccessRequestInput,  options).toPromise();
     }
 
     /**
@@ -435,6 +469,24 @@ export class ObjectAccountApi {
      */
     public getAccountMetrics(param: AccountApiGetAccountMetricsRequest = {}, options?: ConfigurationOptions): Promise<AccountMetricsView> {
         return this.api.getAccountMetrics(param.start, param.end, param.bucket, param.groupBy,  options).toPromise();
+    }
+
+    /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     * @param param the request object
+     */
+    public getSendingAccessRequestWithHttpInfo(param: AccountApiGetSendingAccessRequestRequest = {}, options?: ConfigurationOptions): Promise<HttpInfo<SendingAccessRequestView>> {
+        return this.api.getSendingAccessRequestWithHttpInfo( options).toPromise();
+    }
+
+    /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     * @param param the request object
+     */
+    public getSendingAccessRequest(param: AccountApiGetSendingAccessRequestRequest = {}, options?: ConfigurationOptions): Promise<SendingAccessRequestView> {
+        return this.api.getSendingAccessRequest( options).toPromise();
     }
 
     /**

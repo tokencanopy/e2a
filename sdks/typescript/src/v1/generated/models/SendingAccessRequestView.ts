@@ -10,27 +10,19 @@
  * Do not edit the class manually.
  */
 
-import { AccountUserView } from '../models/AccountUserView.js';
-import { LimitsCapsView } from '../models/LimitsCapsView.js';
-import { LimitsUsageView } from '../models/LimitsUsageView.js';
-import { SendingAccessView } from '../models/SendingAccessView.js';
 import { HttpFile } from '../http/http.js';
 
-export class AccountView {
-    'agentEmail'?: string;
-    'limits': LimitsCapsView;
-    'planCode': string;
+export class SendingAccessRequestView {
+    'createdAt': Date;
+    'decidedAt'?: Date;
+    'expectedDailyVolume': number;
+    'id': string;
+    'recipients': string;
     /**
-    * Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.
+    * Open set: treat as a string and tolerate unknown values. Known values: pending (awaiting support review), approved, declined (contact support to appeal).
     */
-    'scope': string;
-    /**
-    * External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when unavailable.
-    */
-    'sendingAccess'?: SendingAccessView;
-    'upgradeUrl': string;
-    'usage': LimitsUsageView;
-    'user': AccountUserView;
+    'state': string;
+    'useCase': string;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -38,56 +30,50 @@ export class AccountView {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
-            "name": "agentEmail",
-            "baseName": "agent_email",
+            "name": "createdAt",
+            "baseName": "created_at",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
+            "name": "decidedAt",
+            "baseName": "decided_at",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
+            "name": "expectedDailyVolume",
+            "baseName": "expected_daily_volume",
+            "type": "number",
+            "format": "int64"
+        },
+        {
+            "name": "id",
+            "baseName": "id",
             "type": "string",
             "format": ""
         },
         {
-            "name": "limits",
-            "baseName": "limits",
-            "type": "LimitsCapsView",
-            "format": ""
-        },
-        {
-            "name": "planCode",
-            "baseName": "plan_code",
+            "name": "recipients",
+            "baseName": "recipients",
             "type": "string",
             "format": ""
         },
         {
-            "name": "scope",
-            "baseName": "scope",
+            "name": "state",
+            "baseName": "state",
             "type": "string",
             "format": ""
         },
         {
-            "name": "sendingAccess",
-            "baseName": "sending_access",
-            "type": "SendingAccessView",
-            "format": ""
-        },
-        {
-            "name": "upgradeUrl",
-            "baseName": "upgrade_url",
+            "name": "useCase",
+            "baseName": "use_case",
             "type": "string",
-            "format": ""
-        },
-        {
-            "name": "usage",
-            "baseName": "usage",
-            "type": "LimitsUsageView",
-            "format": ""
-        },
-        {
-            "name": "user",
-            "baseName": "user",
-            "type": "AccountUserView",
             "format": ""
         }    ];
 
     static getAttributeTypeMap() {
-        return AccountView.attributeTypeMap;
+        return SendingAccessRequestView.attributeTypeMap;
     }
 
     public constructor() {

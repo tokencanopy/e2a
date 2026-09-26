@@ -64,6 +64,7 @@ import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
+import { ExternalSendingNotEnabledDetails } from '../models/ExternalSendingNotEnabledDetails.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
@@ -131,6 +132,9 @@ import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
+import { SendingAccessRequestInput } from '../models/SendingAccessRequestInput.js';
+import { SendingAccessRequestView } from '../models/SendingAccessRequestView.js';
+import { SendingAccessView } from '../models/SendingAccessView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
 import { StarterTemplateVariableView } from '../models/StarterTemplateVariableView.js';
 import { StarterTemplateView } from '../models/StarterTemplateView.js';
@@ -199,6 +203,28 @@ export class PromiseAccountApi {
     public createApiKey(createAPIKeyRequest: CreateAPIKeyRequest, idempotencyKey?: string, _options?: PromiseConfigurationOptions): Promise<CreateAPIKeyResponse> {
         const observableOptions = wrapOptions(_options);
         const result = this.api.createApiKey(createAPIKeyRequest, idempotencyKey, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param sendingAccessRequestInput
+     */
+    public createSendingAccessRequestWithHttpInfo(sendingAccessRequestInput: SendingAccessRequestInput, _options?: PromiseConfigurationOptions): Promise<HttpInfo<SendingAccessRequestView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.createSendingAccessRequestWithHttpInfo(sendingAccessRequestInput, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param sendingAccessRequestInput
+     */
+    public createSendingAccessRequest(sendingAccessRequestInput: SendingAccessRequestInput, _options?: PromiseConfigurationOptions): Promise<SendingAccessRequestView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.createSendingAccessRequest(sendingAccessRequestInput, observableOptions);
         return result.toPromise();
     }
 
@@ -337,6 +363,26 @@ export class PromiseAccountApi {
     public getAccountMetrics(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: PromiseConfigurationOptions): Promise<AccountMetricsView> {
         const observableOptions = wrapOptions(_options);
         const result = this.api.getAccountMetrics(start, end, bucket, groupBy, observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     */
+    public getSendingAccessRequestWithHttpInfo(_options?: PromiseConfigurationOptions): Promise<HttpInfo<SendingAccessRequestView>> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getSendingAccessRequestWithHttpInfo(observableOptions);
+        return result.toPromise();
+    }
+
+    /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     */
+    public getSendingAccessRequest(_options?: PromiseConfigurationOptions): Promise<SendingAccessRequestView> {
+        const observableOptions = wrapOptions(_options);
+        const result = this.api.getSendingAccessRequest(observableOptions);
         return result.toPromise();
     }
 

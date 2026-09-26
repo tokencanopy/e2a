@@ -10,27 +10,25 @@
  * Do not edit the class manually.
  */
 
-import { AccountUserView } from '../models/AccountUserView.js';
-import { LimitsCapsView } from '../models/LimitsCapsView.js';
-import { LimitsUsageView } from '../models/LimitsUsageView.js';
-import { SendingAccessView } from '../models/SendingAccessView.js';
 import { HttpFile } from '../http/http.js';
 
-export class AccountView {
-    'agentEmail'?: string;
-    'limits': LimitsCapsView;
-    'planCode': string;
+export class SendingAccessView {
     /**
-    * Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.
+    * True when the deployment enforces external sending access for this account (enforce mode, account inside the rollout cohort, not a platform account). Stays true after approval. False when the control is disabled or in shadow mode, or the account is outside the cohort.
     */
-    'scope': string;
+    'enforcementApplies': boolean;
     /**
-    * External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when unavailable.
+    * True when the account\'s current sign-in email was verified by a trusted login, so it is an allowed destination while external sending is restricted.
     */
-    'sendingAccess'?: SendingAccessView;
-    'upgradeUrl': string;
-    'usage': LimitsUsageView;
-    'user': AccountUserView;
+    'ownerRecipientVerified': boolean;
+    /**
+    * True when an active paid base subscription grants external sending (hosted service). Independent of shared_external_approved.
+    */
+    'paidExternalSendingEntitled': boolean;
+    /**
+    * True when an operator granted this account external sending through the shared sending identity. Reports the grant only, not whether enforcement is on.
+    */
+    'sharedExternalApproved': boolean;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -38,56 +36,32 @@ export class AccountView {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
-            "name": "agentEmail",
-            "baseName": "agent_email",
-            "type": "string",
+            "name": "enforcementApplies",
+            "baseName": "enforcement_applies",
+            "type": "boolean",
             "format": ""
         },
         {
-            "name": "limits",
-            "baseName": "limits",
-            "type": "LimitsCapsView",
+            "name": "ownerRecipientVerified",
+            "baseName": "owner_recipient_verified",
+            "type": "boolean",
             "format": ""
         },
         {
-            "name": "planCode",
-            "baseName": "plan_code",
-            "type": "string",
+            "name": "paidExternalSendingEntitled",
+            "baseName": "paid_external_sending_entitled",
+            "type": "boolean",
             "format": ""
         },
         {
-            "name": "scope",
-            "baseName": "scope",
-            "type": "string",
-            "format": ""
-        },
-        {
-            "name": "sendingAccess",
-            "baseName": "sending_access",
-            "type": "SendingAccessView",
-            "format": ""
-        },
-        {
-            "name": "upgradeUrl",
-            "baseName": "upgrade_url",
-            "type": "string",
-            "format": ""
-        },
-        {
-            "name": "usage",
-            "baseName": "usage",
-            "type": "LimitsUsageView",
-            "format": ""
-        },
-        {
-            "name": "user",
-            "baseName": "user",
-            "type": "AccountUserView",
+            "name": "sharedExternalApproved",
+            "baseName": "shared_external_approved",
+            "type": "boolean",
             "format": ""
         }    ];
 
     static getAttributeTypeMap() {
-        return AccountView.attributeTypeMap;
+        return SendingAccessView.attributeTypeMap;
     }
 
     public constructor() {

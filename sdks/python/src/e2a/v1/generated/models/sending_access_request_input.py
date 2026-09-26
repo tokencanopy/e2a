@@ -17,29 +17,21 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
-from typing import Any, ClassVar, Dict, List, Optional
-from e2a.v1.generated.models.account_user_view import AccountUserView
-from e2a.v1.generated.models.limits_caps_view import LimitsCapsView
-from e2a.v1.generated.models.limits_usage_view import LimitsUsageView
-from e2a.v1.generated.models.sending_access_view import SendingAccessView
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, ClassVar, Dict, List
+from typing_extensions import Annotated
 from typing import Optional, Set
 from typing_extensions import Self
 
-class AccountView(BaseModel):
+class SendingAccessRequestInput(BaseModel):
     """
-    AccountView
+    SendingAccessRequestInput
     """ # noqa: E501
-    agent_email: Optional[StrictStr] = None
-    limits: LimitsCapsView
-    plan_code: StrictStr
-    scope: StrictStr = Field(description="Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.")
-    sending_access: Optional[SendingAccessView] = Field(default=None, description="External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when unavailable.")
-    upgrade_url: StrictStr
-    usage: LimitsUsageView
-    user: AccountUserView
+    expected_daily_volume: Annotated[int, Field(le=1000000, strict=True, ge=1)] = Field(description="Expected recipients per day.")
+    recipients: Annotated[str, Field(min_length=1, strict=True, max_length=1000)] = Field(description="Who you will email (for example: your own customers who signed up, your team).")
+    use_case: Annotated[str, Field(min_length=1, strict=True, max_length=2000)] = Field(description="What you are building and why it needs to email external recipients.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "limits", "plan_code", "scope", "sending_access", "upgrade_url", "usage", "user"]
+    __properties: ClassVar[List[str]] = ["expected_daily_volume", "recipients", "use_case"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -59,7 +51,7 @@ class AccountView(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of AccountView from a JSON string"""
+        """Create an instance of SendingAccessRequestInput from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -82,18 +74,6 @@ class AccountView(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
-        # override the default output from pydantic by calling `to_dict()` of limits
-        if self.limits:
-            _dict['limits'] = self.limits.to_dict()
-        # override the default output from pydantic by calling `to_dict()` of sending_access
-        if self.sending_access:
-            _dict['sending_access'] = self.sending_access.to_dict()
-        # override the default output from pydantic by calling `to_dict()` of usage
-        if self.usage:
-            _dict['usage'] = self.usage.to_dict()
-        # override the default output from pydantic by calling `to_dict()` of user
-        if self.user:
-            _dict['user'] = self.user.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
@@ -103,7 +83,7 @@ class AccountView(BaseModel):
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of AccountView from a dict"""
+        """Create an instance of SendingAccessRequestInput from a dict"""
         if obj is None:
             return None
 
@@ -111,14 +91,9 @@ class AccountView(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
-            "agent_email": obj.get("agent_email"),
-            "limits": LimitsCapsView.from_dict(obj["limits"]) if obj.get("limits") is not None else None,
-            "plan_code": obj.get("plan_code"),
-            "scope": obj.get("scope"),
-            "sending_access": SendingAccessView.from_dict(obj["sending_access"]) if obj.get("sending_access") is not None else None,
-            "upgrade_url": obj.get("upgrade_url"),
-            "usage": LimitsUsageView.from_dict(obj["usage"]) if obj.get("usage") is not None else None,
-            "user": AccountUserView.from_dict(obj["user"]) if obj.get("user") is not None else None
+            "expected_daily_volume": obj.get("expected_daily_volume"),
+            "recipients": obj.get("recipients"),
+            "use_case": obj.get("use_case")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():
