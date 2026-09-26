@@ -8,6 +8,8 @@ import { AgentPromptCard, AGENT_PROMPTS } from "../../components/AgentPromptCard
 import { listDomains } from "../../components/onboarding/api";
 import { canReceive } from "../../components/onboarding/state";
 import { useAgents } from "../../components/hooks/useAgents";
+import { useSendingAccess } from "../../components/hooks/useSendingAccess";
+import { SendingAccessNotice } from "../../components/SendingAccessNotice";
 import { domainsKey } from "../../../lib/swrKeys";
 import type { DashboardAgent } from "../../components/types";
 import type { DomainInfo } from "../../components/onboarding/types";
@@ -92,6 +94,7 @@ export default function DashboardPage() {
   // page (which invalidates `agentsKey`) flows back into this view
   // without a manual refetch.
   const { agents, error: agentsError, isLoading: agentsLoading } = useAgents();
+  const { status: sendingAccessStatus } = useSendingAccess();
   const { data: domains = [] } = useSWR(domainsKey, () =>
     listDomains().catch(() => [] as DomainInfo[]),
   );
@@ -196,6 +199,8 @@ export default function DashboardPage() {
           {error}
         </div>
       )}
+
+      <SendingAccessNotice status={sendingAccessStatus} />
 
       <div className="mb-10">
         <AgentPromptCard {...AGENT_PROMPTS.inboxes} />

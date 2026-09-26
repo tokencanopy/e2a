@@ -11,6 +11,7 @@ import type {
   WebhookDeliveryView,
   WebhookView,
 } from "../../../lib/webhooks";
+import type { SendingAccessStatus } from "../../../lib/sendingAccess";
 import type {
   AttachmentMeta,
   DashboardAgent,
@@ -950,4 +951,83 @@ export async function getAccountMetrics(opts: {
   if (opts.bucketByDay) params.set("bucket", "day");
   const qs = params.toString();
   return request<AccountMetrics>("/v1/metrics" + (qs ? "?" + qs : ""));
+}
+
+// ── Account (GET /v1/account) ────────────────────────────
+
+// Mirrors AccountView. Kept inline (like billing/page.tsx's LimitsInfo)
+// rather than sourced from a generated client — this is a dashboard-only
+// read. `sending_access` (beta) is entirely omitted by servers/accounts
+// where the external-sending-access control doesn't apply; treat it as
+// "no restriction info" rather than defaulting any of its booleans.
+export type AccountInfo = {
+  user: { id: string; email: string };
+  scope: string;
+  plan_code: string;
+  agent_email?: string;
+  limits: {
+    max_agents: number;
+    max_domains: number;
+    max_messages_month: number;
+    max_storage_bytes: number;
+  };
+  usage: {
+    agents: number;
+    domains: number;
+    messages_month: number;
+    storage_bytes: number;
+  };
+  upgrade_url: string;
+  sending_access?: SendingAccessStatus;
+};
+
+export async function getAccountInfo(): Promise<AccountInfo> {
+  return request<AccountInfo>("/v1/account");
+}
+
+// ── External sending access request (beta) ───────────────
+//
+// GET/POST /v1/account/sending-access/request. Account-scoped — the
+// account binding is server-side, never sent by the client.
+
+export type SendingAccessRequestState = "pending" | "approved" | "declined" | string;
+
+export type SendingAccessRequest = {
+  id: string;
+  state: SendingAccessRequestState;
+  use_case: string;
+  recipients: string;
+  expected_daily_volume: number;
+  created_at: string;
+  decided_at?: string;
+};
+
+// The account's most recent request, or null when it has never filed one
+// (404 not_found — the documented "no request yet" signal, not an error).
+export async function getSendingAccessRequest(): Promise<SendingAccessRequest | null> {
+  try {
+    return await request<SendingAccessRequest>("/v1/account/sending-access/request");
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+export type SendingAccessRequestInput = {
+  use_case: string;
+  recipients: string;
+  expected_daily_volume: number;
+};
+
+// 201 (new) and 200 (idempotent replay of an existing pending request) are
+// both success — the caller renders the returned request either way. 429
+// rate_limited (3 requests / 30 days) and 422 invalid_request surface as
+// ApiError for the caller to branch on.
+export async function createSendingAccessRequest(
+  input: SendingAccessRequestInput,
+): Promise<SendingAccessRequest> {
+  return request<SendingAccessRequest>("/v1/account/sending-access/request", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
