@@ -6,11 +6,22 @@
 // commit, so a single billing 5xx on restore left a restored customer's
 // subscription scheduled to cancel with no retry. The job is enqueued in the
 // same transaction as the trash or restore, retried with River's backoff, and
-// is convergent: before posting, the worker re-reads the account and skips a
-// notice the account has since moved past (a trash notice for an account that
-// was restored, a restore notice for one trashed again, either for an account
-// already purged — purge has its own cancel call). Out-of-order execution can
-// therefore never leave billing in the wrong state.
+// is convergent and serialized per account: the worker takes a
+// transaction-scoped advisory lock on the account, re-reads its state and
+// posts while still holding the lock, and skips a notice the account has
+// since moved past (a trash notice for an account that was restored, a
+// restore notice for one trashed again, either for an account already purged
+// — purge has its own cancel call). Because the read and the post happen
+// under one per-account lock, and every transition enqueues its own notice in
+// its own transaction, the last post for an account always reflects its
+// latest committed state — even when River runs a trash and a restore notice
+// concurrently or out of order.
+//
+// The job is deliberately NOT River-unique by account: River's uniqueness
+// must include the running state, so a restore notice inserted while a trash
+// notice is running would be dropped as a duplicate — the running trash post
+// would land last and leave a live customer set to cancel. The advisory lock
+// gives the one-at-a-time property without that loss.
 package billingnotify
 
 import (
@@ -22,6 +33,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
 	"github.com/tokencanopy/e2a/internal/jobs"
@@ -55,22 +67,18 @@ var ErrNotFound = errors.New("billingnotify: billing service has no account-stat
 // Poster sends one notice. Returns ErrNotFound for a 404.
 type Poster func(ctx context.Context, userID, mode string) error
 
-// StateReader reports whether the account still exists and whether it is in
-// the trash.
-type StateReader func(ctx context.Context, userID string) (exists, trashed bool, err error)
-
 // Jobs is the registrar + enqueuer. Poster is late-bound (the agent API that
 // owns the billing URLs is built after the River client starts).
 type Jobs struct {
-	enq   jobs.Enqueuer
-	state StateReader
+	enq  jobs.Enqueuer
+	pool *pgxpool.Pool
 
 	mu     sync.RWMutex
 	poster Poster
 }
 
-// New builds the registrar.
-func New(state StateReader) *Jobs { return &Jobs{state: state} }
+// New builds the registrar over the database the account state lives in.
+func New(pool *pgxpool.Pool) *Jobs { return &Jobs{pool: pool} }
 
 // SetEnqueuer injects the shared River client.
 func (j *Jobs) SetEnqueuer(e jobs.Enqueuer) { j.enq = e }
@@ -120,26 +128,48 @@ type Worker struct {
 // Timeout bounds one attempt.
 func (w *Worker) Timeout(*river.Job[Args]) time.Duration { return 30 * time.Second }
 
-// Work posts the notice unless the account has moved past it.
+// Work posts the notice unless the account has moved past it. The state
+// read and the post happen under one per-account advisory lock (held by this
+// transaction for at most the job timeout), so notices for one account are
+// strictly serialized.
 func (w *Worker) Work(ctx context.Context, job *river.Job[Args]) error {
-	exists, trashed, err := w.jobs.state(ctx, job.Args.UserID)
+	poster := w.jobs.getPoster()
+	if poster == nil {
+		return river.JobSnooze(time.Minute) // API not bound yet (startup)
+	}
+	tx, err := w.jobs.pool.Begin(ctx)
 	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, LockKey(job.Args.UserID)); err != nil {
+		return err
+	}
+	var trashed bool
+	err = tx.QueryRow(ctx, `SELECT deleted_at IS NOT NULL FROM users WHERE id = $1`, job.Args.UserID).Scan(&trashed)
+	exists := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	stale := !exists ||
 		(job.Args.Mode == ModeTrash && !trashed) ||
 		(job.Args.Mode == ModeRestore && trashed)
 	if stale {
-		return nil
-	}
-	poster := w.jobs.getPoster()
-	if poster == nil {
-		return river.JobSnooze(time.Minute) // API not bound yet (startup)
+		return tx.Commit(ctx)
 	}
 	err = poster(ctx, job.Args.UserID, job.Args.Mode)
 	if errors.Is(err, ErrNotFound) {
 		log.Printf("[billing-notify] %s notice for user=%s: billing service has no account-state endpoint; not retrying", job.Args.Mode, job.Args.UserID)
-		return nil
+		return tx.Commit(ctx)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
+
+// LockKey is the per-account advisory lock key notices serialize on.
+func LockKey(userID string) string { return "billing_account_state:" + userID }
+
+// NewWorkerForTest returns the worker RegisterJobs registers.
+func NewWorkerForTest(j *Jobs) *Worker { return &Worker{jobs: j} }

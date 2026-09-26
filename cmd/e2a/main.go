@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -614,16 +613,7 @@ func main() {
 	// configured; the poster is bound once the agent API exists.
 	var billingNotify *billingnotify.Jobs
 	if cfg.Limits.BillingHookURL != "" || cfg.Limits.BillingAccountStateURL != "" {
-		billingNotify = billingnotify.New(func(ctx context.Context, userID string) (bool, bool, error) {
-			u, err := store.GetUserByIDAnyState(ctx, userID)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return false, false, nil
-			}
-			if err != nil {
-				return false, false, err
-			}
-			return true, u.DeletedAt != nil, nil
-		})
+		billingNotify = billingnotify.New(pool)
 		registrars = append(registrars, billingNotify)
 	}
 

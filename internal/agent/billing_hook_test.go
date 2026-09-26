@@ -359,3 +359,38 @@ func TestPermanentDeleteOfAPausedAccountIsHeldAndTrashesNothing(t *testing.T) {
 		t.Fatal("billing was notified for a refused erase")
 	}
 }
+
+// TestPlainDeleteOfAPausedAccountIsRefusedWhenTrashIsDisabled: with account
+// trash disabled every delete is an erase, so a paused account's plain delete
+// is refused (409 erase_held) rather than erased — there is no trash window
+// to hold it in.
+func TestPlainDeleteOfAPausedAccountIsRefusedWhenTrashIsDisabled(t *testing.T) {
+	saved := identity.AccountTrashRetention
+	identity.AccountTrashRetention = 0
+	t.Cleanup(func() { identity.AccountTrashRetention = saved })
+
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNoContent)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "no-trash-paused@test.com", "Test", "google-no-trash-paused@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class) VALUES ($1, 'paused', 'r', 'op', 'billing')`, user.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.DeleteUserDataCore(ctx, user, false); !errors.Is(err, identity.ErrEraseHeld) {
+		t.Fatalf("plain delete with trash disabled on a paused account err = %v, want ErrEraseHeld", err)
+	}
+	u, err := store.GetUserByIDAnyState(ctx, user.ID)
+	if err != nil || u.DeletedAt != nil {
+		t.Fatalf("the refused delete changed the account: %+v %v", u, err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.called {
+		t.Fatal("billing was notified for a refused delete")
+	}
+}

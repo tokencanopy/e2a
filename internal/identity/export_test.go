@@ -96,3 +96,10 @@ func (s *Store) DrainAgentWithTokenForTest(ctx context.Context, agentID, userID,
 func ThreadAnchorBatchQueryForTest() string {
 	return threadAnchorBatchQuery
 }
+
+// ForcePurgeAccountForTest runs the on-demand (force) purge directly, past
+// EraseAccount's side-effect-free pre-check, so the authoritative pause
+// re-check inside the claim can be tested on its own.
+func (s *Store) ForcePurgeAccountForTest(ctx context.Context, userID string) (bool, error) {
+	return s.purgeAccount(ctx, userID, true, nil)
+}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1263,5 +1264,82 @@ func TestAccountStateHookRunsInsideTrashAndRestore(t *testing.T) {
 	}
 	if len(modes) != 2 || modes[0] != "trash:true" || modes[1] != "restore:false" {
 		t.Fatalf("hook calls = %v, want [trash:true restore:false] (inside each transaction)", modes)
+	}
+}
+
+// TestEraseClaimRechecksThePauseUnderTheUserLock pins the authoritative
+// pause check inside the purge claim (the pre-check in EraseAccount is only a
+// fast path): a paused account is never claimed for on-demand erasure.
+func TestEraseClaimRechecksThePauseUnderTheUserLock(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "claim-held@example.test", "C", "sub-claim-held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The pause lands after the pre-check would have run.
+	if _, err := pool.Exec(ctx, `INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class) VALUES ($1, 'paused', 'r', 'op', 'abuse')`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := store.ForcePurgeAccountForTest(ctx, user.ID); !errors.Is(err, identity.ErrEraseHeld) || gone {
+		t.Fatalf("force purge of a paused account: gone=%v err=%v, want ErrEraseHeld", gone, err)
+	}
+	var token *string
+	if err := pool.QueryRow(ctx, `SELECT purge_token FROM users WHERE id = $1`, user.ID).Scan(&token); err != nil {
+		t.Fatalf("account vanished: %v", err)
+	}
+	if token != nil {
+		t.Fatal("a paused account was claimed for erasure")
+	}
+}
+
+// TestConcurrentEscalationsOverOverlappingDigestsDoNotDeadlock pins the
+// sorted digest-lock order: two escalations whose summaries list the same
+// digests in opposite orders run concurrently without a deadlock.
+func TestConcurrentEscalationsOverOverlappingDigestsDoNotDeadlock(t *testing.T) {
+	store, pool, _ := tombstoneStore(t)
+	ctx := context.Background()
+	const n = 60
+	var digests []identity.IdentityDigest
+	for i := 0; i < n; i++ {
+		b := make([]byte, 32)
+		b[0], b[1] = byte(i), 0xab
+		digests = append(digests, identity.IdentityDigest{Kind: identity.TombstoneKindEmail, Digest: hex.EncodeToString(b), KeyVersion: 1})
+	}
+	reversed := make([]identity.IdentityDigest, n)
+	for i := range digests {
+		reversed[n-1-i] = digests[i]
+	}
+	for ref, list := range map[string][]identity.IdentityDigest{"usr_esc_a": digests, "usr_esc_b": reversed} {
+		raw, _ := json.Marshal(list)
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO deleted_account_summaries (account_ref, account_created_at, deleted_at, purged_at, account_class,
+			    agents_count, messages_count, outbound_sends_count, identity_digests, retention_class, expires_at)
+			VALUES ($1, now(), now(), now(), 'standard', 0, 0, 0, $2, 'recent_deletion', now() + interval '30 days')`, ref, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for round := 0; round < 10; round++ {
+		var wg sync.WaitGroup
+		errs := make(chan error, 2)
+		for _, ref := range []string{"usr_esc_a", "usr_esc_b"} {
+			wg.Add(1)
+			go func(ref string) {
+				defer wg.Done()
+				_, err := store.EscalateDeletedAccountToAbuse(ctx, ref, "test-operator", "synthetic escalation")
+				errs <- err
+			}(ref)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: concurrent escalation failed (deadlock?): %v", round, err)
+			}
+		}
 	}
 }
