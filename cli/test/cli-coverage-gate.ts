@@ -57,6 +57,16 @@ const ALLOWLIST: Record<string, string> = {
     "success-only coverage rule it does not count as 'covered'.",
 };
 
+// `account` (its only subcommand is `account delete`) destroys the account it
+// runs as, so e2e.test.ts drives it only against a pipeline-minted throwaway
+// account (E2A_DISPOSABLE_API_KEY). Allowlisted ONLY while that key is
+// absent; once a run supplies it, the gate requires the erase to have run.
+if (!(process.env.E2A_DISPOSABLE_API_KEY || "").trim()) {
+  ALLOWLIST.account =
+    "destructive — `account delete` runs only against a pipeline-minted " +
+    "disposable account (E2A_DISPOSABLE_API_KEY), which this run did not supply";
+}
+
 interface Shard {
   advertised?: string[];
   covered?: string[];

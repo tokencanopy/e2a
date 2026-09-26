@@ -383,7 +383,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 
 	disposable := make([]string, 0, 2)
 	for _, label := range []string{"trash", "erase"} {
-		u, err := store.CreateOrGetUser(ctx, "disposable-"+label+"@test.dev", "Contract Disposable", "google-contract-disposable-"+label)
+		u, err := store.CreateOrGetUser(ctx, "disposable-"+label+"@example.test", "Contract Disposable", "google-contract-disposable-"+label)
 		if err == nil {
 			var k *identity.APIKey
 			k, err = store.CreateAPIKey(ctx, u.ID, "contract-disposable-"+label+"-key", nil)
