@@ -144,7 +144,22 @@ func (j *Jobs) ResolveLegacyOperation(ctx context.Context, messageID string) (se
 // With a gate wired the notification's operation is prepared here, in the
 // same transaction, against the locked source row: the triggering account is
 // charged, never the platform, and the worker never derives attribution.
+//
+// A hold whose owning account is in the trash gets no notification (0, nil):
+// the account is inert and the notice would be refused at the gate.
 func (j *Jobs) EnqueueNotifyTx(ctx context.Context, tx pgx.Tx, messageID string) (int64, error) {
+	var ownerTrashed bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM messages m
+		                 JOIN agent_identities a ON a.id = m.agent_id
+		                 JOIN users u ON u.id = a.user_id
+		                WHERE m.id = $1 AND u.deleted_at IS NOT NULL)`, messageID,
+	).Scan(&ownerTrashed); err != nil {
+		return 0, fmt.Errorf("read hold owner state: %w", err)
+	}
+	if ownerTrashed {
+		return 0, nil
+	}
 	args := HITLNotifyArgs{MessageID: messageID}
 	if j.gate != nil {
 		ref, err := j.gate.PrepareNotificationTx(ctx, tx, sendingpolicy.NewHITLNotificationRef(messageID))

@@ -32,12 +32,14 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // for why `private` can't be used as that signal and what is used instead.
 const ALLOWLIST = {
   "account.delete": [
-    "irreversible: cascades the entire account (agents, domains, messages,",
-    "keys). There is no black-box way to mint a throwaway ACCOUNT (only",
-    "throwaway agents/domains/keys within one) to test this against, and this",
-    "gate runs against the one live staging account it shares with every other",
-    "SDK/CLI/webhook coverage suite. Mirrors tests/e2e-prod's own deleteAccount",
-    "placeholder (suites/19-account.test.ts).",
+    "destructive even in its default trash mode: it revokes every API key,",
+    "OAuth grant, and dashboard session at once and stops sending, and",
+    "{ permanent: true } erases irreversibly. There is no black-box way to",
+    "mint a throwaway ACCOUNT (only throwaway agents/domains/keys within one)",
+    "to test this against, and this gate runs against the one live staging",
+    "account it shares with every other SDK/CLI/webhook coverage suite.",
+    "Mirrors tests/e2e-prod's own deleteAccount placeholder",
+    "(suites/19-account.test.ts).",
   ].join(" "),
   "account.suppressions.delete": [
     "an ACCOUNT-level suppression (distinct from the per-agent",

@@ -18,17 +18,28 @@ export class DeleteUserDataResult {
     'agentsDeleted': number;
     'apiKeysDeleted': number;
     /**
-    * Always true — the account no longer exists. A failed delete is an error envelope, never deleted:false.
+    * Always true — the account is no longer usable. A failed delete is an error envelope, never deleted:false.
     */
     'deleted': boolean;
     'domainsDeleted': number;
     'messagesDeleted': number;
+    /**
+    * How the account was deleted. trash: the account is inert and restorable by signing in to the dashboard until purge_after, after which it is purged; messages_deleted is 0 and the other counts describe rows trashed, revoked or unverified. permanent: the content was erased now (?permanent=true, or a deployment with account trash disabled) and the counts are the rows removed. Open set: tolerate unknown values.
+    */
+    'mode'?: string;
     'oauthAccessTokensDeleted'?: number;
     'oauthAuthCodesDeleted'?: number;
     'oauthRefreshTokensDeleted'?: number;
+    /**
+    * When the trashed account becomes eligible for permanent purge. Present only when mode is trash.
+    */
+    'purgeAfter'?: Date;
     'sessionsDeleted': number;
     'usageEventsDeleted': number;
     'usageSummariesDeleted': number;
+    /**
+    * True only when the account row itself was erased (mode permanent).
+    */
     'userDeleted': boolean;
 
     static readonly discriminator: string | undefined = undefined;
@@ -79,6 +90,12 @@ export class DeleteUserDataResult {
             "format": "int64"
         },
         {
+            "name": "mode",
+            "baseName": "mode",
+            "type": "string",
+            "format": ""
+        },
+        {
             "name": "oauthAccessTokensDeleted",
             "baseName": "oauth_access_tokens_deleted",
             "type": "number",
@@ -95,6 +112,12 @@ export class DeleteUserDataResult {
             "baseName": "oauth_refresh_tokens_deleted",
             "type": "number",
             "format": "int64"
+        },
+        {
+            "name": "purgeAfter",
+            "baseName": "purge_after",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "sessionsDeleted",

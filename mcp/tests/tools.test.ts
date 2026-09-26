@@ -1828,6 +1828,30 @@ describe("e2a MCP server", () => {
     });
   });
 
+  it("whoami passes through the account-trash fields, snake_cased", async () => {
+    // AccountView gained optional deletedAt/purgeAfter/restoredAt (account
+    // soft-delete). whoami is a thin pass-through of client.whoami() (GET
+    // /v1/account), so these must surface verbatim through the same
+    // REST-naming conversion every field gets, exactly like sending_access
+    // above — nothing here is mapped by hand.
+    (stub.whoami as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      user: "owner@example.com",
+      scope: "account",
+      agentAddress: undefined,
+      plan: "pro",
+      limits: { messagesPerDay: 1000 },
+      deletedAt: new Date("2026-09-01T00:00:00.000Z"),
+      purgeAfter: new Date("2026-10-01T00:00:00.000Z"),
+      restoredAt: new Date("2026-09-15T00:00:00.000Z"),
+    });
+    const res = await client.callTool({ name: "whoami", arguments: {} });
+    const content = res.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0]!.text) as Record<string, unknown>;
+    expect(parsed.deleted_at).toBe("2026-09-01T00:00:00.000Z");
+    expect(parsed.purge_after).toBe("2026-10-01T00:00:00.000Z");
+    expect(parsed.restored_at).toBe("2026-09-15T00:00:00.000Z");
+  });
+
   it("create_agent forwards email only when name omitted", async () => {
     await client.callTool({
       name: "create_agent",

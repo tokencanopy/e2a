@@ -321,6 +321,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
 | `sending_paused` | 403 | **Experimental.** Outbound sending is paused for the account by the platform abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
 | `external_sending_not_enabled` | 403 | **Experimental.** The account may not send to one or more of the To/Cc/Bcc recipients through its sending identity. Nothing was queued. `error.details` (`ExternalSendingNotEnabledDetails`) lists the allowed destinations and the dashboard recovery URL; retrying the same request will not succeed. |
+| `registration_refused` | 403 | The sign-in identity (login subject or email) belongs to a recently deleted or abuse-closed account and cannot register a new account or restore the old one. Retrying will not succeed; see the privacy policy for the hold periods. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |
@@ -344,6 +345,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `not_in_trash` | 409 | Restore or permanent-delete was requested for a resource that is not currently in trash. |
 | `purge_in_progress` | 409 | Permanent agent deletion has been claimed and can no longer be reversed; retry deletion to resume it. |
 | `send_in_progress` | 409 | The message send is already executing; wait for its terminal outcome. |
+| `erase_held` | 409 | Permanent deletion (`DELETE /v1/account?permanent=true`, or `DELETE /v1/agents/{email}?permanent=true`) is held while the account's sending is paused. Delete without `permanent` to move it to the trash instead. |
 | `webhook_disabled` | 409 | Operation requires an enabled webhook. |
 | `webhook_cooldown` | 409 | The webhook was auto-disabled and cannot be re-enabled until the cooldown elapses. SDKs do not automatically retry it; retry manually only after the cooldown. |
 | `precondition_failed` | 412 | The resource changed since the supplied `If-Match` value was read. Fetch the latest representation and retry the edit deliberately. |
@@ -523,8 +525,14 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
 - `GET /v1/account` — whoami: the authenticated principal (user + scope, plus
   `agent_email` for agent-scoped keys), plan caps, and current usage. Works for
   both scopes. (Public *deployment* discovery is the separate `GET /v1/info`.)
-- `DELETE /v1/account?confirm=DELETE` — permanently delete the account and cascade
-  all owned data; returns per-table row counts (GDPR Art. 17). Irreversible.
+- `DELETE /v1/account?confirm=DELETE` — delete the account (GDPR Art. 17). By
+  default the account moves to the trash: it is unusable at once (keys,
+  sessions and OAuth grants revoked, agents trashed, sending stopped, domains
+  unverified), restorable by signing in to the dashboard until `purge_after`,
+  then purged permanently. `permanent=true` erases immediately. The receipt
+  carries `mode` (`trash` | `permanent`), `purge_after` (trash only) and
+  per-table counts. After any deletion the sign-in identity may be held for a
+  period and cannot immediately register a new account (`registration_refused`).
 - `GET /v1/account/export` — self-service account-data export supporting
   access requests: profile, agents, domains, API key metadata, messages,
   usage events, protection events, OAuth connections, and suppressions.
@@ -663,7 +671,8 @@ or on the deployment's shared domain (see `GET /v1/info`).
   review queue. Restore it via `POST /v1/agents/{email}/restore` within the trash
   retention window (30 days by default, deployment-configurable), after which
   it's purged permanently. Pass `?permanent=true` to skip the trash and delete
-  irreversibly right away (accepts live and trashed agents).
+  irreversibly right away (accepts live and trashed agents; `409 erase_held`
+  while the account's sending is paused).
 - `POST /v1/agents/{email}/restore` — bring a trashed agent back into service,
   messages and configuration intact. For drafts still held for review,
   `approval_expires_at` is shifted forward by the time the agent spent in trash

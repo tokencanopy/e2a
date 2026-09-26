@@ -23,6 +23,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/apiserver"
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
+	"github.com/tokencanopy/e2a/internal/billingnotify"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/contactdue"
 	"github.com/tokencanopy/e2a/internal/delegated"
@@ -131,6 +132,20 @@ func main() {
 	flag.Int64Var(&spFlags.expectedExternal, "expected-external-sending-revision", -1, "external sending access revision the operator inspected (CAS)")
 	flag.StringVar(&spFlags.requestID, "external-sending-request-id", "", "pending external sending request an approve/decline decides")
 	flag.StringVar(&spFlags.reason, "reason", "", "nonblank reason recorded in the audit row of a sending-protection mutation")
+	flag.BoolVar(&spFlags.pauseAccount, "pause-account-sending", false, "pause an account's sending (requires -account-id, -pause-class, -reason; optional -evidence-ref); works on trashed accounts, then exit")
+	flag.BoolVar(&spFlags.resumeAccount, "resume-account-sending", false, "resume a paused account's sending (requires -account-id, -reason), then exit")
+	flag.BoolVar(&spFlags.inspectPause, "inspect-account-sending", false, "print an account's pause state and class (requires -account-id), then exit")
+	flag.StringVar(&spFlags.pauseClass, "pause-class", "", "pause class for -pause-account-sending: operator, abuse, billing or system (abuse makes a later purge write abuse tombstones)")
+	flag.StringVar(&spFlags.evidenceRef, "evidence-ref", "", "optional private evidence reference (e.g. an incident id, max 200 chars) recorded with a pause and kept in the deleted-account summary")
+
+	var acctFlags accountCommandFlags
+	flag.BoolVar(&acctFlags.inspectDeleted, "inspect-deleted-account", false, "print the retained abuse-evidence summary of a purged account (requires -deleted-account-id), then exit")
+	flag.StringVar(&acctFlags.deletedAccountID, "deleted-account-id", "", "purged account (user) id for the deleted-account / tombstone commands")
+	flag.BoolVar(&acctFlags.inspectTombstoneKeys, "inspect-tombstone-keys", false, "print the tombstone key versions and how many live tombstones depend on each, then exit")
+	flag.BoolVar(&acctFlags.extendTombstones, "extend-identity-tombstones", false, "extend every live tombstone of an account to at least -tombstone-hold-days from now (requires -deleted-account-id, -reason; audited), then exit")
+	flag.BoolVar(&acctFlags.revokeTombstones, "revoke-identity-tombstones", false, "delete every tombstone of an account, reopening its identifiers (requires -deleted-account-id, -reason), then exit")
+	flag.BoolVar(&acctFlags.escalateAbuse, "escalate-deleted-account-to-abuse", false, "after purge: write abuse-class tombstones for every identifier digest in a purged account's summary and extend the summary to the abuse hold (requires -deleted-account-id, -reason), then exit")
+	flag.IntVar(&acctFlags.holdDays, "tombstone-hold-days", 0, "hold length in days for -extend-identity-tombstones")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -161,6 +176,22 @@ func main() {
 	// purge SQL, PurgeDeletedAgents/PruneExpired) reads the package var at
 	// query time, so a single startup assignment governs the deployment.
 	identity.TrashRetention = time.Duration(cfg.Trash.RetentionDays) * 24 * time.Hour
+	// Account trash window (trash.account_retention_days, default =
+	// retention_days; 0 = DELETE /v1/account erases immediately).
+	identity.AccountTrashRetention = time.Duration(cfg.Trash.AccountRetention()) * 24 * time.Hour
+	// Identity tombstones (hosted policy). The key is env-only; a malformed
+	// value is fatal, an absent one leaves tombstone operations failing
+	// closed (signup 503, purge skipped) while the flag is on.
+	// E2A_TOMBSTONE_KEY_ACTIVE (optional, v<N>) pins the active version so a
+	// rotation can deploy a new version known-but-inactive first.
+	tombstoneKeyring, err := identity.ParseTombstoneKeyringWithActive(os.Getenv("E2A_TOMBSTONE_KEY"), os.Getenv("E2A_TOMBSTONE_KEY_ACTIVE"))
+	if err != nil {
+		log.Fatalf("Invalid E2A_TOMBSTONE_KEY: %v", err)
+	}
+	if cfg.Trash.IdentityTombstones && tombstoneKeyring == nil {
+		log.Printf("[identity] WARNING: trash.identity_tombstones is enabled but E2A_TOMBSTONE_KEY is not set — new signups will be refused (503) and account purges skipped until it is configured")
+	}
+	tombstonePolicy := identity.TombstonePolicy{Enabled: cfg.Trash.IdentityTombstones, Keyring: tombstoneKeyring}
 
 	// Database
 	ctx := context.Background()
@@ -203,10 +234,22 @@ func main() {
 		return
 	}
 
+	// Account-deletion operator commands (deleted-account summaries and
+	// identity tombstones): run and exit. Never an HTTP/MCP surface.
+	if acctFlags.commandRequested() {
+		store := identity.NewStore(pool)
+		store.SetTombstonePolicy(tombstonePolicy)
+		if err := runAccountCommand(ctx, store, &acctFlags, spFlags.reason, os.Stdout); err != nil {
+			log.Fatalf("Account command failed: %v", err)
+		}
+		return
+	}
+
 	// Bootstrap mode: create a user + API key and exit. Used by self-host
 	// operators to get their first key without needing Google OAuth.
 	if *bootstrapEmail != "" {
 		store := identity.NewStore(pool)
+		store.SetTombstonePolicy(tombstonePolicy)
 		user, err := store.BootstrapUser(ctx, *bootstrapEmail)
 		if err != nil {
 			log.Fatalf("Failed to bootstrap user: %v", err)
@@ -240,6 +283,7 @@ func main() {
 
 	// Services
 	store := identity.NewStore(pool)
+	store.SetTombstonePolicy(tombstonePolicy)
 	// Envelope-encrypt DKIM private keys at rest (#144 / M4). In production the
 	// signing secret is enforced ≥32 bytes so the cipher is always configured and
 	// the startup backfill encrypts any legacy plaintext keys; in a weak-secret
@@ -551,7 +595,10 @@ func main() {
 	if oauthStorage != nil {
 		oauthPruner = oauthStorage
 	}
-	cleanupJanitor := janitor.New(store, deliveryStore, subscriberStore, webhookOutbox, oauthPruner, idempotencyStore, metrics)
+	// The account purge pass is bound to the agent API once it exists (below).
+	accountPurger := &janitor.LateAccountPurger{}
+	cleanupJanitor := janitor.New(store, deliveryStore, subscriberStore, webhookOutbox, oauthPruner, idempotencyStore, metrics).
+		WithAccountPurger(accountPurger)
 	// contact.due wake-up: its own River periodic on the maintenance lane, not
 	// part of the janitor. It is a scheduled product event with user-visible
 	// latency, not a prune, so it gets its own interval and metrics.
@@ -561,6 +608,14 @@ func main() {
 	)
 	registrars = append(registrars, contactdue.NewJobs(contactDueSweeper))
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
+	// Durable trash/restore billing notices (retried River jobs enqueued in
+	// the transition's transaction). Only when a billing service is
+	// configured; the poster is bound once the agent API exists.
+	var billingNotify *billingnotify.Jobs
+	if cfg.Limits.BillingHookURL != "" || cfg.Limits.BillingAccountStateURL != "" {
+		billingNotify = billingnotify.New(pool)
+		registrars = append(registrars, billingNotify)
+	}
 
 	if len(registrars) > 0 {
 		jc, jerr := jobs.New(pool, jobs.Config{}, registrars...)
@@ -575,6 +630,10 @@ func main() {
 			log.Printf("[sender-identity] SES provisioning enabled (region=%s)", cfg.SenderIdentity.SESRegion)
 		}
 		webhookDeliveryJobs.SetEnqueuer(jobsClient)
+		if billingNotify != nil {
+			billingNotify.SetEnqueuer(jobsClient)
+			store.SetAccountStateHook(billingNotify.EnqueueTx)
+		}
 		outboxWorker.WithDeliveryEnqueuer(webhookDeliveryJobs)
 		// One-shot cutover: the legacy SubscriberRetryWorker is gone, so enqueue
 		// every pre-existing pending row now — idempotent (job_id IS NULL guard),
@@ -833,6 +892,10 @@ func main() {
 	api.SetInternalAPISecret(cfg.Limits.InternalAPISecret)
 	api.ConfigureProvisioning(cfg.Provisioning.Enabled, cfg.Provisioning.Secret)
 	api.SetBillingHookURL(cfg.Limits.BillingHookURL)
+	api.SetBillingAccountStateURL(cfg.Limits.BillingAccountStateURL)
+	if billingNotify != nil {
+		billingNotify.SetPoster(api.PostAccountState)
+	}
 	api.SetSubscriberStore(subscriberStore)
 	// Account-delete cascade (decision 4 / Slice 4): when SES is configured,
 	// DELETE /account enqueues an SES teardown job for every owned domain in
@@ -849,6 +912,8 @@ func main() {
 			return store.TouchSendingIdentityTombstoneTx(ctx, tx, domain)
 		})
 	}
+	// Account purge (janitor): needs the teardown + billing hooks set above.
+	accountPurger.Bind(api)
 	api.SetOutbox(webhookOutbox)
 	// The outbound accept-tx enqueuer is mandatory: DeliverOutbound always
 	// persists+enqueues and returns accepted before provider submission.

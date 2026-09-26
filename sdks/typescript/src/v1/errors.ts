@@ -119,6 +119,10 @@ const CODE_TABLE: Record<string, { make: Make; retryable: boolean }> = {
   // generated model's camelCase fields, so read `allowed_recipients` /
   // `recovery_url`, not `allowedRecipients` / `recoveryUrl`.
   external_sending_not_enabled: { make: mkPermission, retryable: false },
+  // The sign-in identity behind this credential belongs to a recently
+  // deleted or closed account and cannot register or be restored (account
+  // trash / purge). Not retryable — the same identity will refuse again.
+  registration_refused: { make: mkPermission, retryable: false },
   // 404 / 410 — the *_not_found suffix family resolves in resolve() below.
   not_found: { make: mkNotFound, retryable: false },
   gone: { make: mkNotFound, retryable: false },

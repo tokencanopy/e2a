@@ -319,6 +319,16 @@ type User struct {
 	// feed /api/auth/me, hidden from API JSON (the auth handler derives a
 	// boolean from it).
 	AcquisitionAnsweredAt *time.Time `json:"-"`
+	// DeletedAt is the account-trash stamp (nil = live). Only the any-state
+	// loaders (GetUserByIDAnyState, the restricted-session lookup, the
+	// trashed-match paths of the signup entry points) ever return a trashed
+	// user; every authentication path excludes it.
+	DeletedAt *time.Time `json:"-"`
+	// RestoredAt is when the account was last restored from the trash.
+	RestoredAt *time.Time `json:"-"`
+	// PurgeClaimed reports that an irreversible purge has committed its
+	// claim on the account (users.purge_token IS NOT NULL).
+	PurgeClaimed bool `json:"-"`
 }
 
 type Message struct {
@@ -576,7 +586,24 @@ type Store struct {
 	// surface for topology resolution and lazy legacy adoption. Optional so
 	// stores in tests and embedded deployments remain inert by default.
 	threadIdentityMetrics ThreadIdentityMetrics
+	// tombstones is the identity-tombstone policy (trash.identity_tombstones
+	// plus the dedicated tombstone key). Zero value = disabled.
+	tombstones TombstonePolicy
+	// accountStateHook, when set, runs inside the trash and restore
+	// transactions (mode "trash" / "restore") — how the durable billing
+	// notice is enqueued atomically with the transition.
+	accountStateHook func(ctx context.Context, tx pgx.Tx, userID, mode string) error
 }
+
+// SetAccountStateHook installs the in-transaction account-state hook (see
+// the field). Called once at startup.
+func (s *Store) SetAccountStateHook(h func(ctx context.Context, tx pgx.Tx, userID, mode string) error) {
+	s.accountStateHook = h
+}
+
+// HasAccountStateHook reports whether trash/restore notices are delivered
+// durably by the hook.
+func (s *Store) HasAccountStateHook() bool { return s.accountStateHook != nil }
 
 // OutboundJobCanceller is the narrow River cancellation surface identity needs
 // for hard deletes. The caller's transaction makes cancellation atomic with the
@@ -894,6 +921,15 @@ func (s *Store) claimOrCreateDomain(ctx context.Context, domain, userID string, 
 		 FROM domains WHERE domain = $1`, domain,
 	).Scan(&d.Domain, &d.UserID, &d.Verified, &d.VerificationToken, &d.CreatedAt, &d.VerifiedAt, &d.IsPrimary, &d.LastCheckedAt, &d.DKIMSelector, &d.DKIMPublicKey, &d.SendingStatus, &d.SendingError, &d.SendingDNSRecordsJSON, &d.SendingLastCheckedAt, &d.SendingDkimStatus, &d.SendingMailFromStatus, &d.AgentCount)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// A genuine new claim of a name held by a live identity tombstone (a
+		// domain an abuse-closed account verified) is refused as domain_taken,
+		// checked here under the digest advisory lock in the insert tx.
+		if terr := s.checkTombstonesTx(ctx, tx, []TombstoneIdentifier{{Kind: TombstoneKindDomain, Value: domain}}); terr != nil {
+			if errors.Is(terr, ErrRegistrationRefused) {
+				return nil, ErrDomainTaken
+			}
+			return nil, terr
+		}
 		// Only a genuine new row is chargeable (a re-claim already returned
 		// above). Read under the per-user lock, so this reflects every insert
 		// already committed by a concurrent request, not a stale count (#822).
@@ -2230,6 +2266,11 @@ func (s *Store) CreateAgentTx(ctx context.Context, tx pgx.Tx, agentEmail, domain
 	return createAgent(ctx, tx, agentEmail, domain, name, userID)
 }
 
+// ErrAgentAddressHeld is returned by agent creation when the address is held
+// by a live identity tombstone (an abuse-closed account's agent). Surfaces as
+// agent_taken, like any other claimed address.
+var ErrAgentAddressHeld = errors.New("identity: agent address is held")
+
 // AgentLimitExceededError is returned by CreateAgentWithLimit when userID is
 // already at maxAgents. Mirrors DomainLimitExceededError.
 type AgentLimitExceededError struct {
@@ -2244,7 +2285,7 @@ func (e *AgentLimitExceededError) Error() string {
 // (keyspace-2 advisory lock) inside the INSERT's transaction, closing the
 // pre-insert-count race (#822's class). maxAgents <= 0 means unlimited.
 func (s *Store) CreateAgentWithLimit(ctx context.Context, agentEmail, domain, name, userID string, maxAgents int) (*AgentIdentity, error) {
-	if maxAgents <= 0 {
+	if maxAgents <= 0 && !s.tombstones.Enabled {
 		return createAgent(ctx, s.pool, agentEmail, domain, name, userID)
 	}
 
@@ -2272,6 +2313,14 @@ func (s *Store) CreateAgentWithLimit(ctx context.Context, agentEmail, domain, na
 // CreateAgentTx exists alongside CreateAgent. maxAgents <= 0 means
 // unlimited (no lock taken, matching CreateAgentWithLimit).
 func (s *Store) CreateAgentWithLimitTx(ctx context.Context, tx pgx.Tx, agentEmail, domain, name, userID string, maxAgents int) (*AgentIdentity, error) {
+	// An address an abuse-closed account held on the shared domain stays
+	// closed: checked under the digest advisory lock in the insert tx.
+	if err := s.checkTombstonesTx(ctx, tx, []TombstoneIdentifier{{Kind: TombstoneKindAgentAddress, Value: agentEmail}}); err != nil {
+		if errors.Is(err, ErrRegistrationRefused) {
+			return nil, ErrAgentAddressHeld
+		}
+		return nil, err
+	}
 	if maxAgents <= 0 {
 		return createAgent(ctx, tx, agentEmail, domain, name, userID)
 	}
@@ -2620,6 +2669,10 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 // resolved by the caller. Carrying createdAt across the handler/store boundary
 // prevents a delayed request from attaching to a same-owner recreation at the
 // same address before any purge token has been claimed.
+//
+// While the owning account's sending is paused (any class) it refuses with
+// ErrEraseHeld: an account under a pause may trash its agents but may not
+// erase their content before an operator has classified the pause.
 func (s *Store) DeleteAgentIncarnation(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error) {
 	var token string
 	var chunked bool
@@ -2789,7 +2842,10 @@ var agentPurgeBatch = 100
 
 // PurgeDeletedAgents claims and resumes the same bounded purge state machine
 // as explicit permanent deletion. A claimed partial purge is eligible
-// immediately; ordinary trash becomes eligible after TrashRetention.
+// immediately; ordinary trash becomes eligible after TrashRetention. Agents
+// trashed as part of an account trash (trashed_by_account) are never taken
+// here: the account purge (PurgeDeletedUsers) owns them, so an account's
+// content is never purged out from under a skipped account purge.
 func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 	var total int64
 	attempted := make([]string, 0)
@@ -2805,6 +2861,7 @@ func (s *Store) PurgeDeletedAgents(ctx context.Context) (int64, error) {
 				`SELECT id, user_id, purge_token FROM agent_identities
 				  WHERE (purge_token IS NOT NULL
 				     OR (deleted_at IS NOT NULL AND deleted_at <= now() - make_interval(secs => $1)))
+				    AND NOT trashed_by_account
 				    AND NOT (id = ANY($2::text[]))
 				  LIMIT 1 FOR UPDATE SKIP LOCKED`,
 				TrashRetention.Seconds(), attempted).Scan(&agentID, &userID, &purgeToken)
@@ -5920,19 +5977,88 @@ func (s *Store) GetConversationByID(ctx context.Context, agentID, conversationID
 
 // --- User management ---
 
+// CreateOrGetUser resolves a Google sign-in to its account, creating it on
+// first sign-in. It is the Google door's only store call.
+//
+//   - Live match on google_subject: email and name are refreshed from the
+//     IdP, as always.
+//   - TRASHED match: the row is returned untouched (DeletedAt set) — its
+//     identity fields stay frozen until a restore — and the caller issues a
+//     restricted session for the restore interstitial. Nothing is written.
+//   - No match: the identifiers are checked against the identity tombstones
+//     inside the insert transaction, after the digest advisory locks, and a
+//     held identity is refused with ErrRegistrationRefused (or
+//     ErrTombstoneKeyUnavailable when tombstones are enabled without a key).
+//
+// It never attaches to or merges an existing account: an email held by a
+// different subject fails the insert exactly as before.
 func (s *Store) CreateOrGetUser(ctx context.Context, email, name, googleSub string) (*User, error) {
-	u := &User{}
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO users (id, email, name, google_subject)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (google_subject) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
-		 RETURNING id, email, name, google_subject, created_at`,
-		generateID(), email, name, googleSub,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+	var out *User
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
+		existing, err := scanUser(tx.QueryRow(ctx,
+			`SELECT `+userColumns+` FROM users WHERE google_subject = $1 FOR NO KEY UPDATE`, googleSub))
+		switch {
+		case err == nil && existing.DeletedAt != nil:
+			out = existing
+			return nil
+		case err == nil:
+			u, err := scanUser(tx.QueryRow(ctx,
+				`UPDATE users SET email = $2, name = $3
+				  WHERE id = $1 AND deleted_at IS NULL
+				  RETURNING `+userColumns, existing.ID, email, name))
+			if err != nil {
+				return err
+			}
+			out = u
+			return nil
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
+		}
+		if err := s.checkTombstonesTx(ctx, tx, append([]TombstoneIdentifier{
+			{Kind: TombstoneKindLoginSubject, Value: googleSub},
+		}, signupEmailIdentifiers(email)...)); err != nil {
+			return err
+		}
+		// ON CONFLICT keeps a concurrent first sign-in of the same subject
+		// race-free; its DO UPDATE is guarded so it can never touch a
+		// trashed row (a zero-row RETURNING re-reads it below).
+		u, err := scanUser(tx.QueryRow(ctx,
+			`INSERT INTO users (id, email, name, google_subject)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (google_subject) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
+			   WHERE users.deleted_at IS NULL
+			 RETURNING `+userColumns,
+			generateID(), email, name, googleSub))
+		if errors.Is(err, pgx.ErrNoRows) {
+			u, err = scanUser(tx.QueryRow(ctx,
+				`SELECT `+userColumns+` FROM users WHERE google_subject = $1`, googleSub))
+		}
+		if err != nil {
+			return err
+		}
+		out = u
+		return nil
+	})
 	if err != nil {
-		return nil, err
+		return nil, s.classifyEmailConflict(ctx, err, email)
 	}
-	return u, nil
+	return out, nil
+}
+
+// classifyEmailConflict turns a users_email_key violation into
+// ErrEmailConflict — or ErrAccountTrashed when the address is held by an
+// account in the trash — so a sign-in door can show a page instead of a 500.
+func (s *Store) classifyEmailConflict(ctx context.Context, err error, email string) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.SQLState() != "23505" || pgErr.ConstraintName != "users_email_key" {
+		return err
+	}
+	var trashed bool
+	if qerr := s.pool.QueryRow(ctx,
+		`SELECT deleted_at IS NOT NULL FROM users WHERE email = $1`, email).Scan(&trashed); qerr == nil && trashed {
+		return ErrAccountTrashed
+	}
+	return ErrEmailConflict
 }
 
 // RecordGoogleOwnerEmailProof records that a trusted Google login just
@@ -5980,12 +6106,21 @@ func (s *Store) SetAccountClass(ctx context.Context, userID, class string) error
 // BootstrapUser finds a user by email, or creates one with a synthetic
 // google_subject if none exists. Used by the -bootstrap-email CLI flag
 // for self-host first-run, where there's no Google OAuth flow yet.
+//
+// It deliberately bypasses identity tombstones: it is an operator command run
+// inside the deployment, and an operator creating an account is an explicit
+// decision (the release pipeline mints disposable conformance accounts this
+// way). It refuses to hand a key to an account in the trash.
 func (s *Store) BootstrapUser(ctx context.Context, email string) (*User, error) {
 	u := &User{}
+	var deletedAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name, google_subject, created_at FROM users WHERE email = $1`, email,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+		`SELECT id, email, name, google_subject, created_at, deleted_at FROM users WHERE email = $1`, email,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &deletedAt)
 	if err == nil {
+		if deletedAt != nil {
+			return nil, ErrAccountTrashed
+		}
 		return u, nil
 	}
 	id := generateID()
@@ -6021,20 +6156,19 @@ var ErrEmailConflict = errors.New("identity: email already held by another user"
 // writes no mapping. A pair already attached to a different user aborts
 // with ErrExternalPrincipalConflict.
 func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name, externalIssuer string) (*User, bool, error) {
-	if externalIssuer == "" {
-		return s.provisionUser(ctx, s.pool, externalRef, email, name)
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	u, created, err := s.provisionUser(ctx, tx, externalRef, email, name)
+	u, created, err := s.provisionUser(ctx, tx, externalRef, email, name, externalIssuer)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := provisionExternalPrincipalTx(ctx, tx, externalIssuer, externalRef, u.ID); err != nil {
-		return nil, false, err
+	if externalIssuer != "" {
+		if err := provisionExternalPrincipalTx(ctx, tx, externalIssuer, externalRef, u.ID); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, err
@@ -6042,16 +6176,38 @@ func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name, ext
 	return u, created, nil
 }
 
-func (s *Store) provisionUser(ctx context.Context, q rowQuerier, externalRef, email, name string) (*User, bool, error) {
+func (s *Store) provisionUser(ctx context.Context, tx pgx.Tx, externalRef, email, name, externalIssuer string) (*User, bool, error) {
 	subject := "bootstrap:" + externalRef
-	u := &User{}
-	err := q.QueryRow(ctx,
+	// A replay resolves to the existing row. A TRASHED row is refused with
+	// ErrAccountTrashed and nothing is written (no restore, no mapping): the
+	// control plane must surface it and let the user decide in the
+	// interstitial, never retry into an automatic restore.
+	existing, err := scanUser(tx.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE google_subject = $1 FOR NO KEY UPDATE`, subject))
+	if err == nil {
+		if existing.DeletedAt != nil {
+			return nil, false, ErrAccountTrashed
+		}
+		return existing, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, err
+	}
+	ids := append([]TombstoneIdentifier{
+		{Kind: TombstoneKindLoginSubject, Value: subject},
+	}, signupEmailIdentifiers(email)...)
+	if externalIssuer != "" {
+		ids = append(ids, TombstoneIdentifier{Kind: TombstoneKindLoginSubject, Value: externalPrincipalSubject(externalIssuer, externalRef)})
+	}
+	if err := s.checkTombstonesTx(ctx, tx, ids); err != nil {
+		return nil, false, err
+	}
+	u, err := scanUser(tx.QueryRow(ctx,
 		`INSERT INTO users (id, email, name, google_subject)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (google_subject) DO NOTHING
-		 RETURNING id, email, name, google_subject, created_at`,
-		generateID(), email, name, subject,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt)
+		 RETURNING `+userColumns,
+		generateID(), email, name, subject))
 	if err == nil {
 		return u, true, nil
 	}
@@ -6068,26 +6224,25 @@ func (s *Store) provisionUser(ctx context.Context, q rowQuerier, externalRef, em
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, err
 	}
-	// The insert was swallowed by ON CONFLICT (google_subject) DO NOTHING:
-	// this ref was already provisioned. Re-read and report the existing row.
-	u = &User{}
-	if err := q.QueryRow(ctx,
-		`SELECT id, email, name, google_subject, created_at FROM users WHERE google_subject = $1`, subject,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt); err != nil {
+	// A concurrent provision of the same ref won the insert: re-read it.
+	u, err = scanUser(tx.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE google_subject = $1`, subject))
+	if err != nil {
 		return nil, false, err
+	}
+	if u.DeletedAt != nil {
+		return nil, false, ErrAccountTrashed
 	}
 	return u, false, nil
 }
 
+// GetUserByID loads a LIVE user: a trashed account reads as not found
+// (pgx.ErrNoRows). It is the authentication chokepoint for the OIDC door,
+// OAuth/MCP bearers and agent access tokens, so the trashed predicate here is
+// what makes every one of them fail the moment the trash commits. Callers
+// that must see a trashed owner use GetUserByIDAnyState.
 func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
-	u := &User{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name, google_subject, created_at, account_class, acquisition_answered_at FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &u.AcquisitionAnsweredAt)
-	if err != nil {
-		return nil, err
-	}
-	return u, nil
+	return scanUser(s.pool.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE id = $1 AND deleted_at IS NULL`, id))
 }
 
 // UpdateUserName persists a new display name on the user row and
@@ -6145,9 +6300,49 @@ const SessionTTL = 7 * 24 * time.Hour
 func (s *Store) CreateUserSession(ctx context.Context, userID string) (string, error) {
 	token := "sess_" + randomHex32() // opaque session cookie value
 	expiresAt := time.Now().Add(SessionTTL)
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO user_sessions (token, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
+	// Only a LIVE account gets an ordinary session; a trashed one gets the
+	// restricted session (CreateRestrictedUserSession) or nothing.
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO user_sessions (token, user_id, created_at, expires_at)
+		 SELECT $1, id, $3, $4 FROM users WHERE id = $2 AND deleted_at IS NULL`,
 		token, userID, time.Now(), expiresAt,
+	)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", pgx.ErrNoRows
+	}
+	return token, nil
+}
+
+// GetUserSession resolves an ORDINARY dashboard session to its live user. A
+// restricted session (issued to a sign-in that resolved to a trashed account)
+// and any session of a trashed account read as not found.
+func (s *Store) GetUserSession(ctx context.Context, token string) (*User, error) {
+	return scanUser(s.pool.QueryRow(ctx,
+		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class,
+		        u.acquisition_answered_at, u.deleted_at, u.restored_at, u.purge_token IS NOT NULL
+		 FROM user_sessions s JOIN users u ON s.user_id = u.id
+		 WHERE s.token = $1 AND s.expires_at > now()
+		   AND NOT s.restricted AND u.deleted_at IS NULL`, token))
+}
+
+// RestrictedSessionTTL bounds a restricted session: long enough to read the
+// interstitial and choose, short enough that it is never a durable credential.
+const RestrictedSessionTTL = time.Hour
+
+// CreateRestrictedUserSession issues the restricted session a sign-in gets
+// when it resolves to a trashed account. It authorizes only the restore
+// interstitial's two actions (restore, or erase now); GetUserSession never
+// resolves it.
+func (s *Store) CreateRestrictedUserSession(ctx context.Context, userID string) (string, error) {
+	token := "sess_" + randomHex32()
+	now := time.Now()
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO user_sessions (token, user_id, created_at, expires_at, restricted)
+		 SELECT $1, id, $3, $4, true FROM users WHERE id = $2 AND deleted_at IS NOT NULL`,
+		token, userID, now, now.Add(RestrictedSessionTTL),
 	)
 	if err != nil {
 		return "", err
@@ -6155,17 +6350,16 @@ func (s *Store) CreateUserSession(ctx context.Context, userID string) (string, e
 	return token, nil
 }
 
-func (s *Store) GetUserSession(ctx context.Context, token string) (*User, error) {
-	u := &User{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class, u.acquisition_answered_at
+// GetRestrictedSession resolves a restricted session to its (trashed) user.
+// It returns pgx.ErrNoRows for an ordinary session, an expired one, or one
+// whose account is no longer in the trash.
+func (s *Store) GetRestrictedSession(ctx context.Context, token string) (*User, error) {
+	return scanUser(s.pool.QueryRow(ctx,
+		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class,
+		        u.acquisition_answered_at, u.deleted_at, u.restored_at, u.purge_token IS NOT NULL
 		 FROM user_sessions s JOIN users u ON s.user_id = u.id
-		 WHERE s.token = $1 AND s.expires_at > now()`, token,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &u.AcquisitionAnsweredAt)
-	if err != nil {
-		return nil, err
-	}
-	return u, nil
+		 WHERE s.token = $1 AND s.expires_at > now()
+		   AND s.restricted AND u.deleted_at IS NOT NULL`, token))
 }
 
 func (s *Store) DeleteUserSession(ctx context.Context, token string) error {
@@ -6573,11 +6767,13 @@ func (s *Store) GetPrincipalByAPIKey(ctx context.Context, apiKey string) (*Princ
 		   WHERE key_hash = $1
 		     AND revoked_at IS NULL
 		     AND (expires_at IS NULL OR expires_at > now())
+		     AND EXISTS (SELECT 1 FROM users tu WHERE tu.id = api_keys.user_id AND tu.deleted_at IS NULL)
 		   RETURNING user_id, COALESCE(scope, 'account') AS scope, agent_id
 		 )
-		 SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class, t.scope, t.agent_id
-		 FROM touched t JOIN users u ON u.id = t.user_id`, keyHash,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &scope, &agentID)
+		 SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class, u.restored_at, t.scope, t.agent_id
+		 FROM touched t JOIN users u ON u.id = t.user_id
+		 WHERE u.deleted_at IS NULL`, keyHash,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &u.RestoredAt, &scope, &agentID)
 	if err != nil {
 		return nil, err
 	}

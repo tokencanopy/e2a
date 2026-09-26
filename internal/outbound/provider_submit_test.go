@@ -1021,3 +1021,52 @@ func TestProviderSubmitterZeroNetworkWhenPaidEntitlementIsLost(t *testing.T) {
 		t.Fatalf("sockets = %d, want 0 after entitlement loss", n)
 	}
 }
+
+// TestProviderSubmitterZeroNetworkForATrashedAccount is design §7's gate seam
+// for account trash: an authorization minted before the account was trashed
+// opens no socket once the trash has committed (the redemption re-check's
+// source-deletion predicate), and a fresh consume after the trash is refused
+// terminally without ever minting a token.
+func TestProviderSubmitterZeroNetworkForATrashedAccount(t *testing.T) {
+	f := newGateFixture(t, nil)
+	relay, sockets := countingListener(t)
+	s := outbound.NewProviderSubmitter(relay, f.gate)
+	messageID, to := f.message(1)
+	ref := f.prepare(messageID)
+	auth := f.authorize(ref)
+
+	if _, err := f.pool.Exec(f.ctx, `UPDATE users SET deleted_at = now() WHERE id = $1`, f.userID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{
+		From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody"),
+	})
+	if !errors.Is(err, sendingpolicy.ErrAuthorizationInvalid) {
+		t.Fatalf("submit for a trashed account err = %v, want ErrAuthorizationInvalid", err)
+	}
+	if sockets() != 0 {
+		t.Fatalf("sockets = %d for a trashed account, want 0", sockets())
+	}
+
+	second, _ := f.message(1)
+	ref2 := f.prepareExpectingErr(second)
+	if ref2 == nil || !errors.Is(ref2, sendingpolicy.ErrSourceUnavailable) {
+		t.Fatalf("acceptance for a trashed account err = %v, want ErrSourceUnavailable", ref2)
+	}
+	if sockets() != 0 {
+		t.Fatalf("sockets = %d, want 0", sockets())
+	}
+}
+
+// prepareExpectingErr runs the acceptance half and returns its error (the
+// transaction is always rolled back).
+func (f *gateFixture) prepareExpectingErr(messageID string) error {
+	f.t.Helper()
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		f.t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(f.ctx) }()
+	_, _, err = f.gate.PrepareExternalTx(f.ctx, tx, messageID)
+	return err
+}

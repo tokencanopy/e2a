@@ -118,3 +118,79 @@ func TestEndToEnd_AcceptTxThroughRiverToSMTP(t *testing.T) {
 		t.Errorf("notification went to %q, want the owner", msgs[0].To)
 	}
 }
+
+// TestNoHoldNotificationForATrashedOwner: a hold whose owning account is in
+// the trash gets no notification job, and the reconcile sweep leaves it
+// unstamped so it is notified once the account is restored.
+func TestNoHoldNotificationForATrashedOwner(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	if err := jobs.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := identity.NewStore(pool)
+	user, err := store.CreateOrGetUser(ctx, "owner-trashed@reviewer.test", "Owner", "google-notify-trashed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := "trashed.bot.test"
+	if _, err := store.ClaimOrCreateDomain(ctx, domain, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.VerifyDomain(ctx, domain, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	ag, err := store.CreateAgent(ctx, "bot@"+domain, domain, "", "", "", user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := store.CreatePendingOutboundMessage(ctx, ag.ID, []string{"alice@example.com"}, nil, nil,
+		"subject", "body", "", nil, "send", "conv-trashed", "", "", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET deleted_at = now() WHERE id = $1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	gate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	j := hitlnotify.NewJobs(store).WithGate(gate, pool)
+	client, err := jobs.New(pool, jobs.Config{}, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.SetEnqueuer(client)
+
+	var jobID int64 = -1
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		jobID, err = j.EnqueueNotifyTx(ctx, tx, m.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("enqueue for a trashed owner: %v", err)
+	}
+	if jobID != 0 {
+		t.Fatalf("a notification job (%d) was enqueued for a trashed account", jobID)
+	}
+	if _, err := j.ReconcilePending(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	var stamped *int64
+	if err := pool.QueryRow(ctx, `SELECT notify_job_id FROM messages WHERE id = $1`, m.ID).Scan(&stamped); err != nil {
+		t.Fatal(err)
+	}
+	if stamped != nil {
+		t.Fatalf("reconcile stamped notify_job_id=%d on a trashed owner's hold; it would never be notified after a restore", *stamped)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET deleted_at = NULL WHERE id = $1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.ReconcilePending(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT notify_job_id FROM messages WHERE id = $1`, m.ID).Scan(&stamped); err != nil {
+		t.Fatal(err)
+	}
+	if stamped == nil || *stamped == 0 {
+		t.Fatal("the hold was not notified after the account was restored")
+	}
+}

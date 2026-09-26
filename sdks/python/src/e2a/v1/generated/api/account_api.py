@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from typing_extensions import Annotated
 
 from datetime import datetime
-from pydantic import Field, StrictStr, field_validator
+from pydantic import Field, StrictBool, StrictStr, field_validator
 from typing import Optional
 from typing_extensions import Annotated
 from e2a.v1.generated.models.account_metrics_view import AccountMetricsView
@@ -626,7 +626,8 @@ class AccountApi:
     @validate_call
     async def delete_account(
         self,
-        confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE — this action is irreversible.")],
+        confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.")],
+        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -640,12 +641,14 @@ class AccountApi:
         _headers: Optional[Dict[StrictStr, Any]] = None,
         _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
     ) -> DeleteUserDataResult:
-        """Delete your account + all data (irreversible)
+        """Delete your account (trash by default; permanent=true erases now)
 
-        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
 
-        :param confirm: Must be the literal DELETE — this action is irreversible. (required)
+        :param confirm: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible. (required)
         :type confirm: str
+        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        :type permanent: bool
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -670,6 +673,7 @@ class AccountApi:
 
         _param = self._delete_account_serialize(
             confirm=confirm,
+            permanent=permanent,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -694,7 +698,8 @@ class AccountApi:
     @validate_call
     async def delete_account_with_http_info(
         self,
-        confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE — this action is irreversible.")],
+        confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.")],
+        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -708,12 +713,14 @@ class AccountApi:
         _headers: Optional[Dict[StrictStr, Any]] = None,
         _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
     ) -> ApiResponse[DeleteUserDataResult]:
-        """Delete your account + all data (irreversible)
+        """Delete your account (trash by default; permanent=true erases now)
 
-        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
 
-        :param confirm: Must be the literal DELETE — this action is irreversible. (required)
+        :param confirm: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible. (required)
         :type confirm: str
+        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        :type permanent: bool
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -738,6 +745,7 @@ class AccountApi:
 
         _param = self._delete_account_serialize(
             confirm=confirm,
+            permanent=permanent,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -762,7 +770,8 @@ class AccountApi:
     @validate_call
     async def delete_account_without_preload_content(
         self,
-        confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE — this action is irreversible.")],
+        confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.")],
+        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -776,12 +785,14 @@ class AccountApi:
         _headers: Optional[Dict[StrictStr, Any]] = None,
         _host_index: Annotated[StrictInt, Field(ge=0, le=0)] = 0,
     ) -> RESTResponseType:
-        """Delete your account + all data (irreversible)
+        """Delete your account (trash by default; permanent=true erases now)
 
-        Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
 
-        :param confirm: Must be the literal DELETE — this action is irreversible. (required)
+        :param confirm: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible. (required)
         :type confirm: str
+        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        :type permanent: bool
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
                                  timeout. It can also be a pair (tuple) of
@@ -806,6 +817,7 @@ class AccountApi:
 
         _param = self._delete_account_serialize(
             confirm=confirm,
+            permanent=permanent,
             _request_auth=_request_auth,
             _content_type=_content_type,
             _headers=_headers,
@@ -826,6 +838,7 @@ class AccountApi:
     def _delete_account_serialize(
         self,
         confirm,
+        permanent,
         _request_auth,
         _content_type,
         _headers,
@@ -851,6 +864,10 @@ class AccountApi:
         if confirm is not None:
             
             _query_params.append(('confirm', confirm))
+            
+        if permanent is not None:
+            
+            _query_params.append(('permanent', permanent))
             
         # process the header parameters
         # process the form parameters

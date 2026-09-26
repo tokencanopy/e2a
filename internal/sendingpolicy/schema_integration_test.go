@@ -223,6 +223,10 @@ func testSendingBudgetMigrationDoesNotDeadlockAccountDeletionOrder(t *testing.T,
 	if err != nil {
 		t.Fatal(err)
 	}
+	softDeletionMigration, err := migrations.FS.ReadFile("122_account_soft_deletion.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	const barrierKey int64 = 8364511027
 	cleanupData := func() {
 		_, _ = pool.Exec(context.Background(), `
@@ -255,6 +259,10 @@ func testSendingBudgetMigrationDoesNotDeadlockAccountDeletionOrder(t *testing.T,
 		// test binary on this database without those columns.
 		if _, err := pool.Exec(context.Background(), string(externalAccessMigration)); err != nil {
 			t.Errorf("restore external access columns after controls-tail race: %v", err)
+		}
+		// 122 adds pause_class and evidence_ref.
+		if _, err := pool.Exec(context.Background(), string(softDeletionMigration)); err != nil {
+			t.Errorf("restore pause class columns after controls-tail race: %v", err)
 		}
 	})
 	seedSQL := `

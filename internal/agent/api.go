@@ -234,8 +234,9 @@ type API struct {
 	delegatedIssuer       string                // config delegated.issuer_url; when empty, external-principal attach returns 503
 	delegated             DelegatedVerifier     // optional; nil ⇒ delegated-owned (at+jwt) tokens always fail auth
 
-	delegatedLookup DelegatedIdentityLookup // external-principal store seam; defaults to store
-	billingHookURL  string                  // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
+	delegatedLookup        DelegatedIdentityLookup // external-principal store seam; defaults to store
+	billingAccountStateURL string                  // optional; trash/restore transitions (never the cancel hook)
+	billingHookURL         string                  // optional; when set, handleDeleteUserData POSTs an HMAC-signed user-deleted notice here (sidecar's /api/internal/billing/cancel)
 	// subscriberStore powers the slice-2 webhooks-as-a-resource
 	// /webhooks/{id}/test and /webhooks/{id}/deliveries endpoints.
 	// Optional — when nil, those endpoints return 404 (the rest of
@@ -607,6 +608,11 @@ func (a *API) SetDelegatedIssuer(issuer string) { a.delegatedIssuer = issuer }
 // without a billing service. The same internal_api_secret is reused
 // for the signature.
 func (a *API) SetBillingHookURL(s string) { a.billingHookURL = s }
+
+// SetBillingAccountStateURL wires the account-trash transition endpoint
+// (trash/restore). Empty derives the sibling path "account-state" of the
+// billing hook URL. See config.LimitsConfig.BillingAccountStateURL.
+func (a *API) SetBillingAccountStateURL(s string) { a.billingAccountStateURL = s }
 
 // SetDomainTeardownHook wires the per-domain SES deprovision enqueue run in the
 // account-delete transaction (decision 4 / Slice 4). Optional.
@@ -1249,8 +1255,10 @@ func (a *API) HoldForApprovalCoreThreaded(ctx context.Context, agent *identity.A
 			if err != nil {
 				return err
 			}
-			if err := a.store.StampNotifyJobIDTx(ctx, tx, m.ID, jobID); err != nil {
-				return err
+			if jobID != 0 { // 0 = no notice (the owning account is in the trash)
+				if err := a.store.StampNotifyJobIDTx(ctx, tx, m.ID, jobID); err != nil {
+					return err
+				}
 			}
 			// Preserve the caller's schedule across the hold (#815). The column is
 			// stamped in the same tx as the row so the held draft carries send_at

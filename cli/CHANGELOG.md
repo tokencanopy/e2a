@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+**Added:** `e2a account delete [--permanent] [--yes] [--json]`. By default the
+account is moved to the trash — every API key, OAuth grant, and dashboard
+session is revoked and sending stops immediately, but the account is
+restorable by signing in to the dashboard before the printed purge date (API
+keys stay revoked and custom domains must be re-verified after a restore).
+`--permanent` erases the account and all its data immediately instead —
+irreversible. Without `--yes`, the command interactively prompts for the
+account's own email address as confirmation and refuses outright (exit `2`,
+`USAGE`) when stdin is not a TTY, so unattended callers must pass `--yes`
+explicitly. Because the deleted account's API key stops working the instant
+the request succeeds, the CLI clears the stored key from
+`~/.e2a/config.json` afterward.
+
+**Added:** `e2a whoami` prints an extra `restored: <timestamp> (from trash)`
+line when the account's `restored_at` is set (i.e. it was restored from the
+trash via the dashboard).
+
 ## 2.5.1
 
 Bug fix only. No flag, output-field, or exit-code meaning changes from 2.5.0.

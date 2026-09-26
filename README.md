@@ -426,7 +426,7 @@ Report security issues privately — see [SECURITY.md](SECURITY.md) for the disc
 
 ## Data handling
 
-Live inbound and outbound message data is retained indefinitely; soft-deleted messages and inboxes are purged after 30 days by default. Outbound bodies and attachments remain retained through terminal review and delivery transitions. API keys are stored as hashes; attachments go in JSONB rows (no S3/GCS). Application logs include sender/recipient addresses (standard MTA practice) but never bodies, attachments, raw keys, or HMAC secrets. Users can self-export (`GET /v1/account/export`) and self-delete (`DELETE /v1/account?confirm=DELETE`) for GDPR Art. 15 / Art. 17 / CCPA.
+Live inbound and outbound message data is retained indefinitely; soft-deleted messages and inboxes are purged after 30 days by default. Outbound bodies and attachments remain retained through terminal review and delivery transitions. API keys are stored as hashes; attachments go in JSONB rows (no S3/GCS). Application logs include sender/recipient addresses (standard MTA practice) but never bodies, attachments, raw keys, or HMAC secrets. Users can self-export (`GET /v1/account/export`) and self-delete (`DELETE /v1/account?confirm=DELETE` — a restorable trash by default, `permanent=true` to erase at once) for GDPR Art. 15 / Art. 17 / CCPA.
 
 See [docs/data-handling.md](docs/data-handling.md) for the full retention table, log fields, user-rights endpoints, and the operator-side responsibilities (backups, TLS, at-rest encryption, log redaction, compliance).
 

@@ -58,7 +58,10 @@ type Webhook struct {
 	SigningSecretPrev          string         `json:"-"`
 	SigningSecretPrevExpiresAt *time.Time     `json:"-"`
 	Enabled                    bool           `json:"enabled"`
-	AutoDisabledAt             *time.Time     `json:"auto_disabled_at,omitempty"`
+	// OwnerTrashed is set only by GetWebhookByIDInternal: the owning account
+	// is in the trash, so its deliveries are held. Never on the API view.
+	OwnerTrashed   bool       `json:"-"`
+	AutoDisabledAt *time.Time `json:"auto_disabled_at,omitempty"`
 	// AutoDisableReason is the short, customer-facing failure reason (e.g.
 	// "HTTP 404") captured from the most recent terminal delivery error when
 	// the auto-disable sweep tripped this webhook. Sourced from
@@ -271,7 +274,19 @@ func (s *Store) GetWebhookByIDInternal(ctx context.Context, webhookID string) (*
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrWebhookNotFound
 	}
-	return w, err
+	if err != nil {
+		return nil, err
+	}
+	// Deliveries of a trashed account's webhooks are held like a disabled
+	// webhook's (snoozed, terminal after the budget): a trashed account must
+	// not keep pushing its data out. OwnerTrashed is the delivery worker's
+	// signal; Enabled is left as the customer set it, so a restore resumes.
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NOT NULL)`, w.UserID,
+	).Scan(&w.OwnerTrashed); err != nil {
+		return nil, err
+	}
+	return w, nil
 }
 
 // Storage layer surfaces enabled and disabled rows alike; filter at the handler

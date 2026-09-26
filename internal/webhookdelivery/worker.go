@@ -287,7 +287,10 @@ func (w *DeliverWorker) Work(ctx context.Context, job *river.Job[WebhookDeliverA
 		w.emitAttempt("webhook_deleted", "none", -1) // no POST happened — no duration sample
 		return river.JobCancel(fmt.Errorf("webhook %s not found: %w", d.WebhookID, err))
 	}
-	if !wh.Enabled {
+	// A trashed owner holds deliveries exactly like a disabled webhook: a
+	// trashed account must not keep pushing its data out, and a restore
+	// within the snooze budget resumes delivery.
+	if !wh.Enabled || wh.OwnerTrashed {
 		if snoozeCount(job) >= MaxDisabledSnoozes {
 			// The webhook has been disabled for the whole snooze budget —
 			// terminalize instead of waking hourly until the row's 90-day

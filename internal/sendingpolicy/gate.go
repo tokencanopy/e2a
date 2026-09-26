@@ -604,6 +604,7 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	var (
 		ownerEmail   string
 		ownerExists  bool
+		ownerTrashed bool
 		controlState = "active"
 		tenantReady  bool
 		tenantName   string
@@ -614,9 +615,13 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		// account must proceed together, while an ordinary `UPDATE users` that
 		// changes account_class or the owner address takes the conflicting
 		// lock and serializes at exactly this boundary.
+		//
+		// deleted_at is read (not filtered) because an owner-audience notice
+		// already queued for a now-trashed owner must still reach them; only
+		// customer traffic is refused for a trashed account (below).
 		err := tx.QueryRow(ctx,
-			`SELECT account_class, email FROM users WHERE id = $1 FOR SHARE`, probeAccount,
-		).Scan(&st.class, &ownerEmail)
+			`SELECT account_class, email, deleted_at IS NOT NULL FROM users WHERE id = $1 FOR SHARE`, probeAccount,
+		).Scan(&st.class, &ownerEmail, &ownerTrashed)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			ownerExists = false
@@ -627,8 +632,12 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		}
 	}
 
-	if probePurpose.isCustomer() && ownerExists {
+	if probePurpose.isCustomer() && ownerExists && !ownerTrashed {
 		controlState, tenantName, tenantReady, err = ensureAccountControl(ctx, tx, probeAccount)
+		if errors.Is(err, errAccountTrashed) {
+			ownerTrashed = true
+			err = nil
+		}
 		if err != nil {
 			return st, Decision{}, err
 		}
@@ -710,7 +719,11 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	// pause that commits first prevents authorization, and an authorization
 	// that commits first may already be entering its one SES call.
 	if op.Purpose.isCustomer() {
-		if !ownerExists {
+		// A trashed account is a deleted account for sending: its queued mail
+		// is refused terminally at consume, with no provider call. The trash
+		// wrote nothing to the control row, so a restore finds the pause
+		// state exactly as it was.
+		if !ownerExists || ownerTrashed {
 			return st, terminalHold(ReasonAccountDeleted), nil
 		}
 		if controlState == "paused" {
@@ -1562,14 +1575,21 @@ func (m *Module) RedeemProviderCall(ctx context.Context, auth ProviderAuthorizat
 	// Protection notices are exempt: the notice telling an account it was
 	// paused is SOURCED from that paused account, and it must go out.
 	if op.Purpose.isCustomer() && op.SourceAccountRef != nil {
+		// The source-deletion check rides the same unlocked, refuse-only read:
+		// a trash (or erase) that committed after ConsumeAttempt stops this
+		// call exactly as a pause does.
 		var state string
+		var live bool
 		err := tx.QueryRow(ctx,
-			`SELECT state FROM account_sending_controls WHERE user_id = $1`, *op.SourceAccountRef,
-		).Scan(&state)
+			`SELECT COALESCE(c.state, ''), u.deleted_at IS NULL
+			   FROM users u
+			   LEFT JOIN account_sending_controls c ON c.user_id = u.id
+			  WHERE u.id = $1`, *op.SourceAccountRef,
+		).Scan(&state, &live)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("sendingpolicy: read account control: %w", err)
 		}
-		if state == "paused" {
+		if !live || state == "paused" {
 			return m.invalidate(ctx, tx, auth.attempt)
 		}
 	}

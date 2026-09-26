@@ -43,6 +43,7 @@ type consentFixture struct {
 	userID       string
 	clientID     string
 	issuer       string
+	store        *identity.Store // the API's own store (for policy knobs)
 }
 
 func newConsentFixture(t *testing.T) *consentFixture {
@@ -149,6 +150,7 @@ func newConsentFixture(t *testing.T) *consentFixture {
 		userID:       user.ID,
 		clientID:     clientID,
 		issuer:       issuer,
+		store:        store,
 	}
 }
 
@@ -830,5 +832,41 @@ func TestHTTP_FullE2E_AuthorizeConsentToken(t *testing.T) {
 	}
 	if !strings.HasPrefix(body.RefreshToken, oauth.RefreshTokenPrefix) {
 		t.Errorf("refresh_token missing prefix: %q", body.RefreshToken)
+	}
+}
+
+// TestHTTP_Consent_HeldSlugIsTaken (M6e, OAuth half): a shared-domain slug an
+// abuse-closed account held is refused like a taken slug, and the tx rolls back.
+func TestHTTP_Consent_HeldSlugIsTaken(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+	kr, err := identity.ParseTombstoneKeyring("v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.store.SetTombstonePolicy(identity.TombstonePolicy{Enabled: true, Keyring: kr})
+	d, _ := kr.Digest(1, identity.TombstoneKindAgentAddress, identity.NormalizeTombstoneValue(identity.TombstoneKindAgentAddress, "heldslug@agents.e2a.dev"))
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO identity_tombstones (kind, digest, key_version, class, account_ref, expires_at)
+		VALUES ('agent_address', $1, 1, 'abuse', 'usr_gone', now() + interval '1 day')`, d); err != nil {
+		t.Fatal(err)
+	}
+
+	_, challenge := newPKCE(t)
+	form := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+	form.Set("action", "allow")
+	form.Set("agent_choice", "create_new")
+	form.Set("new_agent_slug", "heldslug")
+	resp := f.consentPOST(t, form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (slug taken)", resp.StatusCode)
+	}
+	var agents int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM agent_identities WHERE id = 'heldslug@agents.e2a.dev'`).Scan(&agents); err != nil {
+		t.Fatal(err)
+	}
+	if agents != 0 {
+		t.Fatal("a held slug was created through OAuth consent")
 	}
 }

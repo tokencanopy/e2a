@@ -229,24 +229,26 @@ export class PromiseAccountApi {
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
-     * Delete your account + all data (irreversible)
-     * @param confirm Must be the literal DELETE — this action is irreversible.
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account\'s sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Delete your account (trash by default; permanent=true erases now)
+     * @param confirm Must be the literal DELETE. The default action moves the account to the trash; permanent&#x3D;true is irreversible.
+     * @param [permanent] Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
      */
-    public deleteAccountWithHttpInfo(confirm: 'DELETE', _options?: PromiseConfigurationOptions): Promise<HttpInfo<DeleteUserDataResult>> {
+    public deleteAccountWithHttpInfo(confirm: 'DELETE', permanent?: boolean, _options?: PromiseConfigurationOptions): Promise<HttpInfo<DeleteUserDataResult>> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.deleteAccountWithHttpInfo(confirm, observableOptions);
+        const result = this.api.deleteAccountWithHttpInfo(confirm, permanent, observableOptions);
         return result.toPromise();
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
-     * Delete your account + all data (irreversible)
-     * @param confirm Must be the literal DELETE — this action is irreversible.
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account\'s sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Delete your account (trash by default; permanent=true erases now)
+     * @param confirm Must be the literal DELETE. The default action moves the account to the trash; permanent&#x3D;true is irreversible.
+     * @param [permanent] Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
      */
-    public deleteAccount(confirm: 'DELETE', _options?: PromiseConfigurationOptions): Promise<DeleteUserDataResult> {
+    public deleteAccount(confirm: 'DELETE', permanent?: boolean, _options?: PromiseConfigurationOptions): Promise<DeleteUserDataResult> {
         const observableOptions = wrapOptions(_options);
-        const result = this.api.deleteAccount(confirm, observableOptions);
+        const result = this.api.deleteAccount(confirm, permanent, observableOptions);
         return result.toPromise();
     }
 
@@ -500,7 +502,7 @@ export class PromiseAgentsApi {
     }
 
     /**
-     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
      * Delete an agent
      * @param email
      * @param confirm Must be the literal DELETE. The default action moves the agent to trash; permanent&#x3D;true is irreversible.
@@ -513,7 +515,7 @@ export class PromiseAgentsApi {
     }
 
     /**
-     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
      * Delete an agent
      * @param email
      * @param confirm Must be the literal DELETE. The default action moves the agent to trash; permanent&#x3D;true is irreversible.

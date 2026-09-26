@@ -42,9 +42,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Operations the black-box conformance suite intentionally does NOT exercise, with
 # the reason. Keep this list SHORT and justified — every entry is coverage we're
 # knowingly forgoing. Allowlisted no matter what the run targeted.
-ALWAYS_ALLOWLIST = {
-    "deleteAccount": "destructive — the suite must never delete its own account",
-}
+ALWAYS_ALLOWLIST: dict[str, str] = {}
+
+# deleteAccount runs (suites/19-account) only against a throwaway account the
+# release pipeline mints per run and passes as E2A_DISPOSABLE_API_KEY. Until a
+# run supplies that key the suite skips it, so the operation is allowlisted
+# ONLY while the key is absent; once the key is present the gate requires the
+# erase to have actually happened.
+if not os.environ.get("E2A_DISPOSABLE_API_KEY", "").strip():
+    ALWAYS_ALLOWLIST["deleteAccount"] = (
+        "destructive — runs only against a pipeline-minted disposable account "
+        "(E2A_DISPOSABLE_API_KEY), which this run did not supply"
+    )
 
 # Allowlisted ONLY on a non-production run (see target_env.py for the
 # mechanism) — REQUIRED once the run's target shards show production.

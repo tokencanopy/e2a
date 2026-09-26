@@ -121,6 +121,8 @@ func (r ReconcileResult) Total() int { return r.Enqueued + r.Rescued }
 // fan-out). Each domain supplies a ReconcileSpec + its own EnqueueXTx.
 func ReconcilePending(ctx context.Context, pool *pgxpool.Pool, spec ReconcileSpec,
 	enqueueTx func(ctx context.Context, tx pgx.Tx, id string) (int64, error)) (ReconcileResult, error) {
+	// enqueueTx returning (0, nil) means "nothing to enqueue now": the row is
+	// left unstamped and counted in neither Enqueued nor Rescued.
 
 	var res ReconcileResult
 	batch := spec.Batch
@@ -198,6 +200,13 @@ func ReconcilePending(ctx context.Context, pool *pgxpool.Pool, spec ReconcileSpe
 			newJobID, err := enqueueTx(ctx, tx, id)
 			if err != nil {
 				return err
+			}
+			// A zero id means the enqueuer deliberately enqueued nothing (e.g.
+			// the owning account is in the trash). Stamping 0 would read as
+			// "already enqueued" forever and strand the row after a restore;
+			// leave it unstamped so a later run picks it up.
+			if newJobID == 0 {
+				return nil
 			}
 			if _, err := tx.Exec(ctx, stampSQL, id, newJobID); err != nil {
 				return err

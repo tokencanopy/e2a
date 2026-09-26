@@ -43,6 +43,23 @@ func (s *Store) agentPurgeDecisionTx(
 	if purgeToken != nil {
 		return *purgeToken, true, nil
 	}
+	// Permanent deletion is held while the account's sending is paused. The
+	// account's control row is locked FOR SHARE whatever its state, so a pause
+	// that UPDATES an existing row (active → paused) waits for this
+	// transaction and cannot slip between the check and the delete. It does
+	// NOT serialize the first pause of an account that has no control row yet
+	// (the pause INSERTs it): such an account has never sent, and a pause
+	// racing in there may land after this check — the deletion then proceeds.
+	var state string
+	err = tx.QueryRow(ctx,
+		`SELECT state FROM account_sending_controls WHERE user_id = $1 FOR SHARE`, userID,
+	).Scan(&state)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", false, err
+	}
+	if state == "paused" {
+		return "", false, ErrEraseHeld
+	}
 	if err := ensureNoAgentSendInProgressTx(ctx, tx, agentID); err != nil {
 		return "", false, err
 	}

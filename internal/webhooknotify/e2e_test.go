@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/config"
@@ -300,4 +301,34 @@ func headBlock(data string) string {
 		return data[:600]
 	}
 	return data
+}
+
+// TestWarnSweepEnqueuesNoNoticeForATrashedOwner: a trashed account gets no
+// webhook-health email; the sweep's own state transition still commits.
+func TestWarnSweepEnqueuesNoNoticeForATrashedOwner(t *testing.T) {
+	h := newE2EHarness(t, "support@inbox.test")
+	ctx := context.Background()
+	user, wh := h.seedWebhook(t, "trashed")
+	h.seedDeliveries(t, wh.ID, "trashed", "pending", 1, identity.WarnThreshold)
+	if _, err := h.store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	var jobID int64 = -1
+	if err := h.store.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		jobID, err = h.jobs.EnqueueWebhookNotifyTx(ctx, tx, wh.ID, webhooknotify.KindWarning)
+		return err
+	}); err != nil {
+		t.Fatalf("enqueue for a trashed owner: %v", err)
+	}
+	if jobID != 0 {
+		t.Fatalf("a notice job (%d) was enqueued for a trashed account", jobID)
+	}
+	var jobs int
+	if err := h.pool.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'webhook_notify' AND args->>'webhook_id' = $1`, wh.ID).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 0 {
+		t.Fatalf("%d webhook_notify jobs exist for a trashed account", jobs)
+	}
 }

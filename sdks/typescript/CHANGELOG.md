@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+- **`account.delete()` now moves the account to the trash by default instead
+  of erasing it immediately.** Every API key, OAuth grant, and dashboard
+  session is revoked at once, every agent is trashed, and sending stops — but
+  the account itself is now restorable by signing in to the dashboard before
+  the receipt's `purgeAfter` (API keys stay revoked and custom domains must be
+  re-verified after a restore; the API itself has no restore call). Pass
+  `account.delete({ permanent: true })` for the previous behavior: irreversible
+  erasure right away. `DeleteUserDataResult` gains `mode` (`"trash"` |
+  `"permanent"`, open set) and `purgeAfter` (present only for `mode: "trash"`);
+  on the trash path `messagesDeleted` is always `0` and the other counts
+  describe rows trashed/revoked/unverified rather than deleted, and
+  `userDeleted` is `true` only for `mode: "permanent"`.
+
+### Added
+- **`AccountView` (`account.get()`)** gains optional `deletedAt`, `purgeAfter`,
+  and `restoredAt` (`Date`), reflecting the authenticated account's trash
+  state.
+- **`registration_refused`** joins the error-code vocabulary (403): the
+  sign-in identity behind this credential belongs to a recently deleted or
+  closed account and cannot register or be restored; retrying will not
+  succeed.
+
 ## 5.9.0
 
 ### Changed

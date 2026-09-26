@@ -401,13 +401,21 @@ limits:
   # without a provisioner — the endpoint will 503. Generate with:
   # openssl rand -hex 32. Override with E2A_INTERNAL_API_SECRET.
   internal_api_secret: ""
-  # URL the OSS server POSTs (HMAC-signed) when a user deletes their
-  # account, so an external billing service can cancel their
-  # subscription before the cascade drops the user row. Empty
-  # disables the call (self-host without billing). Example for a
-  # docker compose deployment alongside the hosted billing sidecar:
+  # URL the OSS server POSTs (HMAC-signed) when an account is PURGED, with
+  # body {"user_id": "..."}, so an external billing service can cancel the
+  # subscription. Empty disables billing notifications (self-host without
+  # billing). Example for a docker compose deployment alongside the hosted
+  # billing sidecar:
   # billing_hook_url: "http://billing:9000/api/internal/billing/cancel"
   billing_hook_url: ""
+  # Account-trash transitions go to a DIFFERENT endpoint, never the cancel
+  # hook: {"user_id": "...", "mode": "trash" | "restore"} (trash = cancel at
+  # period end, restore = revert). A billing service that predates account
+  # trash answers 404 there, which is logged and ignored. Empty derives the
+  # sibling path "account-state" of billing_hook_url
+  # (…/billing/cancel → …/billing/account-state).
+  # Override with E2A_BILLING_ACCOUNT_STATE_URL.
+  # billing_account_state_url: ""
 
 # Per-user budget shared by authenticated message, conversation, and webhook
 # reads across every agent client and dashboard session on the account. The
@@ -423,8 +431,34 @@ rate_limits:
 # knob. Minimum 1; live message data is otherwise retained indefinitely.
 # Override with
 # E2A_TRASH_RETENTION_DAYS.
+#
+# Deleting an ACCOUNT (DELETE /v1/account) also moves it to the trash: the
+# account is inert at once (keys, sessions and OAuth grants revoked, agents
+# trashed, sending stopped, domains unverified) and restorable by signing in
+# to the dashboard until it is purged. account_retention_days sets that
+# window; unset reuses retention_days, and 0 opts out (every account delete
+# erases immediately). E2A_TRASH_ACCOUNT_RETENTION_DAYS overrides it.
+#
+# identity_tombstones (hosted policy, default false): every account purge
+# holds the account's sign-in identity (login subject + email, as keyed
+# digests) for at least 30 days — two years, plus its verified domains, when
+# the account was paused for abuse — so a deleted identity cannot immediately
+# re-register, and keeps a compact deleted-account summary for the same
+# period. Requires the E2A_TOMBSTONE_KEY secret (env only):
+#   E2A_TOMBSTONE_KEY=v1:<base64 of >=32 random bytes>
+# Rotation is two-phase: add the new version while pinning the old one
+# active (E2A_TOMBSTONE_KEY=v2:...,v1:... with E2A_TOMBSTONE_KEY_ACTIVE=v1)
+# everywhere, then promote it (E2A_TOMBSTONE_KEY_ACTIVE=v2, or unset =
+# highest). A keyed digest cannot be re-keyed: keep EVERY version configured
+# for at least 2 years (the abuse hold) — dropping a version that live
+# tombstones still use makes every signup fail closed (503) until restored.
+# -inspect-tombstone-keys shows the active version, the known versions and
+# how many live tombstones depend on each.
+# E2A_TRASH_IDENTITY_TOMBSTONES=true overrides the flag.
 trash:
   retention_days: 30
+  # account_retention_days: 30
+  identity_tombstones: false
 
 # — Metrics (Prometheus) ——————————————————————————————————————————————————————
 # Off by default. When enabled, the server swaps its telemetry backend from

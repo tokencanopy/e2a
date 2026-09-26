@@ -13,6 +13,7 @@ Run: python3 -m unittest test_gates -v   (from tests/e2e-prod/)
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,8 @@ CONTACTS_OPS = {
 # synthetic target shard below is staging). The gates fail loudly if these
 # drift out of sync with the real constants — which is the point: the tests
 # pin the documented tiers, they don't weaken them.
+# deleteAccount is allowlisted only while E2A_DISPOSABLE_API_KEY is unset,
+# which is how these gate tests run (run_gate strips it below).
 COVERAGE_GATE_ALWAYS_ALLOWLIST = {"deleteAccount"}
 COVERAGE_GATE_STAGING_ONLY_ALLOWLIST = {"deleteSuppression"}
 
@@ -98,10 +101,12 @@ def load_event_types() -> set[str]:
 
 
 def run_gate(script: str, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k != "E2A_DISPOSABLE_API_KEY"}
     return subprocess.run(
         [sys.executable, str(HERE / script), *args],
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -148,6 +153,18 @@ class CoverageGateTest(unittest.TestCase):
         write_shard(self.reports, "1.json", self.full_pairs)
         proc = run_gate("coverage_gate.py", *self.args)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_delete_account_required_once_the_disposable_key_is_supplied(self) -> None:
+        # Without deleteAccount covered, a run that supplied the disposable
+        # key must fail: the allowlist entry exists only while it is absent.
+        write_shard(self.reports, "1.json", self.full_pairs)
+        env = dict(os.environ, E2A_DISPOSABLE_API_KEY="e2a_acct_synthetic")
+        proc = subprocess.run(
+            [sys.executable, str(HERE / "coverage_gate.py"), *self.args],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("deleteAccount", proc.stdout)
 
 
 class EventCoverageGateTest(unittest.TestCase):

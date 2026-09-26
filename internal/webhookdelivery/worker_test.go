@@ -837,3 +837,38 @@ func TestDeliverWorker_DisabledSnoozeCapNeverClobbersDeliveredRow(t *testing.T) 
 		t.Errorf("status = %q, want delivered preserved", d.Status)
 	}
 }
+
+// countingDeliverer counts POSTs.
+type countingDeliverer struct{ n *int }
+
+func (c countingDeliverer) Deliver(_ context.Context, _ string, _ []byte, _, _, _, _ string) webhook.DeliveryOutcome {
+	*c.n++
+	return webhook.DeliveryOutcome{Success: true, StatusCode: 200}
+}
+
+// TestDeliverWorker_TrashedOwnerIsHeldLikeDisabled: a trashed account's
+// webhooks stay enabled (a restore resumes them) but their deliveries are
+// snoozed with no POST and no attempt burned — the real store's
+// GetWebhookByIDInternal reports the owner state.
+func TestDeliverWorker_TrashedOwnerIsHeldLikeDisabled(t *testing.T) {
+	id, sub, store, wh := seed(t, "wd-trashed")
+	if _, err := store.TrashAccount(context.Background(), wh.UserID, nil); err != nil {
+		t.Fatal(err)
+	}
+	posts := 0
+	w := webhookdelivery.NewDeliverWorker(sub, countingDeliverer{n: &posts}, store)
+	if err := w.Work(context.Background(), job(id, 1)); err == nil {
+		t.Fatal("a trashed owner's delivery should snooze, got nil")
+	}
+	if posts != 0 {
+		t.Fatalf("POSTed %d times for a trashed account", posts)
+	}
+	d := statusOf(t, sub, id)
+	if d.Status != "pending" || d.Attempts != 0 {
+		t.Fatalf("held delivery mutated: status=%q attempts=%d", d.Status, d.Attempts)
+	}
+	got, err := store.GetWebhookByIDInternal(context.Background(), wh.ID)
+	if err != nil || !got.Enabled || !got.OwnerTrashed {
+		t.Fatalf("webhook after trash: %+v err=%v (want still enabled, owner trashed)", got, err)
+	}
+}

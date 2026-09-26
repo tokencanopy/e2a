@@ -1,17 +1,19 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { ApiClient } from "../harness/client.ts";
+import { isProductionTarget } from "../harness/env.ts";
 import { info, writeReport } from "../harness/report.ts";
 
 // Black-box conformance for the /v1/account surface (account ops in the
 // drift-gated api/openapi.yaml SSOT): getAccount, listApiKeys, createApiKey,
-// deleteApiKey, exportAccount, listSuppressions, deleteSuppression, and a
-// documented-skip placeholder for deleteAccount.
+// deleteApiKey, exportAccount, listSuppressions, deleteSuppression, and
+// deleteAccount against a pipeline-minted disposable account.
 //
-// SAFETY (see the deleteAccount placeholder + the createApiKey test):
-//  - deleteAccount is NEVER invoked — it would nuke the account the whole
-//    conformance run depends on, and there is no black-box way to mint a
-//    throwaway account to test it against.
+// SAFETY (see the deleteAccount test + the createApiKey test):
+//  - deleteAccount runs ONLY with E2A_DISPOSABLE_API_KEY, a throwaway account
+//    the release pipeline mints per run, and only after proving that key is a
+//    different account from the conformance account (E2A_API_KEY). It always
+//    passes permanent=true, so no throwaway account is left in the trash.
 //  - createApiKey mints a NEW key; only that new key is ever deleted. The
 //    authenticating key (E2A_API_KEY) is never touched.
 const SUITE = "19-account";
@@ -278,29 +280,81 @@ test("unauth: every account op rejects an unauthenticated caller with 401", asyn
 });
 
 // ---------------------------------------------------------------------------
-// deleteAccount — DELIBERATELY NOT EXERCISED. DELETE /v1/account permanently
-// deletes the account (and cascades all owned data) that the ENTIRE conformance
-// suite authenticates as, so it can only be run against a disposable account.
+// deleteAccount — exercised ONLY against a disposable account.
 //
-// WHY it can't be un-skipped in-suite: there is no black-box API to mint a
-// throwaway account. Account creation is Google OAuth (dashboard) or the
-// server's `-bootstrap-email` CLI run inside the container — neither reachable
-// from this API-only suite — so there is no safe target to create-then-delete.
-//
-// PATH FORWARD (a pipeline change, not a test tweak): have the staging release
-// pipeline mint a disposable account per run via `-bootstrap-email`, thread its
-// account-scoped key in as a distinct env (e.g. E2A_DISPOSABLE_API_KEY), and
-// un-skip this test to create/delete strictly against THAT key — never the
-// conformance account. Until that provisioning exists, this stays skipped.
-// This test never invokes DELETE /v1/account.
+// DELETE /v1/account would destroy the account the whole conformance run
+// authenticates as, and there is no black-box API to mint an account. The
+// release pipeline therefore mints one throwaway account per run (the server's
+// `-bootstrap-email` inside the staging container) and threads its
+// account-scoped key in as E2A_DISPOSABLE_API_KEY. This test refuses to run
+// with that key missing or equal to the conformance account, and always erases
+// with permanent=true so the run leaves nothing in the trash. (The default
+// trash receipt is covered per PR by the contract scenario
+// account_delete_trash_receipt, where the database is disposable.)
 // ---------------------------------------------------------------------------
-test(
-  "deleteAccount: DELETE /v1/account",
-  { skip: "destructive — needs a disposable account minted by the pipeline (bootstrap-email → E2A_DISPOSABLE_API_KEY); no black-box account-creation API exists, so it can never run against the conformance account" },
-  () => {
-    assert.fail("unreachable — deleteAccount is intentionally skipped and must never execute here");
-  },
-);
+const disposableKey = process.env.E2A_DISPOSABLE_API_KEY?.trim() ?? "";
+const disposableSkip = disposableKey
+  ? false
+  : "E2A_DISPOSABLE_API_KEY is not set — deleteAccount runs only against a throwaway account the release pipeline mints per run " +
+    "(-bootstrap-email with an @example.test address); the coverage gate allowlists deleteAccount while the key is absent";
+if (disposableSkip) console.log(`[${SUITE}] skipping deleteAccount: ${disposableSkip}`);
+
+interface DeleteAccountReceipt {
+  deleted: boolean;
+  mode?: string;
+  purge_after?: string;
+  user_deleted: boolean;
+  agents_deleted: number;
+}
+
+interface DomainsPage {
+  items: unknown[];
+}
+
+test("deleteAccount: DELETE /v1/account?permanent=true erases a disposable account and revokes its key", { skip: disposableSkip }, async () => {
+  const env = client.env;
+  // Defence in depth before a destructive call: the key must not be the
+  // conformance key, must resolve to a DIFFERENT account whose email is the
+  // synthetic @example.test pattern the pipeline mints, own no domains, and a
+  // production target needs its own explicit opt-in.
+  assert.notEqual(disposableKey, env.apiKey, "E2A_DISPOSABLE_API_KEY must not be the conformance key");
+  if (isProductionTarget(env.apiUrl)) {
+    assert.equal(
+      process.env.E2E_ALLOW_DISPOSABLE_DELETE_PROD,
+      "1",
+      "refusing to erase an account on a production origin without E2E_ALLOW_DISPOSABLE_DELETE_PROD=1",
+    );
+  }
+  const disposable = await client.request<AccountView>("GET", "/v1/account", { apiKey: disposableKey });
+  assert.equal(disposable.status, 200, `disposable whoami expected 200, got ${disposable.status}: ${disposable.raw.slice(0, 200)}`);
+  assert.equal(disposable.body!.scope, "account", "the disposable key must be account-scoped");
+  assert.match(disposable.body!.user.email, /@example\.test$/i, "refusing to delete: the disposable account's email is not a synthetic @example.test address");
+  const conformance = await client.get<AccountView>("/v1/account");
+  assert.equal(conformance.status, 200);
+  assert.notEqual(
+    disposable.body!.user.id,
+    conformance.body!.user.id,
+    "refusing to delete: E2A_DISPOSABLE_API_KEY resolves to the conformance account",
+  );
+  const domains = await client.request<DomainsPage>("GET", "/v1/domains", { apiKey: disposableKey });
+  assert.equal(domains.status, 200);
+  assert.equal(domains.body!.items.length, 0, "refusing to delete: the disposable account owns domains");
+
+  const r = await client.request<DeleteAccountReceipt>("DELETE", "/v1/account", {
+    apiKey: disposableKey,
+    query: { confirm: "DELETE", permanent: "true" },
+  });
+  assert.equal(r.status, 200, `deleteAccount expected 200, got ${r.status}: ${r.raw.slice(0, 200)}`);
+  const b = r.body!;
+  assert.equal(b.deleted, true, "deleted:true");
+  assert.equal(b.mode, "permanent", "permanent=true reports mode permanent");
+  assert.equal(b.user_deleted, true, "permanent erasure removes the user row");
+  assert.equal(b.purge_after, undefined, "a permanent receipt carries no purge_after");
+  info(SUITE, "deleteAccount", "erased the disposable account", { agents_deleted: b.agents_deleted });
+
+  const after = await client.request("GET", "/v1/account", { apiKey: disposableKey });
+  assert.equal(after.status, 401, `the erased account's key must stop authenticating, got ${after.status}`);
+});
 
 after(async () => {
   await writeReport(`./reports/${SUITE}.json`);

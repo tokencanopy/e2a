@@ -35,6 +35,8 @@ type recordedHookCall struct {
 	called    bool
 	body      []byte
 	signature string
+	path      string
+	paths     []string
 }
 
 // setupCoreAPIWithBillingHook wires an *agent.API to a real test DB with the
@@ -54,6 +56,8 @@ func setupCoreAPIWithBillingHook(t *testing.T, secret string, hookStatus int) (*
 		rec.body = body
 		rec.signature = r.Header.Get("X-E2A-Internal-Signature")
 		rec.called = true
+		rec.path = r.URL.Path
+		rec.paths = append(rec.paths, r.URL.Path)
 		rec.mu.Unlock()
 		w.WriteHeader(hookStatus)
 	}))
@@ -85,7 +89,7 @@ func TestDeleteUser_FiresBillingHook(t *testing.T) {
 		t.Fatalf("CreateOrGetUser: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); err != nil {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
 		t.Fatalf("DeleteUserDataCore: %v", err)
 	}
 
@@ -96,6 +100,7 @@ func TestDeleteUser_FiresBillingHook(t *testing.T) {
 	}
 	var hookBody struct {
 		UserID string `json:"user_id"`
+		Mode   string `json:"mode"`
 	}
 	if err := json.Unmarshal(rec.body, &hookBody); err != nil {
 		t.Fatalf("hook body not JSON: %v (body=%q)", err, string(rec.body))
@@ -103,11 +108,61 @@ func TestDeleteUser_FiresBillingHook(t *testing.T) {
 	if hookBody.UserID != user.ID {
 		t.Errorf("hook user_id = %q, want %q", hookBody.UserID, user.ID)
 	}
+	// The default delete is a trash: it must NEVER reach the cancel hook (an
+	// older billing service cancels on any call there). It goes to the
+	// sibling account-state path with mode=trash.
+	if hookBody.Mode != "trash" || rec.path != "/account-state" {
+		t.Errorf("trash notice = mode %q at %q, want mode trash at /account-state", hookBody.Mode, rec.path)
+	}
 	if got, want := rec.signature, expectedHMAC(secret, rec.body); got != want {
 		t.Errorf("signature mismatch:\n  got      %s\n  expected %s", got, want)
 	}
 	if _, err := store.GetUserByID(ctx, user.ID); err == nil {
-		t.Errorf("user still exists after delete; cascade should have removed them")
+		t.Errorf("trashed user still resolves through GetUserByID")
+	}
+	trashed, err := store.GetUserByIDAnyState(ctx, user.ID)
+	if err != nil || trashed.DeletedAt == nil {
+		t.Errorf("user should remain as a trashed row: %+v err=%v", trashed, err)
+	}
+}
+
+// TestDeleteUserPermanent_FiresPurgeHook: permanent=true erases the row and
+// notifies billing with mode purge — the call shape an older sidecar already
+// treats as "cancel".
+func TestDeleteUserPermanent_FiresPurgeHook(t *testing.T) {
+	secret := "test-internal-secret"
+	api, store, rec := setupCoreAPIWithBillingHook(t, secret, http.StatusNoContent)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "hook-purge@test.com", "Test", "google-hook-purge@test.com")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	res, err := api.DeleteUserDataCore(ctx, user, true)
+	if err != nil {
+		t.Fatalf("DeleteUserDataCore(permanent): %v", err)
+	}
+	if res.Mode != "permanent" || !res.UserDeleted {
+		t.Fatalf("receipt = %+v, want mode permanent + user_deleted", res)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var hookBody struct {
+		UserID string `json:"user_id"`
+		Mode   string `json:"mode"`
+	}
+	if err := json.Unmarshal(rec.body, &hookBody); err != nil {
+		t.Fatalf("hook body not JSON: %v", err)
+	}
+	// Purge keeps the ORIGINAL call shape ({"user_id"} to the cancel hook),
+	// which every billing service already treats as "cancel".
+	if hookBody.UserID != user.ID || hookBody.Mode != "" {
+		t.Fatalf("hook body = %+v, want exactly {user_id: %s}", hookBody, user.ID)
+	}
+	if rec.path != "/" {
+		t.Fatalf("purge went to %q, want the cancel hook URL itself", rec.path)
+	}
+	if _, err := store.GetUserByIDAnyState(ctx, user.ID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("user row survived a permanent delete: err=%v", err)
 	}
 }
 
@@ -122,7 +177,7 @@ func TestDeleteUser_HookFailureDoesNotBlockDeletion(t *testing.T) {
 		t.Fatalf("CreateOrGetUser: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); err != nil {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
 		t.Fatalf("DeleteUserDataCore should not error on hook failure: %v", err)
 	}
 
@@ -159,7 +214,7 @@ func TestDeleteUser_SendInProgressDoesNotNotifyBilling(t *testing.T) {
 		t.Fatalf("mark sending: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); !errors.Is(err, identity.ErrSendInProgress) {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); !errors.Is(err, identity.ErrSendInProgress) {
 		t.Fatalf("DeleteUserDataCore = %v, want ErrSendInProgress", err)
 	}
 	rec.mu.Lock()
@@ -183,10 +238,159 @@ func TestDeleteUser_NoHookConfigured(t *testing.T) {
 		t.Fatalf("CreateOrGetUser: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); err != nil {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
 		t.Fatalf("DeleteUserDataCore: %v", err)
 	}
 	if _, err := store.GetUserByID(ctx, user.ID); err == nil {
 		t.Errorf("user still exists after delete")
+	}
+}
+
+// TestTrashSurvivesAnOldBillingServiceThat404sAccountState: a billing
+// service that predates account trash answers 404 on the account-state path;
+// the trash still commits and the cancel hook is never called.
+func TestTrashSurvivesAnOldBillingServiceThat404sAccountState(t *testing.T) {
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNotFound)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "old-sidecar@test.com", "Test", "google-old-sidecar@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
+		t.Fatalf("trash failed because the billing service 404'd: %v", err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, p := range rec.paths {
+		if p != "/account-state" {
+			t.Fatalf("a trash reached %q; only /account-state may be called", p)
+		}
+	}
+	u, err := store.GetUserByIDAnyState(ctx, user.ID)
+	if err != nil || u.DeletedAt == nil {
+		t.Fatalf("account not trashed: %+v %v", u, err)
+	}
+}
+
+// TestRestoreNeverRoutesToTheCancelHook pins the routing: a restore notice
+// goes only to the account-state path — an older billing service cancels on
+// ANY call to the cancel hook.
+func TestRestoreNeverRoutesToTheCancelHook(t *testing.T) {
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNoContent)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "restore-route@test.com", "Test", "google-restore-route@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.RestoreAccountCore(ctx, user.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.paths) != 2 {
+		t.Fatalf("billing calls = %v, want trash + restore", rec.paths)
+	}
+	for _, p := range rec.paths {
+		if p != "/account-state" {
+			t.Fatalf("a trash/restore notice reached %q (the cancel hook is %q)", p, "/")
+		}
+	}
+	var body struct{ Mode string }
+	_ = json.Unmarshal(rec.body, &body)
+	if body.Mode != "restore" {
+		t.Fatalf("last notice mode = %q, want restore", body.Mode)
+	}
+}
+
+// TestDurableNoticesReplaceTheDirectPost: with the account-state hook wired
+// (the River job), trash and restore post nothing directly.
+func TestDurableNoticesReplaceTheDirectPost(t *testing.T) {
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNoContent)
+	ctx := context.Background()
+	var enqueued []string
+	store.SetAccountStateHook(func(_ context.Context, _ pgx.Tx, _ string, mode string) error {
+		enqueued = append(enqueued, mode)
+		return nil
+	})
+	user, err := store.CreateOrGetUser(ctx, "durable@test.com", "Test", "google-durable@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.RestoreAccountCore(ctx, user.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.paths) != 0 || len(enqueued) != 2 {
+		t.Fatalf("direct posts=%v enqueued=%v, want none direct and two durable notices", rec.paths, enqueued)
+	}
+}
+
+// TestPermanentDeleteOfAPausedAccountIsHeldAndTrashesNothing (M3d).
+func TestPermanentDeleteOfAPausedAccountIsHeldAndTrashesNothing(t *testing.T) {
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNoContent)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "paused-erase@test.com", "Test", "google-paused-erase@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class) VALUES ($1, 'paused', 'r', 'op', 'operator')`, user.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.DeleteUserDataCore(ctx, user, true); !errors.Is(err, identity.ErrEraseHeld) {
+		t.Fatalf("permanent delete of a paused account err = %v, want ErrEraseHeld", err)
+	}
+	u, err := store.GetUserByIDAnyState(ctx, user.ID)
+	if err != nil || u.DeletedAt != nil {
+		t.Fatalf("a held erase changed the account: %+v %v", u, err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.called {
+		t.Fatal("billing was notified for a refused erase")
+	}
+}
+
+// TestPlainDeleteOfAPausedAccountIsRefusedWhenTrashIsDisabled: with account
+// trash disabled every delete is an erase, so a paused account's plain delete
+// is refused (409 erase_held) rather than erased — there is no trash window
+// to hold it in.
+func TestPlainDeleteOfAPausedAccountIsRefusedWhenTrashIsDisabled(t *testing.T) {
+	saved := identity.AccountTrashRetention
+	identity.AccountTrashRetention = 0
+	t.Cleanup(func() { identity.AccountTrashRetention = saved })
+
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNoContent)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "no-trash-paused@test.com", "Test", "google-no-trash-paused@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class) VALUES ($1, 'paused', 'r', 'op', 'billing')`, user.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.DeleteUserDataCore(ctx, user, false); !errors.Is(err, identity.ErrEraseHeld) {
+		t.Fatalf("plain delete with trash disabled on a paused account err = %v, want ErrEraseHeld", err)
+	}
+	u, err := store.GetUserByIDAnyState(ctx, user.ID)
+	if err != nil || u.DeletedAt != nil {
+		t.Fatalf("the refused delete changed the account: %+v %v", u, err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.called {
+		t.Fatal("billing was notified for a refused delete")
 	}
 }

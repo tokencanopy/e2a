@@ -50,7 +50,7 @@ func TestDeleteAccountConfirmed(t *testing.T) {
 
 func TestDeleteAccountSendInProgress(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.DeleteUserData = func(context.Context, *identity.User) (*identity.DeleteUserDataResult, error) {
+		d.DeleteUserData = func(context.Context, *identity.User, bool) (*identity.DeleteUserDataResult, error) {
 			return nil, identity.ErrSendInProgress
 		}
 	})

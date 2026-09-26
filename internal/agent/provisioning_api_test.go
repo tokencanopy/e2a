@@ -419,3 +419,57 @@ func TestProvisionUserDisabledMetricIsPublicAndIndependentlyMatchable(t *testing
 		t.Fatalf("provisioning metric = %+v, want %+v", got, want)
 	}
 }
+
+// TestProvisionUser_ReplayOnTrashedAccountIs409AccountTrashed: the hub's
+// replay of a ref whose account is in the trash gets a distinct terminal code
+// and writes nothing — restore is interactive only.
+func TestProvisionUser_ReplayOnTrashedAccountIs409AccountTrashed(t *testing.T) {
+	secret := "provision-secret-trashed"
+	server, store, metrics := setupAPIWithProvisioningMetrics(t, true, secret)
+	body := []byte(`{"external_ref":"ext_ref_trashed","email":"trashed@example.com"}`)
+	resp := provisionRequest(t, server, secret, body)
+	created := readProvisionResponse(t, resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	if _, err := store.TrashAccount(context.Background(), created["user_id"], nil); err != nil {
+		t.Fatal(err)
+	}
+	resp = provisionRequest(t, server, secret, body)
+	got := readProvisionResponse(t, resp)
+	if resp.StatusCode != http.StatusConflict || got["error"] != "account_trashed" {
+		t.Fatalf("replay = %d %v, want 409 account_trashed", resp.StatusCode, got)
+	}
+	if ev := metrics.last(t); ev.outcome != "rejected" || ev.trust != "authenticated" {
+		t.Fatalf("metric = %+v", ev)
+	}
+	u, err := store.GetUserByIDAnyState(context.Background(), created["user_id"])
+	if err != nil || u.DeletedAt == nil {
+		t.Fatalf("replay restored or removed the account: %+v err=%v", u, err)
+	}
+}
+
+// TestProvisionUser_TombstonedIdentityIs403RegistrationRefused.
+func TestProvisionUser_TombstonedIdentityIs403RegistrationRefused(t *testing.T) {
+	secret := "provision-secret-tomb"
+	server, store := setupAPIWithProvisioning(t, true, secret)
+	kr, err := identity.ParseTombstoneKeyring("v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetTombstonePolicy(identity.TombstonePolicy{Enabled: true, Keyring: kr})
+	body := []byte(`{"external_ref":"ext_ref_tomb","email":"tomb@example.com"}`)
+	resp := provisionRequest(t, server, secret, body)
+	created := readProvisionResponse(t, resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	if _, err := store.EraseAccount(context.Background(), created["user_id"], nil); err != nil {
+		t.Fatal(err)
+	}
+	resp = provisionRequest(t, server, secret, body)
+	got := readProvisionResponse(t, resp)
+	if resp.StatusCode != http.StatusForbidden || got["error"] != "registration_refused" {
+		t.Fatalf("re-provision = %d %v, want 403 registration_refused", resp.StatusCode, got)
+	}
+}

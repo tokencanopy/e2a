@@ -17,6 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
 from e2a.v1.generated.models.account_user_view import AccountUserView
@@ -31,15 +32,18 @@ class AccountView(BaseModel):
     AccountView
     """ # noqa: E501
     agent_email: Optional[StrictStr] = None
+    deleted_at: Optional[datetime] = Field(default=None, description="When the account was moved to the trash. Absent for a live account.")
     limits: LimitsCapsView
     plan_code: StrictStr
+    purge_after: Optional[datetime] = Field(default=None, description="When a trashed account becomes eligible for permanent purge. Absent for a live account.")
+    restored_at: Optional[datetime] = Field(default=None, description="When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore.")
     scope: StrictStr = Field(description="Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.")
     sending_access: Optional[SendingAccessView] = Field(default=None, description="External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable.")
     upgrade_url: StrictStr
     usage: LimitsUsageView
     user: AccountUserView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "limits", "plan_code", "scope", "sending_access", "upgrade_url", "usage", "user"]
+    __properties: ClassVar[List[str]] = ["agent_email", "deleted_at", "limits", "plan_code", "purge_after", "restored_at", "scope", "sending_access", "upgrade_url", "usage", "user"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -112,8 +116,11 @@ class AccountView(BaseModel):
 
         _obj = cls.model_validate({
             "agent_email": obj.get("agent_email"),
+            "deleted_at": obj.get("deleted_at"),
             "limits": LimitsCapsView.from_dict(obj["limits"]) if obj.get("limits") is not None else None,
             "plan_code": obj.get("plan_code"),
+            "purge_after": obj.get("purge_after"),
+            "restored_at": obj.get("restored_at"),
             "scope": obj.get("scope"),
             "sending_access": SendingAccessView.from_dict(obj["sending_access"]) if obj.get("sending_access") is not None else None,
             "upgrade_url": obj.get("upgrade_url"),

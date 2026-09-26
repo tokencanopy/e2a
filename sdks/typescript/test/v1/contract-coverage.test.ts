@@ -59,8 +59,10 @@ const SEEDED =
 const NOT_CONTRACT_TESTED: Record<string, string> = {
   // -- paths the contract server genuinely cannot exercise ------------------
   "account.delete":
-    "irreversibly cascades the ONE shared contract-server account every suite " +
-    "in this vitest run depends on; mirrors the live gate's identical entry",
+    "destructive even in its default trash mode (revokes every key/grant/" +
+    "session on the ONE shared contract-server account every suite in this " +
+    "vitest run depends on, and { permanent: true } erases irreversibly); " +
+    "mirrors the live gate's identical entry",
   "account.suppressions.delete":
     "an account-level suppression is only created by real SES bounce/complaint " +
     "feedback, which the contract server does not run — nothing can exist to delete",

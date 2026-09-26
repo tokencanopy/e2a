@@ -116,7 +116,7 @@ func (s *Server) registerAgentWrites() {
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/{email}",
 		Summary:     "Delete an agent",
-		Description: "Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.",
+		Description: "Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account's sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.",
 		Tags:        []string{"agents"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteAgent)
@@ -232,6 +232,10 @@ func (s *Server) handleDeleteAgent(ctx context.Context, in *deleteAgentInput) (*
 		if errors.Is(err, identity.ErrSendInProgress) {
 			return nil, NewError(http.StatusConflict, "send_in_progress",
 				"agent has an outbound send in progress; retry permanent deletion after it finishes")
+		}
+		if errors.Is(err, identity.ErrEraseHeld) {
+			return nil, NewError(http.StatusConflict, "erase_held",
+				"sending is paused for this account, so permanent deletion is held; move the agent to the trash instead")
 		}
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete agent")
 	}
@@ -402,6 +406,12 @@ func (s *Server) handleCreateAgent(ctx context.Context, in *createAgentInput) (*
 			}
 			return nil, NewError(http.StatusPaymentRequired, "limit_exceeded", limErr.Error()).
 				WithDetails(LimitExceededDetails{Resource: "agents", Limit: int64(limErr.Limit), Current: int64(limErr.Current)})
+		}
+		if errors.Is(err, identity.ErrAgentAddressHeld) {
+			return nil, NewError(http.StatusConflict, "agent_taken", "agent already registered for this domain")
+		}
+		if errors.Is(err, identity.ErrTombstoneKeyUnavailable) {
+			return nil, NewError(http.StatusServiceUnavailable, "internal_error", "agent registration is temporarily unavailable; retry later")
 		}
 		if isUniqueViolation(err) {
 			// Soft-delete (migration 063) keeps the trashed row's PK, so the

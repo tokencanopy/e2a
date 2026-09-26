@@ -244,6 +244,65 @@ def test_messages_delete_blocks_and_returns_receipt(httpx_mock):
     assert "confirm=DELETE" in str(req.url)
 
 
+def test_account_delete_blocks_and_trashes_by_default(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "trash",
+            "purge_after": "2026-10-26T00:00:00Z",
+            "messages_deleted": 0,
+            "usage_events_deleted": 0,
+            "usage_summaries_deleted": 0,
+            "agents_deleted": 3,
+            "domains_deleted": 1,
+            "api_keys_deleted": 2,
+            "sessions_deleted": 1,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": False,
+        }
+    )
+    with _client() as c:
+        res = c.account.delete()
+    assert res.deleted is True
+    assert res.mode == "trash"
+    assert res.user_deleted is False
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "/v1/account" in str(req.url)
+    assert "confirm=DELETE" in str(req.url)
+    assert "permanent" not in req.url.params
+
+
+def test_account_delete_blocks_and_returns_permanent_receipt(httpx_mock):
+    # The keyword-only `permanent` flag survives the sync bridge, same as
+    # messages.delete above.
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "permanent",
+            "messages_deleted": 42,
+            "usage_events_deleted": 5,
+            "usage_summaries_deleted": 1,
+            "agents_deleted": 3,
+            "domains_deleted": 1,
+            "api_keys_deleted": 2,
+            "sessions_deleted": 1,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": True,
+        }
+    )
+    with _client() as c:
+        res = c.account.delete(permanent=True)
+    assert res.mode == "permanent"
+    assert res.user_deleted is True
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert req.url.params["permanent"] == "true"
+    assert "confirm=DELETE" in str(req.url)
+
+
 def test_messages_get_lifecycle_sync_facade_forwards_identical_arguments(httpx_mock):
     httpx_mock.add_response(
         json={

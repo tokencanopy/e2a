@@ -7,6 +7,7 @@ import { useAuth } from "../components/AuthProvider";
 import { SWRProvider } from "../components/swr/SWRProvider";
 import { PendingPollingOwner } from "../components/swr/PendingPollingOwner";
 import { SignInLinks } from "../components/SignInLinks";
+import { RestoredNotice } from "../components/RestoredNotice";
 import { Sidebar } from "../components/loft/Sidebar";
 
 const FOCUSABLE_SELECTOR =
@@ -271,7 +272,10 @@ export default function AppLayout({
           </button>
         </div>
 
-        <div className="flex-1 overflow-auto">{children}</div>
+        <div className="flex-1 overflow-auto">
+          <RestoredNotice />
+          {children}
+        </div>
       </main>
     </div>
     </SWRProvider>

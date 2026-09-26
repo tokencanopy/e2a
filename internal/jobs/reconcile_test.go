@@ -469,3 +469,36 @@ func TestReconcilePending_BadSpecReturnsError(t *testing.T) {
 		t.Errorf("enqueueTx called with %v, want no calls on scan error", enq.ids)
 	}
 }
+
+// TestReconcilePending_ZeroJobIDLeavesRowUnstamped: an enqueuer that
+// deliberately enqueues nothing (returns 0, e.g. the hold's owning account is
+// in the trash) must not stamp 0 onto the row — that would read as "already
+// enqueued" forever and the hold would never be notified after a restore.
+func TestReconcilePending_ZeroJobIDLeavesRowUnstamped(t *testing.T) {
+	pool := testutil.TestDB(t)
+	spec := reconcileScratch(t, pool, "jobs_reconcile_zero")
+	ctx := context.Background()
+	insertReconcileRow(t, pool, spec.Table, "held", "pending", nil)
+
+	skip := true
+	enqueue := func(_ context.Context, _ pgx.Tx, _ string) (int64, error) {
+		if skip {
+			return 0, nil
+		}
+		return 3001, nil
+	}
+	res, err := jobs.ReconcilePending(ctx, pool, spec, enqueue)
+	if err != nil || res.Total() != 0 {
+		t.Fatalf("zero-id pass: total=%d err=%v, want 0 enqueued", res.Total(), err)
+	}
+	if got := rowJobID(t, pool, spec.Table, "held"); got != nil {
+		t.Fatalf("a zero job id was stamped (%d); the row would never be notified", *got)
+	}
+	skip = false // e.g. the account was restored
+	if res, err := jobs.ReconcilePending(ctx, pool, spec, enqueue); err != nil || res.Total() != 1 {
+		t.Fatalf("pass after restore: total=%d err=%v", res.Total(), err)
+	}
+	if got := rowJobID(t, pool, spec.Table, "held"); got == nil || *got != 3001 {
+		t.Fatalf("row job id after restore = %v, want 3001", got)
+	}
+}

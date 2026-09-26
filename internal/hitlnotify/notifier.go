@@ -134,7 +134,7 @@ func (n *Notifier) compose(ctx context.Context, msg *identity.Message, agent *id
 		return outbound.Envelope{}, fmt.Errorf("notify: approval_expires_at is nil on msg %s", msg.ID)
 	}
 
-	owner, err := n.store.GetUserByID(ctx, agent.UserID)
+	owner, err := n.store.GetUserByIDAnyState(ctx, agent.UserID)
 	if err != nil {
 		return outbound.Envelope{}, fmt.Errorf("notify: lookup owner: %w", err)
 	}

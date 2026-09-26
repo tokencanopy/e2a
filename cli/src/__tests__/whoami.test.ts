@@ -67,6 +67,26 @@ describe("whoami command", () => {
     expect(output).toContain("agent: tether@agents.e2a.dev");
   });
 
+  it("shows a restored line when restoredAt is present", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({ restoredAt: new Date("2026-09-20T00:00:00Z") }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("restored: 2026-09-20T00:00:00.000Z (from trash)");
+  });
+
+  it("says nothing about restoration when restoredAt is absent", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount());
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("restored:");
+  });
+
   it("emits raw JSON with --json", async () => {
     const account = makeAccount();
     mockAccountGet.mockResolvedValue(account);

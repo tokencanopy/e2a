@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,15 +40,16 @@ type rowQuerier interface {
 // Returns (nil, nil) when no mapping exists — the caller's 401, kept
 // distinct from a store failure (err != nil), the caller's 503. It never
 // looks up by subject alone, matches by email, trusts token profile
-// claims, or writes.
+// claims, or writes. A trashed account reads as unmapped (nil, nil): its
+// delegated tokens stop authenticating the moment the trash commits.
 func (s *Store) GetUserByExternalPrincipal(ctx context.Context, issuer, subject string) (*User, error) {
 	u := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class
+		`SELECT u.id, u.email, u.name, u.google_subject, u.created_at, u.account_class, u.restored_at
 		 FROM external_principal_mappings m
 		 JOIN users u ON u.id = m.user_id
-		 WHERE m.issuer = $1 AND m.subject = $2`, issuer, subject,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass)
+		 WHERE m.issuer = $1 AND m.subject = $2 AND u.deleted_at IS NULL`, issuer, subject,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.GoogleSubject, &u.CreatedAt, &u.AccountClass, &u.RestoredAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -62,8 +64,41 @@ func (s *Store) GetUserByExternalPrincipal(ctx context.Context, issuer, subject 
 // already attached to another user is ErrExternalPrincipalConflict; an
 // unknown user is ErrExternalPrincipalUserNotFound. It never touches the
 // user row itself (email, name, google_subject).
+//
+// A trashed user is refused with ErrAccountTrashed, and a subject held by a
+// live identity tombstone with ErrRegistrationRefused — checked inside the
+// insert transaction after the digest advisory lock.
 func (s *Store) AttachExternalPrincipal(ctx context.Context, issuer, subject, userID string) (bool, error) {
-	return attachExternalPrincipal(ctx, s.pool, issuer, subject, userID)
+	var created bool
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
+		var deletedAt *time.Time
+		err := tx.QueryRow(ctx, `SELECT deleted_at FROM users WHERE id = $1 FOR SHARE`, userID).Scan(&deletedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrExternalPrincipalUserNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if deletedAt != nil {
+			return ErrAccountTrashed
+		}
+		var mapped bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM external_principal_mappings WHERE issuer = $1 AND subject = $2)`,
+			issuer, subject).Scan(&mapped); err != nil {
+			return err
+		}
+		if !mapped {
+			if err := s.checkTombstonesTx(ctx, tx, []TombstoneIdentifier{
+				{Kind: TombstoneKindLoginSubject, Value: externalPrincipalSubject(issuer, subject)},
+			}); err != nil {
+				return err
+			}
+		}
+		created, err = attachExternalPrincipal(ctx, tx, issuer, subject, userID)
+		return err
+	})
+	return created, err
 }
 
 func attachExternalPrincipal(ctx context.Context, q rowQuerier, issuer, subject, userID string) (bool, error) {

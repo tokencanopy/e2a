@@ -285,7 +285,7 @@ describe("RetryHttpLibrary per-operation gating", () => {
     expect(fake.seenKeys[0]).toBeUndefined(); // no useless key the server would ignore
   });
 
-  it("does NOT retry DELETE /v1/account (irreversible)", async () => {
+  it("does NOT retry DELETE /v1/account (it revokes the calling key)", async () => {
     const fake = new FakeHttp([{ status: 500 }]);
     const retry = new RetryHttpLibrary(fake, { sleep: noSleep });
     const resp = await retry
