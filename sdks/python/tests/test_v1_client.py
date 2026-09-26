@@ -453,6 +453,70 @@ async def test_agents_delete_sends_confirm_and_returns_receipt(httpx_mock):
 
 
 @pytest.mark.anyio
+async def test_account_delete_trashes_by_default(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "trash",
+            "purge_after": "2026-10-26T00:00:00Z",
+            "messages_deleted": 0,
+            "usage_events_deleted": 0,
+            "usage_summaries_deleted": 0,
+            "agents_deleted": 3,
+            "domains_deleted": 1,
+            "api_keys_deleted": 2,
+            "sessions_deleted": 1,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": False,
+        }
+    )
+    async with _client() as c:
+        res = await c.account.delete()
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "/v1/account" in str(req.url)
+    assert "confirm=DELETE" in str(req.url)
+    # The trash path is reversible, so `permanent` is omitted entirely.
+    assert "permanent" not in req.url.params
+    assert res.deleted is True
+    assert res.mode == "trash"
+    assert res.purge_after is not None
+    assert res.messages_deleted == 0
+    assert res.user_deleted is False
+
+
+@pytest.mark.anyio
+async def test_account_delete_permanent_sends_confirm_and_permanent(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "permanent",
+            "messages_deleted": 42,
+            "usage_events_deleted": 5,
+            "usage_summaries_deleted": 1,
+            "agents_deleted": 3,
+            "domains_deleted": 1,
+            "api_keys_deleted": 2,
+            "sessions_deleted": 1,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": True,
+        }
+    )
+    async with _client() as c:
+        res = await c.account.delete(permanent=True)
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert req.url.params["permanent"] == "true"
+    # The typed call is the confirmation; the SDK supplies the raw-API guard.
+    assert "confirm=DELETE" in str(req.url)
+    assert res.mode == "permanent"
+    assert res.user_deleted is True
+    assert res.purge_after is None
+
+
+@pytest.mark.anyio
 async def test_agents_list_autopager(httpx_mock):
     httpx_mock.add_response(
         json={"items": [_valid(AgentView, id="ag_1", email="bot@test.dev")], "next_cursor": None}

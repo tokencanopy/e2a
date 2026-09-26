@@ -200,6 +200,10 @@ _CODE_MAP: "dict[str, tuple[type[E2AError], bool]]" = {
     # retryable: nothing was queued and retrying the same request will not
     # succeed. Experimental.
     "external_sending_not_enabled": (E2APermissionError, False),
+    # 403 — the sign-in identity behind this credential belongs to a recently
+    # deleted or closed account and cannot register or be restored (account
+    # trash / purge). Not retryable — the same identity will refuse again.
+    "registration_refused": (E2APermissionError, False),
     # 404/410 family — also covers *_not_found via the suffix check in _resolve.
     "not_found": (E2ANotFoundError, False),
     "gone": (E2ANotFoundError, False),

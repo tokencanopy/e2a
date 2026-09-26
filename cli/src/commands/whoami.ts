@@ -36,6 +36,11 @@ export async function whoami(opts: WhoamiOptions): Promise<void> {
     `usage: ${account.usage.agents}/${account.limits.maxAgents} agents, ` +
       `${account.usage.messagesMonth}/${account.limits.maxMessagesMonth} messages this month\n`,
   );
+  // Additive, optional: only ever present right after a dashboard restore
+  // from the trash, so most accounts print nothing new here.
+  if (account.restoredAt) {
+    process.stdout.write(`restored: ${account.restoredAt.toISOString()} (from trash)\n`);
+  }
 
   // Beta, additive: `sending_access` is omitted entirely on a deployment that
   // doesn't run this control, so say nothing rather than printing a

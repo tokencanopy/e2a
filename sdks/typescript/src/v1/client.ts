@@ -932,11 +932,22 @@ class AccountResource {
       this.api.getAccountMetrics(params.start, params.end, params.bucket, params.groupBy),
     );
   }
-  delete(): Promise<DeleteUserDataResult> {
-    // Irreversible. The typed .delete() call is the confirmation; the SDK
-    // supplies the ?confirm=DELETE guard the raw API requires. Returns the
-    // deletion receipt ({deleted:true} plus per-table cascade counts).
-    return call(() => this.api.deleteAccount("DELETE"));
+  /**
+   * Move the account to the trash by default (restorable by signing in to the
+   * dashboard before the receipt's `purgeAfter` — API keys stay revoked and
+   * custom domains must be re-verified after a restore; the API itself has no
+   * restore call). Every API key, OAuth grant, and dashboard session is
+   * revoked at once, every agent is trashed, and sending stops immediately —
+   * only the eventual purge is deferred. Pass `{ permanent: true }` to erase
+   * the account and all its data immediately instead — irreversible. The
+   * typed .delete() call is itself the confirmation; the SDK supplies the
+   * ?confirm=DELETE guard the raw API requires. Returns the deletion receipt
+   * (`mode` is `"trash"` or `"permanent"`; `messagesDeleted` is 0 on the trash
+   * path, with the other counts describing rows trashed/revoked/unverified
+   * rather than deleted; `userDeleted` is true only for `mode: "permanent"`).
+   */
+  delete(opts: { permanent?: boolean } = {}): Promise<DeleteUserDataResult> {
+    return call(() => this.api.deleteAccount("DELETE", opts.permanent || undefined));
   }
   /**
    * Beta: this account's most recent request for external sending access

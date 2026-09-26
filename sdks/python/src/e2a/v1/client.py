@@ -1427,13 +1427,35 @@ class AccountResource:
             )
         )
 
-    async def delete(self) -> DeleteUserDataResult:
-        # Deliberately NOT retried (unlike the other DELETEs): account deletion is
-        # irreversible, so a transient failure should surface loudly to the caller
-        # rather than silently re-firing. The typed .delete() call is the
-        # confirmation; the SDK supplies the ?confirm=DELETE guard.
+    async def delete(self, *, permanent: bool = False) -> DeleteUserDataResult:
+        """Move the account to the trash by default.
+
+        A trashed account is restorable only by signing in to the dashboard
+        before the receipt's ``purge_after`` — API keys stay revoked and
+        custom domains must be re-verified after a restore; the API itself
+        has no restore call. Every API key, OAuth grant, and dashboard
+        session is revoked at once, every agent is trashed, and sending
+        stops immediately — only the eventual purge is deferred.
+
+        Pass ``permanent=True`` to erase the account and all its data
+        immediately instead — irreversible. The typed ``.delete()`` call is
+        itself the confirmation; the SDK supplies the ``?confirm=DELETE``
+        guard the raw API requires.
+
+        Returns the deletion receipt: ``mode`` is ``"trash"`` or
+        ``"permanent"``; ``messages_deleted`` is 0 on the trash path (the
+        other counts describe rows trashed/revoked/unverified, not deleted);
+        ``user_deleted`` is true only for ``mode="permanent"``.
+
+        Deliberately NOT retried (unlike the other DELETEs): even the
+        default trash mode revokes every key/grant/session at once, and a
+        transient failure should surface loudly to the caller rather than
+        silently re-firing.
+        """
         return await self._c._write_unsafe(
-            lambda h: self._api.delete_account(confirm="DELETE", _headers=h)
+            lambda h: self._api.delete_account(
+                confirm="DELETE", permanent=permanent or None, _headers=h
+            )
         )
 
     async def get_sending_access_request(self) -> SendingAccessRequestView:

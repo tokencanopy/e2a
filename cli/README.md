@@ -66,8 +66,10 @@ e2a keys create --agent bot@acme.com
 Show the key identity: user, scope, bound agent, plan. When the deployment
 reports `sending_access` (beta — see `e2a sending-access` below) and this
 account is currently restricted to the narrow shared-identity allowlist, an
-extra `External sending: restricted (...)` line points at how to recover.
-`--json` always includes the raw `sending_access` object when present.
+extra `External sending: restricted (...)` line points at how to recover. If
+the account was restored from the trash (`e2a account delete` below), an
+extra `restored: <timestamp> (from trash)` line appears. `--json` always
+includes the raw `sending_access` object when present.
 
 ```bash
 e2a whoami
@@ -180,6 +182,32 @@ e2a keys delete <key-id>
 ```
 
 `create` and `list` accept `--json` (print the raw JSON response).
+
+### `e2a account`
+
+Delete your account (requires an account-scoped key).
+
+```bash
+e2a account delete                    # moves the account to the trash (interactive confirmation)
+e2a account delete --yes              # same, non-interactive (scripts/CI)
+e2a account delete --permanent --yes  # erase the account and all its data immediately — irreversible
+```
+
+By default the account is moved to the trash: every API key, OAuth grant, and
+dashboard session is revoked and sending stops immediately, but the account is
+restorable by signing in to the dashboard before the printed purge date (API
+keys stay revoked and custom domains must be re-verified after a restore).
+Pass `--permanent` to erase the account and all its data right away instead —
+this cannot be undone.
+
+Without `--yes`, the command prompts you to type the account's own email
+address to confirm; it refuses immediately (exit `2`) when stdin is not a TTY,
+so an unattended script must pass `--yes` explicitly. Because the deleted
+account's API key stops working the instant the request succeeds, the CLI
+clears the stored key from `~/.e2a/config.json` afterward — run `e2a login`
+again against a different account if you need the CLI to keep working.
+
+`--json` prints the raw deletion receipt instead of the human summary.
 
 ### `e2a protection`
 
