@@ -34,9 +34,11 @@ func main() {
 	// account, seeded already over testutil.OverCapLimits. Scenarios that
 	// assert quota enforcement run as one of those accounts; CI sources this
 	// file with `set -a`, so the runners pick both up with no workflow change.
+	// E2A_TEST_RESTRICTED_API_KEY authenticates the only account inside the
+	// external-sending-access cohort (see testutil.ContractExternalAccessCutoff).
 	envContent := fmt.Sprintf(
-		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\n",
-		srv.BaseURL, srv.APIKey, srv.CappedAPIKey, srv.OverCapAPIKey,
+		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\nE2A_TEST_RESTRICTED_API_KEY=%s\n",
+		srv.BaseURL, srv.APIKey, srv.CappedAPIKey, srv.OverCapAPIKey, srv.RestrictedAPIKey,
 	)
 	if envFile != "" {
 		if err := os.WriteFile(envFile, []byte(envContent), 0o600); err != nil {
