@@ -11,6 +11,8 @@ Runs against a live test server. Requires env vars:
     account, seeded already over its plan caps. The scenario proving the 402
     envelope's `current` field runs as that account and skips without it (a
     deployed staging target has no over-cap account to offer).
+  E2A_TEST_DISPOSABLE_{TRASH,ERASE}_API_KEY: optional; the contract server's
+    throwaway accounts the account-deletion scenarios delete (skip if unset).
   E2A_TEST_RESTRICTED_API_KEY: optional; key for the contract server's fourth
     account, the only one inside the external-sending-access enforcement
     cohort. Scenarios asserting that control (and the request-intake form,
@@ -59,6 +61,11 @@ API_KEY = os.environ.get("E2A_TEST_API_KEY", "")
 CAPPED_API_KEY = os.environ.get("E2A_TEST_CAPPED_API_KEY", "")
 OVERCAP_API_KEY = os.environ.get("E2A_TEST_OVERCAP_API_KEY", "")
 RESTRICTED_API_KEY = os.environ.get("E2A_TEST_RESTRICTED_API_KEY", "")
+# The contract server's two throwaway accounts that exist only to be deleted by
+# the account-deletion scenarios (once each per server). Absent against a
+# deployed server — those scenarios then skip.
+DISPOSABLE_TRASH_API_KEY = os.environ.get("E2A_TEST_DISPOSABLE_TRASH_API_KEY", "")
+DISPOSABLE_ERASE_API_KEY = os.environ.get("E2A_TEST_DISPOSABLE_ERASE_API_KEY", "")
 
 # tests/test_contract.py -> sdks/python/tests/ -> sdks/python/ -> sdks/ -> repo root
 SCENARIOS_PATH = Path(__file__).resolve().parents[3] / "tests" / "contract" / "scenarios.yaml"
@@ -150,6 +157,8 @@ STORE_ACTIONS = {"inject_message", "verify_and_retry"}
 CAPPED_KEY_PLACEHOLDER = "{capped_api_key}"
 OVERCAP_KEY_PLACEHOLDER = "{overcap_api_key}"
 RESTRICTED_KEY_PLACEHOLDER = "{restricted_api_key}"
+DISPOSABLE_TRASH_KEY_PLACEHOLDER = "{disposable_trash_api_key}"
+DISPOSABLE_ERASE_KEY_PLACEHOLDER = "{disposable_erase_api_key}"
 
 
 def _scenario_uses_placeholder(sc: dict[str, Any], placeholder: str) -> bool:
@@ -234,6 +243,10 @@ class Runner:
             self.vars["overcap_api_key"] = OVERCAP_API_KEY
         if RESTRICTED_API_KEY:
             self.vars["restricted_api_key"] = RESTRICTED_API_KEY
+        if DISPOSABLE_TRASH_API_KEY:
+            self.vars["disposable_trash_api_key"] = DISPOSABLE_TRASH_API_KEY
+        if DISPOSABLE_ERASE_API_KEY:
+            self.vars["disposable_erase_api_key"] = DISPOSABLE_ERASE_API_KEY
         self._http = httpx.Client(base_url=base_url, timeout=30)
 
     def close(self):
@@ -1277,6 +1290,12 @@ def test_contract_scenario(scenario):
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_OVERCAP_API_KEY")
     if scenario_needs_restricted_account(scenario) and not RESTRICTED_API_KEY:
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_RESTRICTED_API_KEY")
+    # Account-deletion scenarios destroy their account; they run only against
+    # the contract server's seeded disposable accounts.
+    if _scenario_uses_placeholder(scenario, DISPOSABLE_TRASH_KEY_PLACEHOLDER) and not DISPOSABLE_TRASH_API_KEY:
+        pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_DISPOSABLE_TRASH_API_KEY")
+    if _scenario_uses_placeholder(scenario, DISPOSABLE_ERASE_KEY_PLACEHOLDER) and not DISPOSABLE_ERASE_API_KEY:
+        pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_DISPOSABLE_ERASE_API_KEY")
 
     runner = Runner(BASE_URL, API_KEY, scenario)
     try:

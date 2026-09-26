@@ -12,6 +12,8 @@
  *     account, seeded already over its plan caps. The scenario proving the
  *     402 envelope's `current` field runs as that account and skips without
  *     it (a deployed staging target has no over-cap account to offer).
+ *   E2A_TEST_DISPOSABLE_{TRASH,ERASE}_API_KEY: optional; the contract server's
+ *     throwaway accounts the account-deletion scenarios delete (skip if unset).
  *   E2A_TEST_RESTRICTED_API_KEY: optional; key for the contract server's
  *     fourth account, the ONLY one inside the external-sending-access
  *     enforcement cohort (a far-future cohort cutoff keeps every other
@@ -56,6 +58,11 @@ const OVERCAP_API_KEY = process.env.E2A_TEST_OVERCAP_API_KEY;
 // account inside the external-sending-access enforcement cohort. Absent when
 // the runner is pointed at a deployed server, which has no such account.
 const RESTRICTED_API_KEY = process.env.E2A_TEST_RESTRICTED_API_KEY;
+// The contract server's two throwaway accounts that exist only to be deleted
+// by the account-deletion scenarios (once each per server). Absent against a
+// deployed server — those scenarios then skip.
+const DISPOSABLE_TRASH_API_KEY = process.env.E2A_TEST_DISPOSABLE_TRASH_API_KEY;
+const DISPOSABLE_ERASE_API_KEY = process.env.E2A_TEST_DISPOSABLE_ERASE_API_KEY;
 
 /**
  * True when the scenario authenticates as `placeholder`'s account anywhere.
@@ -85,6 +92,14 @@ function scenarioNeedsOverCapAccount(sc: Scenario): boolean {
 
 function scenarioNeedsRestrictedAccount(sc: Scenario): boolean {
   return scenarioUsesPlaceholder(sc, "{restricted_api_key}");
+}
+
+function scenarioNeedsDisposableTrashAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{disposable_trash_api_key}");
+}
+
+function scenarioNeedsDisposableEraseAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{disposable_erase_api_key}");
 }
 
 it("parses the generated message lifecycle page contract", () => {
@@ -908,6 +923,8 @@ class Runner {
     if (CAPPED_API_KEY) this.vars.capped_api_key = CAPPED_API_KEY;
     if (OVERCAP_API_KEY) this.vars.overcap_api_key = OVERCAP_API_KEY;
     if (RESTRICTED_API_KEY) this.vars.restricted_api_key = RESTRICTED_API_KEY;
+    if (DISPOSABLE_TRASH_API_KEY) this.vars.disposable_trash_api_key = DISPOSABLE_TRASH_API_KEY;
+    if (DISPOSABLE_ERASE_API_KEY) this.vars.disposable_erase_api_key = DISPOSABLE_ERASE_API_KEY;
     this.api = new RawApi(apiKey, baseUrl);
     this.seeder = SEED ? new Seeder(baseUrl, apiKey) : null;
   }
@@ -1338,7 +1355,11 @@ describe.skipIf(!baseUrl || !apiKey)("Contract scenarios", () => {
       (scenarioNeedsStore(sc) && !SEED) ||
       (scenarioNeedsCappedAccount(sc) && !CAPPED_API_KEY) ||
       (scenarioNeedsOverCapAccount(sc) && !OVERCAP_API_KEY) ||
-      (scenarioNeedsRestrictedAccount(sc) && !RESTRICTED_API_KEY);
+      (scenarioNeedsRestrictedAccount(sc) && !RESTRICTED_API_KEY) ||
+      // Account-deletion scenarios destroy their account; they run only
+      // against the contract server's seeded disposable accounts.
+      (scenarioNeedsDisposableTrashAccount(sc) && !DISPOSABLE_TRASH_API_KEY) ||
+      (scenarioNeedsDisposableEraseAccount(sc) && !DISPOSABLE_ERASE_API_KEY);
 
     (skip ? it.skip : it)(
       sc.name,
