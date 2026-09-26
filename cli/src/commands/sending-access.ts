@@ -1,5 +1,5 @@
 import type { SendingAccessRequestView, SendingAccessView } from "@e2a/sdk/v1";
-import { E2ANotFoundError } from "@e2a/sdk/v1";
+import { E2AError, E2ANotFoundError } from "@e2a/sdk/v1";
 import { createClient } from "../sdk.js";
 import { EXIT, fail } from "../exit.js";
 
@@ -63,8 +63,11 @@ export async function sendingAccessStatus(opts: SendingAccessStatusOptions): Pro
   try {
     latest = await client.account.getSendingAccessRequest();
   } catch (err) {
-    // 404 not_found means the account has never filed one — not an error.
-    if (!(err instanceof E2ANotFoundError)) throw err;
+    // 404 not_found means the account has never filed one, and 501
+    // not_implemented means the deployment does not enable external sending
+    // access at all — neither is an error for a status readout.
+    const disabled = err instanceof E2AError && err.code === "not_implemented";
+    if (!(err instanceof E2ANotFoundError) && !disabled) throw err;
   }
 
   if (opts.json) {

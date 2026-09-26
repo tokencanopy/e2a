@@ -188,6 +188,7 @@ describe.skipIf(!live)("cli live parity", () => {
       "protection",
       "reply",
       "send",
+      "sending-access",
       "suppressions",
       "whoami",
     ]);
@@ -201,6 +202,34 @@ describe.skipIf(!live)("cli live parity", () => {
     expect(j.user?.email).toBeTruthy();
     expect(j.scope).toBe("account");
     recordCovered("whoami");
+  });
+
+  // External sending access (beta): file (idempotent while pending — reruns
+  // converge on one pending request for this shared account and never
+  // approach the per-account cap), then read the status. A deployment that
+  // does not enable the control answers 501 not_implemented to the request;
+  // then nothing is recorded and the gate reports the gap, which is correct.
+  it("sending-access request --json → status --json shows the same request (exit 0)", (ctx) => {
+    const filed = run([
+      "sending-access", "request",
+      "--use-case", "cli coverage probe: verifies the request intake contract",
+      "--recipients", "no recipients; this request exists only for automated coverage",
+      "--volume", "1", "--json",
+    ]);
+    if (filed.code !== 0 && /not_implemented|not enabled/i.test(filed.stderr)) {
+      ctx.skip();
+      return;
+    }
+    expect(filed.code, filed.stderr).toBe(0);
+    const req = JSON.parse(filed.stdout);
+    expect(req.id).toBeTruthy();
+    expect(typeof req.state).toBe("string");
+
+    const status = run(["sending-access", "status", "--json"]);
+    expect(status.code, status.stderr).toBe(0);
+    const st = JSON.parse(status.stdout);
+    expect(st.latestRequest?.id).toBe(req.id);
+    recordCovered("sending-access");
   });
 
   it("metrics: account rollup and per-inbox, both --json (exit 0)", () => {

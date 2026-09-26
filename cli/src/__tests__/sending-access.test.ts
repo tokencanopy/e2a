@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { E2ANotFoundError } from "@e2a/sdk/v1";
+import { E2ANotFoundError, E2AError } from "@e2a/sdk/v1";
 
 const mockAccountGet = vi.fn();
 const mockGetRequest = vi.fn();
@@ -83,6 +83,18 @@ describe("sending-access commands", () => {
       const out = stdout.mock.calls.map((c: unknown[]) => String(c[0])).join("");
       expect(out).toContain("External sending: restricted");
       expect(out).not.toContain("latest request:");
+    });
+
+    it("tolerates 501 not_implemented (control disabled on this deployment)", async () => {
+      mockAccountGet.mockResolvedValue(makeAccount(undefined));
+      mockGetRequest.mockRejectedValue(
+        new E2AError({ code: "not_implemented", message: "disabled", status: 501, retryable: false }),
+      );
+      const { sendingAccessStatus } = await import("../commands/sending-access.js");
+      await sendingAccessStatus({ json: true });
+
+      const out = stdout.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+      expect(JSON.parse(out)).toEqual({ sendingAccess: null, latestRequest: null });
     });
 
     it("rethrows a non-404 error from getSendingAccessRequest", async () => {
