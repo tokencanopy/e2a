@@ -2252,6 +2252,11 @@ func (s *Store) CreateAgentTx(ctx context.Context, tx pgx.Tx, agentEmail, domain
 	return createAgent(ctx, tx, agentEmail, domain, name, userID)
 }
 
+// ErrAgentAddressHeld is returned by agent creation when the address is held
+// by a live identity tombstone (an abuse-closed account's agent). Surfaces as
+// agent_taken, like any other claimed address.
+var ErrAgentAddressHeld = errors.New("identity: agent address is held")
+
 // AgentLimitExceededError is returned by CreateAgentWithLimit when userID is
 // already at maxAgents. Mirrors DomainLimitExceededError.
 type AgentLimitExceededError struct {
@@ -2266,7 +2271,7 @@ func (e *AgentLimitExceededError) Error() string {
 // (keyspace-2 advisory lock) inside the INSERT's transaction, closing the
 // pre-insert-count race (#822's class). maxAgents <= 0 means unlimited.
 func (s *Store) CreateAgentWithLimit(ctx context.Context, agentEmail, domain, name, userID string, maxAgents int) (*AgentIdentity, error) {
-	if maxAgents <= 0 {
+	if maxAgents <= 0 && !s.tombstones.Enabled {
 		return createAgent(ctx, s.pool, agentEmail, domain, name, userID)
 	}
 
@@ -2294,6 +2299,14 @@ func (s *Store) CreateAgentWithLimit(ctx context.Context, agentEmail, domain, na
 // CreateAgentTx exists alongside CreateAgent. maxAgents <= 0 means
 // unlimited (no lock taken, matching CreateAgentWithLimit).
 func (s *Store) CreateAgentWithLimitTx(ctx context.Context, tx pgx.Tx, agentEmail, domain, name, userID string, maxAgents int) (*AgentIdentity, error) {
+	// An address an abuse-closed account held on the shared domain stays
+	// closed: checked under the digest advisory lock in the insert tx.
+	if err := s.checkTombstonesTx(ctx, tx, []TombstoneIdentifier{{Kind: TombstoneKindAgentAddress, Value: agentEmail}}); err != nil {
+		if errors.Is(err, ErrRegistrationRefused) {
+			return nil, ErrAgentAddressHeld
+		}
+		return nil, err
+	}
 	if maxAgents <= 0 {
 		return createAgent(ctx, tx, agentEmail, domain, name, userID)
 	}
@@ -2642,7 +2655,16 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 // resolved by the caller. Carrying createdAt across the handler/store boundary
 // prevents a delayed request from attaching to a same-owner recreation at the
 // same address before any purge token has been claimed.
+//
+// While the owning account's sending is paused (any class) it refuses with
+// ErrEraseHeld: an account under a pause may trash its agents but may not
+// erase their content before an operator has classified the pause.
 func (s *Store) DeleteAgentIncarnation(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error) {
+	if held, herr := s.AccountSendingPaused(ctx, userID); herr != nil {
+		return 0, herr
+	} else if held {
+		return 0, ErrEraseHeld
+	}
 	var token string
 	var chunked bool
 	err = s.WithTx(ctx, func(tx pgx.Tx) error {
@@ -5983,10 +6005,9 @@ func (s *Store) CreateOrGetUser(ctx context.Context, email, name, googleSub stri
 		case !errors.Is(err, pgx.ErrNoRows):
 			return err
 		}
-		if err := s.checkTombstonesTx(ctx, tx, []TombstoneIdentifier{
+		if err := s.checkTombstonesTx(ctx, tx, append([]TombstoneIdentifier{
 			{Kind: TombstoneKindLoginSubject, Value: googleSub},
-			{Kind: TombstoneKindEmail, Value: email},
-		}); err != nil {
+		}, signupEmailIdentifiers(email)...)); err != nil {
 			return err
 		}
 		// ON CONFLICT keeps a concurrent first sign-in of the same subject
@@ -6010,9 +6031,25 @@ func (s *Store) CreateOrGetUser(ctx context.Context, email, name, googleSub stri
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, s.classifyEmailConflict(ctx, err, email)
 	}
 	return out, nil
+}
+
+// classifyEmailConflict turns a users_email_key violation into
+// ErrEmailConflict — or ErrAccountTrashed when the address is held by an
+// account in the trash — so a sign-in door can show a page instead of a 500.
+func (s *Store) classifyEmailConflict(ctx context.Context, err error, email string) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.SQLState() != "23505" || pgErr.ConstraintName != "users_email_key" {
+		return err
+	}
+	var trashed bool
+	if qerr := s.pool.QueryRow(ctx,
+		`SELECT deleted_at IS NOT NULL FROM users WHERE email = $1`, email).Scan(&trashed); qerr == nil && trashed {
+		return ErrAccountTrashed
+	}
+	return ErrEmailConflict
 }
 
 // RecordGoogleOwnerEmailProof records that a trusted Google login just
@@ -6060,6 +6097,11 @@ func (s *Store) SetAccountClass(ctx context.Context, userID, class string) error
 // BootstrapUser finds a user by email, or creates one with a synthetic
 // google_subject if none exists. Used by the -bootstrap-email CLI flag
 // for self-host first-run, where there's no Google OAuth flow yet.
+//
+// It deliberately bypasses identity tombstones: it is an operator command run
+// inside the deployment, and an operator creating an account is an explicit
+// decision (the release pipeline mints disposable conformance accounts this
+// way). It refuses to hand a key to an account in the trash.
 func (s *Store) BootstrapUser(ctx context.Context, email string) (*User, error) {
 	u := &User{}
 	var deletedAt *time.Time
@@ -6142,10 +6184,9 @@ func (s *Store) provisionUser(ctx context.Context, tx pgx.Tx, externalRef, email
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, err
 	}
-	ids := []TombstoneIdentifier{
+	ids := append([]TombstoneIdentifier{
 		{Kind: TombstoneKindLoginSubject, Value: subject},
-		{Kind: TombstoneKindEmail, Value: email},
-	}
+	}, signupEmailIdentifiers(email)...)
 	if externalIssuer != "" {
 		ids = append(ids, TombstoneIdentifier{Kind: TombstoneKindLoginSubject, Value: externalPrincipalSubject(externalIssuer, externalRef)})
 	}

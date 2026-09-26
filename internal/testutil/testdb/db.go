@@ -360,6 +360,7 @@ func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 		DELETE FROM sending_ramp_grandfathering;
 		DELETE FROM identity_tombstones;
 		DELETE FROM deleted_account_summaries;
+		DELETE FROM identity_tombstone_events;
 
 		-- This registry is append-only in application/migration use; its
 		-- unconditional trigger intentionally rejects DELETE. The disposable

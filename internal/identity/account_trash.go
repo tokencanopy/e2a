@@ -145,6 +145,13 @@ func (s *Store) TrashAccount(ctx context.Context, userID string, perDomainInTx f
 			return fmt.Errorf("trash: agents: %w", err)
 		}
 		res.AgentsDeleted = tag.RowsAffected()
+		// Kill switch for agent identity assertions and access tokens: bump
+		// every agent's assertion_version so outstanding tokens are stale at
+		// once, and stay stale after a restore.
+		if _, err := tx.Exec(ctx,
+			`UPDATE agent_identities SET assertion_version = COALESCE(assertion_version, 1) + 1 WHERE user_id = $1`, userID); err != nil {
+			return fmt.Errorf("trash: agent assertion versions: %w", err)
+		}
 
 		tag, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id = $1`, userID)
 		if err != nil {
@@ -298,10 +305,13 @@ func (s *Store) RestoreAccount(ctx context.Context, userID, sessionToken string)
 			purgeToken *string
 			email      string
 			subject    string
+			tooSoon    bool
 		)
 		if err := tx.QueryRow(ctx,
-			`SELECT deleted_at, purge_token, email, google_subject FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID,
-		).Scan(&deletedAt, &purgeToken, &email, &subject); err != nil {
+			`SELECT deleted_at, purge_token, email, google_subject,
+			        COALESCE(restored_at > now() - make_interval(secs => $2), false)
+			   FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID, RestoreCooldown.Seconds(),
+		).Scan(&deletedAt, &purgeToken, &email, &subject, &tooSoon); err != nil {
 			return err
 		}
 		if deletedAt == nil {
@@ -309,6 +319,9 @@ func (s *Store) RestoreAccount(ctx context.Context, userID, sessionToken string)
 		}
 		if purgeToken != nil {
 			return ErrPurgeInProgress
+		}
+		if tooSoon {
+			return ErrRestoreRateLimited
 		}
 		// An identity closed by a live tombstone (an operator hold, or an
 		// earlier abuse purge of the same identifiers) stays closed.
@@ -390,8 +403,18 @@ func accountLoginIdentifiersTx(ctx context.Context, tx pgx.Tx, userID, email, su
 //
 // With tombstones enabled and the key unavailable it refuses with
 // ErrTombstoneKeyUnavailable and leaves the account trashed.
+//
+// A paused account (any pause class) cannot be erased on demand: it refuses
+// with ErrEraseHeld so an operator can classify the pause before the content
+// goes (the account can still be trashed; the janitor purges it after the
+// window, writing abuse tombstones when the history says abuse).
 func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx func(ctx context.Context, tx pgx.Tx, domain string) error) (*DeleteUserDataResult, error) {
 	res := &DeleteUserDataResult{Mode: AccountDeleteModePermanent}
+	if held, err := s.AccountSendingPaused(ctx, userID); err != nil {
+		return nil, err
+	} else if held {
+		return nil, ErrEraseHeld
+	}
 	if err := s.WithTx(ctx, func(tx pgx.Tx) error { return accountRowCounts(ctx, tx, userID, res) }); err != nil {
 		return nil, err
 	}
@@ -413,6 +436,28 @@ func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx f
 	}
 	res.UserDeleted = purged
 	return res, nil
+}
+
+// ErrEraseHeld refuses an on-demand permanent erasure (of an account or one
+// of its agents) while the account's sending is paused.
+var ErrEraseHeld = errors.New("identity: permanent erasure is held while the account is paused")
+
+// ErrRestoreRateLimited refuses a restore within RestoreCooldown of the
+// previous one.
+var ErrRestoreRateLimited = errors.New("identity: the account was restored too recently")
+
+// RestoreCooldown bounds trash/restore churn: one restore per account per
+// window.
+var RestoreCooldown = 10 * time.Minute
+
+// AccountSendingPaused reports whether the account's sending is paused (any
+// pause class). A missing control row is not paused.
+func (s *Store) AccountSendingPaused(ctx context.Context, userID string) (bool, error) {
+	var paused bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM account_sending_controls WHERE user_id = $1 AND state = 'paused')`, userID,
+	).Scan(&paused)
+	return paused, err
 }
 
 // userPurgeBatch bounds one janitor pass of PurgeDeletedUsers.
@@ -590,6 +635,18 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		if _, err := tx.Exec(ctx, `DELETE FROM usage_events WHERE user_id = $1`, userID); err != nil {
 			return fmt.Errorf("purge: usage_events: %w", err)
 		}
+		// A domain other accounts' agents live on (the shared domain a probe
+		// account adopted) cannot cascade away with this user — the agents'
+		// FK is ON DELETE NO ACTION and the purge would wedge forever. Hand it
+		// back to the platform (unowned, as EnsureSharedDomain seeds it) and
+		// leave its provider identity alone.
+		if _, err := tx.Exec(ctx, `
+			UPDATE domains SET user_id = NULL
+			 WHERE user_id = $1
+			   AND EXISTS (SELECT 1 FROM agent_identities a
+			                WHERE a.registered_domain = domains.domain AND a.user_id <> $1)`, userID); err != nil {
+			return fmt.Errorf("purge: release shared domains: %w", err)
+		}
 		domains, err := scanDomainsForUser(ctx, tx, userID)
 		if err != nil {
 			return fmt.Errorf("purge: load domains: %w", err)
@@ -633,23 +690,29 @@ func (s *Store) writePurgeRecordsTx(ctx context.Context, tx pgx.Tx, userID strin
 		email, subject, accountClass string
 		createdAt, deletedAt         time.Time
 		controlState, pauseClass     *string
-		pauseReason, evidenceRef     *string
+		evidenceRef                  *string
+		abuseHistory                 bool
 	)
+	// Abuse is derived from history, not only the current row: an account
+	// that was ever paused as abuse (the control audit remembers it) keeps the
+	// abuse hold even if it was later resumed or re-paused under another class.
 	if err := tx.QueryRow(ctx, `
 		SELECT u.email, u.google_subject, u.account_class, u.created_at, u.deleted_at,
-		       c.state, c.pause_class, NULLIF(c.reason, ''), c.evidence_ref
+		       c.state, c.pause_class, c.evidence_ref,
+		       EXISTS (SELECT 1 FROM account_sending_control_events e
+		                WHERE e.account_ref = u.id AND e.pause_class = 'abuse')
 		  FROM users u
 		  LEFT JOIN account_sending_controls c ON c.user_id = u.id
 		 WHERE u.id = $1`, userID,
 	).Scan(&email, &subject, &accountClass, &createdAt, &deletedAt,
-		&controlState, &pauseClass, &pauseReason, &evidenceRef); err != nil {
+		&controlState, &pauseClass, &evidenceRef, &abuseHistory); err != nil {
 		return fmt.Errorf("purge: load account: %w", err)
 	}
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
 		return err
 	}
-	abuse := controlState != nil && *controlState == "paused" && pauseClass != nil && *pauseClass == "abuse"
+	abuse := abuseHistory || (pauseClass != nil && *pauseClass == "abuse")
 
 	ids, err := accountLoginIdentifiersTx(ctx, tx, userID, email, subject)
 	if err != nil {
@@ -663,39 +726,57 @@ func (s *Store) writePurgeRecordsTx(ctx context.Context, tx pgx.Tx, userID strin
 	if err != nil {
 		return err
 	}
+	abuseIDs, err := abuseIdentifiersTx(ctx, tx, userID, email, ids, verified)
+	if err != nil {
+		return err
+	}
 	retentionClass, summaryUntil := TombstoneClassRecentDeletion, recentUntil
 	if abuse {
 		abuseUntil := now.Add(AbuseTombstoneHold)
-		abuseIDs := append([]TombstoneIdentifier{}, ids...)
-		for _, d := range verified {
-			abuseIDs = append(abuseIDs, TombstoneIdentifier{Kind: TombstoneKindDomain, Value: d})
-		}
 		if _, err := writeTombstonesTx(ctx, tx, p.Keyring, abuseIDs, TombstoneClassAbuse, userID, abuseUntil); err != nil {
 			return err
 		}
 		retentionClass, summaryUntil = TombstoneClassAbuse, abuseUntil
-	}
-	if summaryUntil.Before(recentUntil) {
-		summaryUntil = recentUntil
 	}
 
 	sum, err := buildAccountSummaryTx(ctx, tx, p.Keyring, userID, verified)
 	if err != nil {
 		return err
 	}
+	// Every identifier an abuse hold would close, recorded as keyed digests so
+	// an operator can escalate after purge (EscalateDeletedAccountToAbuse).
+	identityDigests := make([]IdentityDigest, 0, len(abuseIDs))
+	seen := map[string]bool{}
+	for _, id := range abuseIDs {
+		if strings.TrimSpace(id.Value) == "" {
+			continue
+		}
+		d := p.Keyring.HexDigest(id.Kind, NormalizeTombstoneValue(id.Kind, id.Value))
+		if seen[id.Kind+d] {
+			continue
+		}
+		seen[id.Kind+d] = true
+		identityDigests = append(identityDigests, IdentityDigest{Kind: id.Kind, Digest: d, KeyVersion: p.Keyring.ActiveVersion()})
+	}
+	identityJSON, err := json.Marshal(identityDigests)
+	if err != nil {
+		return err
+	}
+	// The free-text pause reason is deliberately NOT copied: it is operator
+	// prose that may quote the customer. evidence_ref is the durable pointer.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO deleted_account_summaries (
 		    account_ref, account_created_at, deleted_at, purged_at, account_class,
-		    sending_state, pause_class, pause_reason, evidence_ref,
+		    sending_state, pause_class, evidence_ref,
 		    agents_count, messages_count, outbound_sends_count, first_outbound_at, last_outbound_at,
-		    recipient_domains, daily_sends, subject_digests, verified_domain_digests,
+		    recipient_domains, daily_sends, subject_digests, verified_domain_digests, identity_digests,
 		    digest_key_version, retention_class, expires_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 		ON CONFLICT (account_ref) DO NOTHING`,
 		userID, createdAt, deletedAt, now, accountClass,
-		controlState, pauseClass, pauseReason, evidenceRef,
+		controlState, pauseClass, evidenceRef,
 		sum.agents, sum.messages, sum.outbound, sum.firstOutbound, sum.lastOutbound,
-		sum.recipientDomains, sum.dailySends, sum.subjectDigests, sum.domainDigests,
+		sum.recipientDomains, sum.dailySends, sum.subjectDigests, sum.domainDigests, identityJSON,
 		p.Keyring.ActiveVersion(), retentionClass, summaryUntil,
 	); err != nil {
 		return fmt.Errorf("purge: write summary: %w", err)
@@ -703,9 +784,45 @@ func (s *Store) writePurgeRecordsTx(ctx context.Context, tx pgx.Tx, userID strin
 	return nil
 }
 
+// abuseIdentifiersTx is everything an abuse hold closes: the login
+// identifiers, every domain the account ever verified, every agent address it
+// held on a domain it did not own (the shared platform domain), and the owner
+// email's domain unless it is a public webmail provider.
+func abuseIdentifiersTx(ctx context.Context, tx pgx.Tx, userID, email string, login []TombstoneIdentifier, verified []string) ([]TombstoneIdentifier, error) {
+	ids := append([]TombstoneIdentifier{}, login...)
+	for _, d := range verified {
+		ids = append(ids, TombstoneIdentifier{Kind: TombstoneKindDomain, Value: d})
+	}
+	if d := emailDomainOf(email); d != "" && !IsPublicWebmailDomain(d) {
+		ids = append(ids, TombstoneIdentifier{Kind: TombstoneKindEmailDomain, Value: d})
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT a.id FROM agent_identities a
+		  LEFT JOIN domains d ON d.domain = a.registered_domain
+		 WHERE a.user_id = $1 AND d.user_id IS DISTINCT FROM $1
+		 ORDER BY a.id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("purge: load shared-domain agents: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return nil, err
+		}
+		ids = append(ids, TombstoneIdentifier{Kind: TombstoneKindAgentAddress, Value: addr})
+	}
+	return ids, rows.Err()
+}
+
 func everVerifiedDomainsTx(ctx context.Context, tx pgx.Tx, userID string) ([]string, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT domain FROM domains WHERE user_id = $1 AND (verified OR verified_at IS NOT NULL) ORDER BY domain`, userID)
+		`SELECT domain FROM domains
+		  WHERE user_id = $1 AND (verified OR verified_at IS NOT NULL)
+		    -- a shared domain other accounts live on is never this account's identity
+		    AND NOT EXISTS (SELECT 1 FROM agent_identities a
+		                     WHERE a.registered_domain = domains.domain AND a.user_id <> $1)
+		  ORDER BY domain`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("purge: load verified domains: %w", err)
 	}
@@ -775,6 +892,26 @@ func buildAccountSummaryTx(ctx context.Context, tx pgx.Tx, kr *TombstoneKeyring,
 	).Scan(&sum.messages, &sum.outbound, &sum.firstOutbound, &sum.lastOutbound); err != nil {
 		return nil, fmt.Errorf("summary: messages: %w", err)
 	}
+	// usage_events survive until purge even when the owner permanently deleted
+	// messages first (and exist whenever usage tracking is on), so they are
+	// the durable send record: take the larger count and the wider span.
+	var usageSends int64
+	var usageFirst, usageLast *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*), min(created_at), max(created_at)
+		  FROM usage_events WHERE user_id = $1 AND direction = 'outbound'`, userID,
+	).Scan(&usageSends, &usageFirst, &usageLast); err != nil {
+		return nil, fmt.Errorf("summary: usage events: %w", err)
+	}
+	if usageSends > sum.outbound {
+		sum.outbound = usageSends
+	}
+	if usageFirst != nil && (sum.firstOutbound == nil || usageFirst.Before(*sum.firstOutbound)) {
+		sum.firstOutbound = usageFirst
+	}
+	if usageLast != nil && (sum.lastOutbound == nil || usageLast.After(*sum.lastOutbound)) {
+		sum.lastOutbound = usageLast
+	}
 
 	// Recipient domains: the domain part only — the local part never leaves
 	// this query.
@@ -808,13 +945,22 @@ func buildAccountSummaryTx(ctx context.Context, tx pgx.Tx, kr *TombstoneKeyring,
 	}
 
 	days := []DayCount{}
+	// Per-day counts: the larger of the two records for each day.
 	rows, err = tx.Query(ctx, `
-		SELECT to_char((m.created_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, count(*)
-		  FROM messages m JOIN agent_identities a ON a.id = m.agent_id
-		 WHERE a.user_id = $1 AND m.direction = 'outbound'
-		   AND m.delivery_status IN `+sentOutboundStatuses+`
-		   AND m.created_at >= now() - make_interval(days => $2)
-		 GROUP BY day ORDER BY day`, userID, summaryDailyWindowDays)
+		SELECT day, max(n) FROM (
+		    SELECT to_char((m.created_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day, count(*) AS n
+		      FROM messages m JOIN agent_identities a ON a.id = m.agent_id
+		     WHERE a.user_id = $1 AND m.direction = 'outbound'
+		       AND m.delivery_status IN `+sentOutboundStatuses+`
+		       AND m.created_at >= now() - make_interval(days => $2)
+		     GROUP BY 1
+		    UNION ALL
+		    SELECT to_char((created_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD'), count(*)
+		      FROM usage_events
+		     WHERE user_id = $1 AND direction = 'outbound'
+		       AND created_at >= now() - make_interval(days => $2)
+		     GROUP BY 1
+		) x GROUP BY day ORDER BY day`, userID, summaryDailyWindowDays)
 	if err != nil {
 		return nil, fmt.Errorf("summary: daily sends: %w", err)
 	}
@@ -898,52 +1044,52 @@ func buildAccountSummaryTx(ctx context.Context, tx pgx.Tx, kr *TombstoneKeyring,
 // DeletedAccountSummary is the operator view of a deleted_account_summaries
 // row (-inspect-deleted-account). It is never exposed over HTTP or MCP.
 type DeletedAccountSummary struct {
-	AccountRef            string        `json:"account_ref"`
-	AccountCreatedAt      time.Time     `json:"account_created_at"`
-	DeletedAt             time.Time     `json:"deleted_at"`
-	PurgedAt              time.Time     `json:"purged_at"`
-	AccountClass          string        `json:"account_class"`
-	SendingState          *string       `json:"sending_state"`
-	PauseClass            *string       `json:"pause_class"`
-	PauseReason           *string       `json:"pause_reason"`
-	EvidenceRef           *string       `json:"evidence_ref"`
-	AgentsCount           int           `json:"agents_count"`
-	MessagesCount         int64         `json:"messages_count"`
-	OutboundSendsCount    int64         `json:"outbound_sends_count"`
-	FirstOutboundAt       *time.Time    `json:"first_outbound_at"`
-	LastOutboundAt        *time.Time    `json:"last_outbound_at"`
-	RecipientDomains      []DomainCount `json:"recipient_domains"`
-	DailySends            []DayCount    `json:"daily_sends"`
-	SubjectDigests        []DigestCount `json:"subject_digests"`
-	VerifiedDomainDigests []string      `json:"verified_domain_digests"`
-	DigestKeyVersion      *int          `json:"digest_key_version"`
-	RetentionClass        string        `json:"retention_class"`
-	ExpiresAt             time.Time     `json:"expires_at"`
+	AccountRef            string           `json:"account_ref"`
+	AccountCreatedAt      time.Time        `json:"account_created_at"`
+	DeletedAt             time.Time        `json:"deleted_at"`
+	PurgedAt              time.Time        `json:"purged_at"`
+	AccountClass          string           `json:"account_class"`
+	SendingState          *string          `json:"sending_state"`
+	PauseClass            *string          `json:"pause_class"`
+	EvidenceRef           *string          `json:"evidence_ref"`
+	AgentsCount           int              `json:"agents_count"`
+	MessagesCount         int64            `json:"messages_count"`
+	OutboundSendsCount    int64            `json:"outbound_sends_count"`
+	FirstOutboundAt       *time.Time       `json:"first_outbound_at"`
+	LastOutboundAt        *time.Time       `json:"last_outbound_at"`
+	RecipientDomains      []DomainCount    `json:"recipient_domains"`
+	DailySends            []DayCount       `json:"daily_sends"`
+	SubjectDigests        []DigestCount    `json:"subject_digests"`
+	VerifiedDomainDigests []string         `json:"verified_domain_digests"`
+	IdentityDigests       []IdentityDigest `json:"identity_digests"`
+	DigestKeyVersion      *int             `json:"digest_key_version"`
+	RetentionClass        string           `json:"retention_class"`
+	ExpiresAt             time.Time        `json:"expires_at"`
 }
 
 // GetDeletedAccountSummary loads the summary of a purged account, or
 // pgx.ErrNoRows when none is retained.
 func (s *Store) GetDeletedAccountSummary(ctx context.Context, accountRef string) (*DeletedAccountSummary, error) {
 	d := &DeletedAccountSummary{}
-	var domains, days, subjects, digests []byte
+	var domains, days, subjects, digests, ids []byte
 	err := s.pool.QueryRow(ctx, `
 		SELECT account_ref, account_created_at, deleted_at, purged_at, account_class,
-		       sending_state, pause_class, pause_reason, evidence_ref,
+		       sending_state, pause_class, evidence_ref,
 		       agents_count, messages_count, outbound_sends_count, first_outbound_at, last_outbound_at,
-		       recipient_domains, daily_sends, subject_digests, verified_domain_digests,
+		       recipient_domains, daily_sends, subject_digests, verified_domain_digests, identity_digests,
 		       digest_key_version, retention_class, expires_at
 		  FROM deleted_account_summaries WHERE account_ref = $1`, accountRef,
 	).Scan(&d.AccountRef, &d.AccountCreatedAt, &d.DeletedAt, &d.PurgedAt, &d.AccountClass,
-		&d.SendingState, &d.PauseClass, &d.PauseReason, &d.EvidenceRef,
+		&d.SendingState, &d.PauseClass, &d.EvidenceRef,
 		&d.AgentsCount, &d.MessagesCount, &d.OutboundSendsCount, &d.FirstOutboundAt, &d.LastOutboundAt,
-		&domains, &days, &subjects, &digests, &d.DigestKeyVersion, &d.RetentionClass, &d.ExpiresAt)
+		&domains, &days, &subjects, &digests, &ids, &d.DigestKeyVersion, &d.RetentionClass, &d.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
 	for _, f := range []struct {
 		raw []byte
 		dst any
-	}{{domains, &d.RecipientDomains}, {days, &d.DailySends}, {subjects, &d.SubjectDigests}, {digests, &d.VerifiedDomainDigests}} {
+	}{{domains, &d.RecipientDomains}, {days, &d.DailySends}, {subjects, &d.SubjectDigests}, {digests, &d.VerifiedDomainDigests}, {ids, &d.IdentityDigests}} {
 		if err := json.Unmarshal(f.raw, f.dst); err != nil {
 			return nil, fmt.Errorf("decode summary: %w", err)
 		}

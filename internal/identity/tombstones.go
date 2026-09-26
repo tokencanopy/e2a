@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -31,6 +32,13 @@ const (
 	TombstoneKindLoginSubject = "login_subject"
 	TombstoneKindEmail        = "email"
 	TombstoneKindDomain       = "domain"
+	// TombstoneKindAgentAddress holds a full agent address on a shared
+	// (platform) domain, so an abuse-closed account's slugs cannot be
+	// re-created by a fresh account.
+	TombstoneKindAgentAddress = "agent_address"
+	// TombstoneKindEmailDomain holds the domain part of an abuse-closed
+	// owner's email when it is not a public webmail provider.
+	TombstoneKindEmailDomain = "email_domain"
 
 	TombstoneClassRecentDeletion = "recent_deletion"
 	TombstoneClassAbuse          = "abuse"
@@ -80,6 +88,36 @@ const minTombstoneKeyBytes = 32
 // value returns (nil, nil) — "not configured". A malformed value is an error
 // that never echoes the secret.
 func ParseTombstoneKeyring(raw string) (*TombstoneKeyring, error) {
+	return ParseTombstoneKeyringWithActive(raw, "")
+}
+
+// ParseTombstoneKeyringWithActive is ParseTombstoneKeyring with an explicit
+// active selector (E2A_TOMBSTONE_KEY_ACTIVE, `v<N>`), so a rotation can be
+// two-phase: deploy the new version KNOWN but inactive everywhere, then
+// promote it. Empty selects the highest configured version. A selector naming
+// a version that is not configured is an error.
+func ParseTombstoneKeyringWithActive(raw, active string) (*TombstoneKeyring, error) {
+	kr, err := parseTombstoneKeyring(raw)
+	if err != nil || kr == nil {
+		if err == nil && strings.TrimSpace(active) != "" {
+			return nil, errors.New("E2A_TOMBSTONE_KEY_ACTIVE is set but E2A_TOMBSTONE_KEY is not")
+		}
+		return kr, err
+	}
+	if a := strings.TrimSpace(active); a != "" {
+		v, err := strconv.Atoi(strings.TrimPrefix(a, "v"))
+		if err != nil || !strings.HasPrefix(a, "v") || v <= 0 {
+			return nil, fmt.Errorf("E2A_TOMBSTONE_KEY_ACTIVE must be v<version> (got %q)", a)
+		}
+		if !kr.Has(v) {
+			return nil, fmt.Errorf("E2A_TOMBSTONE_KEY_ACTIVE selects v%d, which E2A_TOMBSTONE_KEY does not configure", v)
+		}
+		kr.active = v
+	}
+	return kr, nil
+}
+
+func parseTombstoneKeyring(raw string) (*TombstoneKeyring, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
@@ -216,11 +254,46 @@ func NormalizeTombstoneValue(kind, value string) string {
 	switch kind {
 	case TombstoneKindEmail:
 		return normalizeTombstoneEmail(value)
-	case TombstoneKindDomain:
+	case TombstoneKindDomain, TombstoneKindEmailDomain:
 		return normalizeTombstoneDomain(value)
+	case TombstoneKindAgentAddress:
+		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return value
 	}
+}
+
+// publicWebmailDomains are email providers whose domain identifies nobody: an
+// abuse hold never closes them.
+var publicWebmailDomains = map[string]bool{
+	"gmail.com": true, "googlemail.com": true, "outlook.com": true, "hotmail.com": true,
+	"live.com": true, "yahoo.com": true, "icloud.com": true, "proton.me": true,
+	"protonmail.com": true, "aol.com": true, "gmx.com": true, "gmx.net": true,
+	"yandex.com": true, "yandex.ru": true, "mail.com": true,
+}
+
+// emailDomainOf returns the normalized domain part of an email, or "".
+func emailDomainOf(email string) string {
+	at := strings.LastIndex(email, "@")
+	if at < 0 || at == len(email)-1 {
+		return ""
+	}
+	return normalizeTombstoneDomain(email[at+1:])
+}
+
+// IsPublicWebmailDomain reports whether d is a public webmail provider.
+func IsPublicWebmailDomain(d string) bool {
+	return publicWebmailDomains[normalizeTombstoneDomain(d)]
+}
+
+// signupIdentifiers is what every signup entry point checks for an email:
+// the address and its domain (only non-webmail domains are ever held).
+func signupEmailIdentifiers(email string) []TombstoneIdentifier {
+	ids := []TombstoneIdentifier{{Kind: TombstoneKindEmail, Value: email}}
+	if d := emailDomainOf(email); d != "" {
+		ids = append(ids, TombstoneIdentifier{Kind: TombstoneKindEmailDomain, Value: d})
+	}
+	return ids
 }
 
 func normalizeTombstoneDomain(d string) string {
@@ -430,15 +503,18 @@ type TombstoneKeyStatus struct {
 	Enabled           bool          `json:"enabled"`
 	Configured        bool          `json:"configured"`
 	ActiveVersion     int           `json:"active_version"`
-	ConfiguredVersion []int         `json:"configured_versions"`
+	ConfiguredVersion []int         `json:"known_versions"`
 	LiveByVersion     map[int]int64 `json:"live_tombstones_by_version"`
 	MissingVersions   []int         `json:"missing_versions"`
 }
 
-// InspectTombstoneKeys reports the key coverage of the live tombstone table.
-// A rotation adds a new, higher version as active and keeps the old version
-// configured until LiveByVersion shows no live tombstone still depends on it
-// (the longest hold is the abuse hold). A keyed digest cannot be recomputed
+// InspectTombstoneKeys reports the key coverage of the live tombstone table:
+// the active version (what new tombstones are written under), every known
+// version (what lookups try), and how many live tombstones use each. A
+// rotation is two-phase: deploy the new version known-but-inactive
+// (E2A_TOMBSTONE_KEY_ACTIVE pinned to the old one), then promote it; keep the
+// old version known until LiveByVersion shows no live tombstone still depends
+// on it (the longest hold is the abuse hold). A keyed digest cannot be recomputed
 // under a new key without the plaintext identifier, which e2a deliberately
 // never stores, so rotation retires old versions by expiry, not by re-keying.
 func (s *Store) InspectTombstoneKeys(ctx context.Context) (*TombstoneKeyStatus, error) {
@@ -477,31 +553,170 @@ func (s *Store) InspectTombstoneKeys(ctx context.Context) (*TombstoneKeyStatus, 
 // ExtendAccountTombstones moves every live tombstone of accountRef to
 // expire no earlier than `until` (an operator lever for a closed identity).
 // Returns the number of rows touched.
-func (s *Store) ExtendAccountTombstones(ctx context.Context, accountRef string, until time.Time) (int64, error) {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE identity_tombstones SET expires_at = GREATEST(expires_at, $2)
-		  WHERE account_ref = $1 AND expires_at > now()`, accountRef, until)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+func (s *Store) ExtendAccountTombstones(ctx context.Context, accountRef string, until time.Time, actor, reason string) (int64, error) {
+	var n int64
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE identity_tombstones SET expires_at = GREATEST(expires_at, $2)
+			  WHERE account_ref = $1 AND expires_at > now()`, accountRef, until)
+		if err != nil {
+			return err
+		}
+		n = tag.RowsAffected()
+		return recordTombstoneEventTx(ctx, tx, accountRef, "extend", n, actor, reason)
+	})
+	return n, err
 }
 
-// RevokeAccountTombstones deletes every tombstone of accountRef, reopening
-// its identifiers for registration (an operator lever for a mistaken hold).
-func (s *Store) RevokeAccountTombstones(ctx context.Context, accountRef string) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM identity_tombstones WHERE account_ref = $1`, accountRef)
-	if err != nil {
-		return 0, err
+// TombstoneAuditRetention keeps the operator audit of tombstone overrides a
+// little longer than the longest hold it can affect.
+var TombstoneAuditRetention = AbuseTombstoneHold + 90*24*time.Hour
+
+// recordTombstoneEventTx writes the operator audit row for a tombstone
+// override in the same transaction as the override.
+func recordTombstoneEventTx(ctx context.Context, tx pgx.Tx, accountRef, action string, rows int64, actor, reason string) error {
+	if strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "" || len([]rune(reason)) > 1000 {
+		return errors.New("identity: a tombstone override requires an actor and a nonblank reason of at most 1000 characters")
 	}
-	return tag.RowsAffected(), nil
+	_, err := tx.Exec(ctx, `
+		INSERT INTO identity_tombstone_events (id, account_ref, action, rows_affected, actor, reason, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7))`,
+		"ite_"+generateID(), accountRef, action, rows, actor, reason, TombstoneAuditRetention.Seconds())
+	if err != nil {
+		return fmt.Errorf("identity: record tombstone event: %w", err)
+	}
+	return nil
 }
 
-// DeleteExpiredTombstones removes tombstones past their hold.
+// RevokeAccountTombstones reopens a purged account's identifiers. It works
+// from the digest set recorded in the account's deleted-account summary, not
+// from account_ref: a digest the upsert attributed to this account may also be
+// held for ANOTHER purged account (the same email or domain), and that other
+// account's hold must survive. A digest listed in another live summary is
+// kept and counted in kept. Without a summary it falls back to the rows
+// attributed to accountRef.
+func (s *Store) RevokeAccountTombstones(ctx context.Context, accountRef, actor, reason string) (revoked, kept int64, err error) {
+	err = s.WithTx(ctx, func(tx pgx.Tx) error {
+		var raw []byte
+		qerr := tx.QueryRow(ctx,
+			`SELECT identity_digests FROM deleted_account_summaries WHERE account_ref = $1`, accountRef).Scan(&raw)
+		if errors.Is(qerr, pgx.ErrNoRows) {
+			tag, err := tx.Exec(ctx, `DELETE FROM identity_tombstones WHERE account_ref = $1`, accountRef)
+			if err != nil {
+				return err
+			}
+			revoked = tag.RowsAffected()
+			return recordTombstoneEventTx(ctx, tx, accountRef, "revoke", revoked, actor, reason)
+		}
+		if qerr != nil {
+			return qerr
+		}
+		var digests []IdentityDigest
+		if err := json.Unmarshal(raw, &digests); err != nil {
+			return fmt.Errorf("decode identity digests: %w", err)
+		}
+		for _, d := range digests {
+			var shared bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+				    SELECT 1 FROM deleted_account_summaries
+				     WHERE account_ref <> $1 AND expires_at > now()
+				       AND identity_digests @> jsonb_build_array(jsonb_build_object('kind', $2::text, 'digest', $3::text)))`,
+				accountRef, d.Kind, d.Digest).Scan(&shared); err != nil {
+				return err
+			}
+			if shared {
+				kept++
+				continue
+			}
+			bin, err := hex.DecodeString(d.Digest)
+			if err != nil {
+				return fmt.Errorf("decode digest: %w", err)
+			}
+			tag, err := tx.Exec(ctx,
+				`DELETE FROM identity_tombstones WHERE kind = $1 AND digest = $2 AND key_version = $3`,
+				d.Kind, bin, d.KeyVersion)
+			if err != nil {
+				return err
+			}
+			revoked += tag.RowsAffected()
+		}
+		return recordTombstoneEventTx(ctx, tx, accountRef, "revoke", revoked, actor, reason)
+	})
+	return revoked, kept, err
+}
+
+// IdentityDigest is one keyed identifier digest recorded in a deleted-account
+// summary (hex digest, the key version it was computed under).
+type IdentityDigest struct {
+	Kind       string `json:"kind"`
+	Digest     string `json:"digest"`
+	KeyVersion int    `json:"key_version"`
+}
+
+// EscalateDeletedAccountToAbuse is the operator lever for "they purged before
+// we classified": from the purged account's summary it writes (or extends)
+// an abuse-class tombstone for every recorded identifier digest and extends
+// the summary to the abuse hold. Works entirely from digests — no plaintext is
+// needed or available. Returns the number of tombstones written.
+func (s *Store) EscalateDeletedAccountToAbuse(ctx context.Context, accountRef, actor, reason string) (int, error) {
+	written := 0
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
+		var raw []byte
+		if err := tx.QueryRow(ctx,
+			`SELECT identity_digests FROM deleted_account_summaries WHERE account_ref = $1 FOR UPDATE`, accountRef,
+		).Scan(&raw); err != nil {
+			return err
+		}
+		var digests []IdentityDigest
+		if err := json.Unmarshal(raw, &digests); err != nil {
+			return fmt.Errorf("decode identity digests: %w", err)
+		}
+		var now time.Time
+		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+			return err
+		}
+		until := now.Add(AbuseTombstoneHold)
+		for _, d := range digests {
+			bin, err := hex.DecodeString(d.Digest)
+			if err != nil || len(bin) != 32 || d.KeyVersion <= 0 {
+				return fmt.Errorf("summary holds a malformed digest for kind %s", d.Kind)
+			}
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, d.Kind+":"+d.Digest); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO identity_tombstones (kind, digest, key_version, class, account_ref, expires_at)
+				VALUES ($1, $2, $3, 'abuse', $4, $5)
+				ON CONFLICT (kind, digest, key_version) DO UPDATE
+				   SET class = 'abuse',
+				       expires_at = GREATEST(identity_tombstones.expires_at, EXCLUDED.expires_at),
+				       account_ref = EXCLUDED.account_ref`,
+				d.Kind, bin, d.KeyVersion, accountRef, until); err != nil {
+				return fmt.Errorf("escalate tombstone: %w", err)
+			}
+			written++
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE deleted_account_summaries
+			   SET retention_class = 'abuse', expires_at = GREATEST(expires_at, $2)
+			 WHERE account_ref = $1`, accountRef, until); err != nil {
+			return err
+		}
+		return recordTombstoneEventTx(ctx, tx, accountRef, "escalate_abuse", int64(written), actor, reason)
+	})
+	return written, err
+}
+
+// DeleteExpiredTombstones removes tombstones past their hold (and expired
+// tombstone-override audit rows).
 func (s *Store) DeleteExpiredTombstones(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM identity_tombstones WHERE expires_at <= now()`)
 	if err != nil {
 		return 0, err
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM identity_tombstone_events WHERE expires_at <= now()`); err != nil {
+		return tag.RowsAffected(), err
 	}
 	return tag.RowsAffected(), nil
 }

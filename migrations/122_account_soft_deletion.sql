@@ -78,7 +78,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- account held. account_ref is the purged user id — not a foreign key, the
 -- row outlives the user by design.
 CREATE TABLE IF NOT EXISTS identity_tombstones (
-    kind        TEXT NOT NULL CHECK (kind IN ('login_subject', 'email', 'domain')),
+    kind        TEXT NOT NULL CHECK (kind IN ('login_subject', 'email', 'domain', 'agent_address', 'email_domain')),
     digest      BYTEA NOT NULL CHECK (octet_length(digest) = 32),
     key_version INTEGER NOT NULL CHECK (key_version > 0),
     class       TEXT NOT NULL CHECK (class IN ('recent_deletion', 'abuse')),
@@ -94,10 +94,30 @@ CREATE INDEX IF NOT EXISTS identity_tombstones_expires_idx
 CREATE INDEX IF NOT EXISTS identity_tombstones_account_idx
     ON identity_tombstones (account_ref);
 
+-- Operator audit of tombstone overrides (extend, revoke, escalate-to-abuse).
+-- No foreign key: it outlives the account; reaped by expires_at.
+CREATE TABLE IF NOT EXISTS identity_tombstone_events (
+    id          TEXT PRIMARY KEY,
+    account_ref TEXT NOT NULL CHECK (btrim(account_ref) <> ''),
+    action      TEXT NOT NULL CHECK (action IN ('extend', 'revoke', 'escalate_abuse')),
+    rows_affected INTEGER NOT NULL CHECK (rows_affected >= 0),
+    actor       TEXT NOT NULL CHECK (btrim(actor) <> ''),
+    reason      TEXT NOT NULL CHECK (btrim(reason) <> '' AND char_length(reason) <= 1000),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    CHECK (expires_at > created_at)
+);
+
+CREATE INDEX IF NOT EXISTS identity_tombstone_events_account_idx
+    ON identity_tombstone_events (account_ref, created_at);
+CREATE INDEX IF NOT EXISTS identity_tombstone_events_expires_idx
+    ON identity_tombstone_events (expires_at);
+
 -- Deleted-account summary: a compact abuse-evidence record written once, at
 -- purge, for every purged account. It holds counts, a bounded recipient-domain
--- histogram (domains only), per-day send counts, keyed digests of subjects and
--- verified domains, and the pause state at purge. It never holds message
+-- histogram (domains only), per-day send counts, keyed digests of subjects,
+-- verified domains and the account's identifiers, and the pause state and
+-- class at purge (never the free-text pause reason). It never holds message
 -- bodies, recipient addresses, or the owner email in the clear. Retention is
 -- expires_at (the abuse hold when the account was abuse-paused, otherwise the
 -- recent-deletion hold); the janitor deletes expired rows.
@@ -109,7 +129,6 @@ CREATE TABLE IF NOT EXISTS deleted_account_summaries (
     account_class           TEXT NOT NULL,
     sending_state           TEXT CHECK (sending_state IS NULL OR sending_state IN ('active', 'paused')),
     pause_class             TEXT CHECK (pause_class IS NULL OR pause_class IN ('operator', 'abuse', 'billing', 'system')),
-    pause_reason            TEXT,
     evidence_ref            TEXT,
     agents_count            INTEGER NOT NULL CHECK (agents_count >= 0),
     messages_count          BIGINT NOT NULL CHECK (messages_count >= 0),
@@ -120,6 +139,11 @@ CREATE TABLE IF NOT EXISTS deleted_account_summaries (
     daily_sends             JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(daily_sends) = 'array'),
     subject_digests         JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(subject_digests) = 'array'),
     verified_domain_digests JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(verified_domain_digests) = 'array'),
+    -- Keyed digests of every identifier an abuse hold would close
+    -- ([{kind, digest, key_version}]): login subjects, email, email domain,
+    -- verified domains and shared-domain agent addresses. Kept so an
+    -- operator can escalate a purged account to an abuse hold afterwards.
+    identity_digests        JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(identity_digests) = 'array'),
     digest_key_version      INTEGER CHECK (digest_key_version IS NULL OR digest_key_version > 0),
     retention_class         TEXT NOT NULL CHECK (retention_class IN ('recent_deletion', 'abuse')),
     expires_at              TIMESTAMPTZ NOT NULL,

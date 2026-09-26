@@ -497,13 +497,21 @@ func TestTombstonesRefuseEveryRegistrationEntryPoint(t *testing.T) {
 	if err := store.VerifyDomain(ctx, "held.example.test", user.ID); err != nil {
 		t.Fatal(err)
 	}
-	abusePause(t, pool, user.ID, "")
-	res, err := store.EraseAccount(ctx, user.ID, nil)
-	if err != nil {
-		t.Fatalf("EraseAccount: %v", err)
+	if _, err := store.CreateAgentWithLimit(ctx, "held-slug@agents.e2a.dev", "agents.e2a.dev", "Slug", user.ID, 0); err != nil {
+		t.Fatal(err)
 	}
-	if res.Mode != identity.AccountDeleteModePermanent || !res.UserDeleted {
-		t.Fatalf("erase receipt = %+v", res)
+	abusePause(t, pool, user.ID, "")
+	// An abuse-paused account cannot be erased on demand ...
+	if _, err := store.EraseAccount(ctx, user.ID, nil); !errors.Is(err, identity.ErrEraseHeld) {
+		t.Fatalf("EraseAccount of a paused account err = %v, want ErrEraseHeld", err)
+	}
+	// ... it is trashed, and the janitor purge writes the abuse hold.
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	ageTrash(t, pool, user.ID)
+	if purged, err := store.PurgeDeletedUsers(ctx, nil); err != nil || len(purged) != 1 {
+		t.Fatalf("purge: %v %v", purged, err)
 	}
 
 	// Same subject.
@@ -532,9 +540,284 @@ func TestTombstonesRefuseEveryRegistrationEntryPoint(t *testing.T) {
 	if _, err := store.ClaimOrCreateDomain(ctx, "HELD.example.test.", other.ID); !errors.Is(err, identity.ErrDomainTaken) {
 		t.Errorf("domain err = %v, want ErrDomainTaken", err)
 	}
+	// The shared-domain slug the abuse account held is closed too.
+	if _, err := store.CreateAgentWithLimit(ctx, "Held-Slug@agents.e2a.dev", "agents.e2a.dev", "Slug", other.ID, 0); !errors.Is(err, identity.ErrAgentAddressHeld) {
+		t.Errorf("held slug err = %v, want ErrAgentAddressHeld", err)
+	}
+	// The owner's email domain is webmail (gmail), so it is NOT held.
+	if _, err := store.CreateOrGetUser(ctx, "unrelated@gmail.com", "U", "sub-unrelated-gmail"); err != nil {
+		t.Errorf("a webmail domain was held: %v", err)
+	}
 	// An unrelated identity still registers.
 	if _, err := store.CreateOrGetUser(ctx, "unrelated@example.test", "U", "sub-unrelated"); err != nil {
 		t.Errorf("unrelated signup refused: %v", err)
+	}
+}
+
+// TestAbuseHoldClosesACorporateEmailDomain: a non-webmail owner domain is
+// held for the abuse window; every signup/provision at that domain refuses.
+func TestAbuseHoldClosesACorporateEmailDomain(t *testing.T) {
+	store, pool, _ := tombstoneStore(t)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "boss@scam-corp.test", "B", "sub-corp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	abusePause(t, pool, user.ID, "")
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	ageTrash(t, pool, user.ID)
+	if purged, err := store.PurgeDeletedUsers(ctx, nil); err != nil || len(purged) != 1 {
+		t.Fatalf("purge: %v %v", purged, err)
+	}
+	if _, err := store.CreateOrGetUser(ctx, "newhire@SCAM-CORP.test", "N", "sub-newhire"); !errors.Is(err, identity.ErrRegistrationRefused) {
+		t.Fatalf("signup at a held corporate domain err = %v", err)
+	}
+	if _, _, err := store.ProvisionUser(ctx, "tcusr_corp", "ops@scam-corp.test", "O", ""); !errors.Is(err, identity.ErrRegistrationRefused) {
+		t.Fatalf("provision at a held corporate domain err = %v", err)
+	}
+}
+
+// TestAbuseIsDerivedFromPauseHistory: an account paused as abuse, resumed and
+// re-paused under another class still gets the abuse hold at purge.
+func TestAbuseIsDerivedFromPauseHistory(t *testing.T) {
+	store, pool, _ := tombstoneStore(t)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "history@example.test", "H", "sub-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class) VALUES ($1, 'paused', 'r', 'op', 'operator');
+		INSERT INTO account_sending_control_events (id, account_ref, old_state, new_state, reason, actor, pause_class, expires_at)
+		VALUES ('asce_hist', $1, 'active', 'paused', 'r', 'op', 'abuse', now() + interval '90 days')`, user.ID); err != nil {
+		// multi-statement with params is not allowed; fall back to two calls
+		t.Logf("combined insert: %v", err)
+		if _, err := pool.Exec(ctx, `INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class) VALUES ($1, 'paused', 'r', 'op', 'operator')`, user.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO account_sending_control_events (id, account_ref, old_state, new_state, reason, actor, pause_class, expires_at)
+			VALUES ('asce_hist', $1, 'active', 'paused', 'r', 'op', 'abuse', now() + interval '90 days')`, user.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	ageTrash(t, pool, user.ID)
+	if purged, err := store.PurgeDeletedUsers(ctx, nil); err != nil || len(purged) != 1 {
+		t.Fatalf("purge: %v %v", purged, err)
+	}
+	sum, err := store.GetDeletedAccountSummary(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.RetentionClass != "abuse" {
+		t.Fatalf("retention = %s, want abuse (derived from the pause history)", sum.RetentionClass)
+	}
+}
+
+// TestEscalateDeletedAccountToAbuseAfterPurge: an account erased before any
+// classification can be escalated from its summary's digests alone.
+func TestEscalateDeletedAccountToAbuseAfterPurge(t *testing.T) {
+	store, pool, _ := tombstoneStore(t)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "late@late-corp.test", "L", "sub-late")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAgentWithLimit(ctx, "late-slug@agents.e2a.dev", "agents.e2a.dev", "S", user.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EraseAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := store.GetDeletedAccountSummary(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.RetentionClass != "recent_deletion" || len(sum.IdentityDigests) < 4 {
+		t.Fatalf("summary before escalation: %s digests=%v", sum.RetentionClass, sum.IdentityDigests)
+	}
+	n, err := store.EscalateDeletedAccountToAbuse(ctx, user.ID, "test-operator", "synthetic escalation")
+	if err != nil || n != len(sum.IdentityDigests) {
+		t.Fatalf("escalate: n=%d err=%v", n, err)
+	}
+	var abuse int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM identity_tombstones WHERE account_ref = $1 AND class = 'abuse' AND expires_at > now() + interval '700 days'`, user.ID).Scan(&abuse); err != nil {
+		t.Fatal(err)
+	}
+	if abuse != n {
+		t.Fatalf("abuse tombstones = %d, want %d", abuse, n)
+	}
+	other, err := store.CreateOrGetUser(ctx, "someone@example.test", "S", "sub-someone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAgentWithLimit(ctx, "late-slug@agents.e2a.dev", "agents.e2a.dev", "S", other.ID, 0); !errors.Is(err, identity.ErrAgentAddressHeld) {
+		t.Fatalf("escalated slug err = %v", err)
+	}
+	if _, err := store.CreateOrGetUser(ctx, "x@late-corp.test", "X", "sub-x"); !errors.Is(err, identity.ErrRegistrationRefused) {
+		t.Fatalf("escalated corporate domain err = %v", err)
+	}
+	after, err := store.GetDeletedAccountSummary(ctx, user.ID)
+	if err != nil || after.RetentionClass != "abuse" || time.Until(after.ExpiresAt) < 700*24*time.Hour {
+		t.Fatalf("summary after escalation: %+v err=%v", after, err)
+	}
+}
+
+// TestRevokeKeepsAHoldSharedWithAnotherAccount: revoking one account's
+// tombstones must not reopen an identifier another purged account also holds.
+func TestRevokeKeepsAHoldSharedWithAnotherAccount(t *testing.T) {
+	store, pool, _ := tombstoneStore(t)
+	ctx := context.Background()
+	a, err := store.CreateOrGetUser(ctx, "a@shared-corp.test", "A", "sub-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.CreateOrGetUser(ctx, "b@shared-corp.test", "B", "sub-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []*identity.User{a, b} {
+		abusePause(t, pool, u.ID, "")
+		if _, err := store.TrashAccount(ctx, u.ID, nil); err != nil {
+			t.Fatal(err)
+		}
+		ageTrash(t, pool, u.ID)
+	}
+	if purged, err := store.PurgeDeletedUsers(ctx, nil); err != nil || len(purged) != 2 {
+		t.Fatalf("purge: %v %v", purged, err)
+	}
+	revoked, kept, err := store.RevokeAccountTombstones(ctx, a.ID, "test-operator", "synthetic revoke")
+	if err != nil || revoked == 0 || kept != 1 {
+		t.Fatalf("revoke: revoked=%d kept=%d err=%v (want the shared email-domain hold kept)", revoked, kept, err)
+	}
+	if _, err := store.CreateOrGetUser(ctx, "c@shared-corp.test", "C", "sub-c"); !errors.Is(err, identity.ErrRegistrationRefused) {
+		t.Fatalf("the other account's domain hold was lost: %v", err)
+	}
+	if _, err := store.CreateOrGetUser(ctx, "fresh@example.test", "F", "sub-a"); err != nil {
+		t.Fatalf("a's own subject still held after revoke: %v", err)
+	}
+}
+
+func TestEraseIsHeldWhileAnyPauseApplies(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "held@example.test", "H", "sub-held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := store.CreateAgent(ctx, "held-bot@agents.e2a.dev", "agents.e2a.dev", "H", "", "cloud", user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class) VALUES ($1, 'paused', 'r', 'op', 'billing')`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EraseAccount(ctx, user.ID, nil); !errors.Is(err, identity.ErrEraseHeld) {
+		t.Fatalf("erase err = %v, want ErrEraseHeld", err)
+	}
+	if _, err := store.DeleteAgent(ctx, ag.ID, user.ID); !errors.Is(err, identity.ErrEraseHeld) {
+		t.Fatalf("permanent agent delete err = %v, want ErrEraseHeld", err)
+	}
+	if err := store.SoftDeleteAgent(ctx, ag.ID, user.ID); err != nil {
+		t.Fatalf("trashing an agent must stay available: %v", err)
+	}
+}
+
+func TestRestoreIsRateLimited(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "churn@example.test", "C", "sub-churn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+			t.Fatal(err)
+		}
+		_, err := store.RestoreAccount(ctx, user.ID, "")
+		if i == 0 && err != nil {
+			t.Fatalf("first restore: %v", err)
+		}
+		if i == 1 && !errors.Is(err, identity.ErrRestoreRateLimited) {
+			t.Fatalf("second restore within the cooldown err = %v", err)
+		}
+	}
+}
+
+func TestTrashBumpsAgentAssertionVersions(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "jwt@example.test", "J", "sub-jwt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := store.CreateAgent(ctx, "jwt-bot@agents.e2a.dev", "agents.e2a.dev", "J", "", "cloud", user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after int
+	if err := pool.QueryRow(ctx, `SELECT assertion_version FROM agent_identities WHERE id = $1`, ag.ID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT assertion_version FROM agent_identities WHERE id = $1`, ag.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before+1 {
+		t.Fatalf("assertion_version %d -> %d, want a bump", before, after)
+	}
+}
+
+func TestGoogleEmailCollisionWithATrashedRowIsClassified(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "collide@example.test", "C", "sub-collide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateOrGetUser(ctx, "collide@example.test", "C", "sub-other"); !errors.Is(err, identity.ErrEmailConflict) {
+		t.Fatalf("live collision err = %v, want ErrEmailConflict", err)
+	}
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateOrGetUser(ctx, "collide@example.test", "C", "sub-other"); !errors.Is(err, identity.ErrAccountTrashed) {
+		t.Fatalf("trashed collision err = %v, want ErrAccountTrashed", err)
+	}
+}
+
+func TestSummaryCountsSurviveMessageErasureThroughUsageEvents(t *testing.T) {
+	store, pool, _ := tombstoneStore(t)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "wiper@example.test", "W", "sub-wiper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := pool.Exec(ctx, `INSERT INTO usage_events (id, user_id, agent_id, domain, direction) VALUES ($1, $2, 'gone@agents.e2a.dev', 'agents.e2a.dev', 'outbound')`,
+			"ue_wipe_"+string(rune('a'+i)), user.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.EraseAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := store.GetDeletedAccountSummary(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.OutboundSendsCount != 3 || sum.FirstOutboundAt == nil || len(sum.DailySends) != 1 || sum.DailySends[0].Count != 3 {
+		t.Fatalf("summary from usage events: sends=%d first=%v daily=%v", sum.OutboundSendsCount, sum.FirstOutboundAt, sum.DailySends)
 	}
 }
 
@@ -776,7 +1059,7 @@ func TestTrashLeavesADomainOtherAccountsDependOn(t *testing.T) {
 	pool := testutil.TestDB(t)
 	store := identity.NewStore(pool)
 	ctx := context.Background()
-	const shared = "shared.agents.localhost"
+	const shared = "shared.agents.e2a.dev"
 	if err := store.EnsureSharedDomain(ctx, shared); err != nil {
 		t.Fatal(err)
 	}
@@ -807,6 +1090,96 @@ func TestTrashLeavesADomainOtherAccountsDependOn(t *testing.T) {
 	}
 	if !verified || len(hooked) != 0 {
 		t.Fatalf("shared domain verified=%v teardown=%v; another account's inboxes depend on it", verified, hooked)
+	}
+
+	// Purging the probe account must not wedge on the other account's
+	// agents: the domain goes back to the platform (unowned, verified).
+	store.SetTombstonePolicy(identity.TombstonePolicy{Enabled: true, Keyring: testKeyring(t)})
+	abusePause(t, pool, probe.ID, "")
+	ageTrash(t, pool, probe.ID)
+	purged, err := store.PurgeDeletedUsers(ctx, func(_ context.Context, _ pgx.Tx, d string) error {
+		hooked = append(hooked, d)
+		return nil
+	})
+	if err != nil || len(purged) != 1 {
+		t.Fatalf("probe purge wedged: purged=%v err=%v", purged, err)
+	}
+	var owner *string
+	if err := pool.QueryRow(ctx, `SELECT user_id, verified FROM domains WHERE domain = $1`, shared).Scan(&owner, &verified); err != nil {
+		t.Fatal(err)
+	}
+	if owner != nil || !verified || len(hooked) != 0 {
+		t.Fatalf("shared domain after purge: owner=%v verified=%v teardown=%v", owner, verified, hooked)
+	}
+	var custAgents, domainHolds int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_identities WHERE user_id = $1`, customer.ID).Scan(&custAgents); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM identity_tombstones WHERE account_ref = $1 AND kind = 'domain'`, probe.ID).Scan(&domainHolds); err != nil {
+		t.Fatal(err)
+	}
+	if custAgents != 1 || domainHolds != 0 {
+		t.Fatalf("customer agents=%d, shared-domain abuse holds=%d; want 1 and 0", custAgents, domainHolds)
+	}
+}
+
+// TestRestrictedSessionOfALiveAccountNeverResolves pins the NOT s.restricted
+// predicate on its own (the trashed-user predicate would otherwise mask it).
+func TestRestrictedSessionOfALiveAccountNeverResolves(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "live-restricted@example.test", "L", "sub-live-restricted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_sessions (token, user_id, expires_at, restricted) VALUES ('sess_live_restricted', $1, now() + interval '1 hour', true)`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetUserSession(ctx, "sess_live_restricted"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("a restricted session resolved as an ordinary session: err=%v", err)
+	}
+}
+
+// TestPurgeTombstoneWriteTakesTheDigestLock is the purge-side half of the
+// advisory-lock contract: while a signup holds a digest lock mid-check, the
+// purge's tombstone write for that identifier must wait for it.
+func TestPurgeTombstoneWriteTakesTheDigestLock(t *testing.T) {
+	store, pool, kr := tombstoneStore(t)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "lock@example.test", "L", "sub-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := kr.Digest(kr.ActiveVersion(), identity.TombstoneKindEmail, identity.NormalizeTombstoneValue(identity.TombstoneKindEmail, "lock@example.test"))
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "email:"+hex.EncodeToString(d)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.EraseAccount(ctx, user.ID, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the purge wrote its tombstone while a signup held the digest lock (err=%v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("erase after the lock was released: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the purge never resumed")
 	}
 }
 

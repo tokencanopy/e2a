@@ -85,3 +85,26 @@ func TestRecentDeletionHold(t *testing.T) {
 		t.Errorf("hold with a 45-day window = %v", got)
 	}
 }
+
+func TestTombstoneKeyringActiveSelector(t *testing.T) {
+	key32 := "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	raw := "v1:" + key32 + ",v2:" + key32
+	kr, err := identity.ParseTombstoneKeyringWithActive(raw, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kr.ActiveVersion() != 1 || !kr.Has(2) {
+		t.Fatalf("active=%d has(v2)=%v, want v1 active with v2 known (two-phase rotation)", kr.ActiveVersion(), kr.Has(2))
+	}
+	if kr, _ := identity.ParseTombstoneKeyringWithActive(raw, ""); kr.ActiveVersion() != 2 {
+		t.Fatalf("default active = %d, want the highest", kr.ActiveVersion())
+	}
+	for _, bad := range []string{"v3", "2", "vx"} {
+		if _, err := identity.ParseTombstoneKeyringWithActive(raw, bad); err == nil {
+			t.Errorf("active selector %q accepted", bad)
+		}
+	}
+	if _, err := identity.ParseTombstoneKeyringWithActive("", "v1"); err == nil {
+		t.Error("an active selector without a key was accepted")
+	}
+}
