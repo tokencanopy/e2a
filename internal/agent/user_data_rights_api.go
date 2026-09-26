@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tokencanopy/e2a/internal/auth"
+	"github.com/tokencanopy/e2a/internal/billingnotify"
 	"github.com/tokencanopy/e2a/internal/identity"
 )
 
@@ -84,14 +85,11 @@ func (a *API) DeleteUserDataCore(ctx context.Context, user *identity.User, perma
 	)
 	erase := permanent || !identity.AccountTrashEnabled()
 	if erase {
+		// A paused account is refused (ErrEraseHeld) on every erase path,
+		// including a plain delete on a deployment with account trash
+		// disabled: there is no trash window to hold it in.
 		res, err = a.store.EraseAccount(ctx, user.ID, a.domainTeardownHook)
-		// A deployment with account trash disabled has no trash to fall back
-		// to on an explicit request, but a plain delete of a paused account
-		// still goes to the trash: the janitor purges it at once (retention
-		// 0) with the abuse classification intact.
-		if errors.Is(err, identity.ErrEraseHeld) && !permanent {
-			erase = false
-		} else if err != nil {
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -159,6 +157,12 @@ const (
 )
 
 func (a *API) notifyBilling(ctx context.Context, userID, mode string) {
+	// Trash/restore notices are durable River jobs when the store's
+	// account-state hook is wired (billingnotify); only purge — and a
+	// deployment without the job — posts directly here.
+	if mode != billingModePurge && a.store.HasAccountStateHook() {
+		return
+	}
 	var (
 		target string
 		body   map[string]string
@@ -220,7 +224,7 @@ func (a *API) postBilling(ctx context.Context, target string, payload map[string
 	if resp.StatusCode != http.StatusNoContent {
 		// Status code only: the sidecar's response body is third-party text that
 		// would flow into logs via callers' err=%v. The sidecar logs its own errors.
-		return fmt.Errorf("billing hook returned status %d", resp.StatusCode)
+		return billingStatusError(resp.StatusCode)
 	}
 	return nil
 }
@@ -278,4 +282,27 @@ func (a *API) ClearRestoreSessionCookie(w http.ResponseWriter) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
+}
+
+// PostAccountState is the billingnotify.Poster: it sends one trash/restore
+// notice to the account-state endpoint. A 404 (an older billing service)
+// maps to billingnotify.ErrNotFound so the job completes instead of retrying.
+func (a *API) PostAccountState(ctx context.Context, userID, mode string) error {
+	target := a.accountStateURL()
+	if target == "" {
+		return nil
+	}
+	err := a.postBilling(ctx, target, map[string]string{"user_id": userID, "mode": mode})
+	var se billingStatusError
+	if errors.As(err, &se) && int(se) == http.StatusNotFound {
+		return billingnotify.ErrNotFound
+	}
+	return err
+}
+
+// billingStatusError is a non-204 billing response status.
+type billingStatusError int
+
+func (e billingStatusError) Error() string {
+	return fmt.Sprintf("billing hook returned status %d", int(e))
 }

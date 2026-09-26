@@ -616,22 +616,36 @@ func (s *Store) RevokeAccountTombstones(ctx context.Context, accountRef, actor, 
 			return fmt.Errorf("decode identity digests: %w", err)
 		}
 		for _, d := range digests {
-			var shared bool
-			if err := tx.QueryRow(ctx, `
-				SELECT EXISTS (
-				    SELECT 1 FROM deleted_account_summaries
-				     WHERE account_ref <> $1 AND expires_at > now()
-				       AND identity_digests @> jsonb_build_array(jsonb_build_object('kind', $2::text, 'digest', $3::text)))`,
-				accountRef, d.Kind, d.Digest).Scan(&shared); err != nil {
-				return err
-			}
-			if shared {
-				kept++
-				continue
-			}
 			bin, err := hex.DecodeString(d.Digest)
 			if err != nil {
 				return fmt.Errorf("decode digest: %w", err)
+			}
+			// Does another live purged account hold this digest? An abuse
+			// summary holds every identifier it recorded; a recent-deletion
+			// summary holds only its login subjects and email.
+			var otherRef, otherClass *string
+			var otherUntil *time.Time
+			if err := tx.QueryRow(ctx, `
+				SELECT account_ref, retention_class, expires_at FROM deleted_account_summaries
+				 WHERE account_ref <> $1 AND expires_at > now()
+				   AND identity_digests @> jsonb_build_array(jsonb_build_object('kind', $2::text, 'digest', $3::text))
+				   AND (retention_class = 'abuse' OR $2 IN ('login_subject', 'email'))
+				 ORDER BY (retention_class = 'abuse') DESC, expires_at DESC
+				 LIMIT 1`,
+				accountRef, d.Kind, d.Digest).Scan(&otherRef, &otherClass, &otherUntil); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if otherRef != nil {
+				// Keep the hold, but at the OTHER account's class and expiry,
+				// not at whatever this account's upsert left behind.
+				if _, err := tx.Exec(ctx, `
+					UPDATE identity_tombstones SET class = $4, expires_at = $5, account_ref = $6
+					 WHERE kind = $1 AND digest = $2 AND key_version = $3`,
+					d.Kind, bin, d.KeyVersion, *otherClass, *otherUntil, *otherRef); err != nil {
+					return err
+				}
+				kept++
+				continue
 			}
 			tag, err := tx.Exec(ctx,
 				`DELETE FROM identity_tombstones WHERE kind = $1 AND digest = $2 AND key_version = $3`,
@@ -677,13 +691,26 @@ func (s *Store) EscalateDeletedAccountToAbuse(ctx context.Context, accountRef, a
 			return err
 		}
 		until := now.Add(AbuseTombstoneHold)
+		// Take every digest lock first, in sorted order — the same order the
+		// purge and signup paths lock in — so escalation cannot deadlock
+		// against a concurrent purge.
+		keys := make([]string, 0, len(digests))
+		for _, d := range digests {
+			keys = append(keys, d.Kind+":"+d.Digest)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			if i > 0 && keys[i-1] == k {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, k); err != nil {
+				return err
+			}
+		}
 		for _, d := range digests {
 			bin, err := hex.DecodeString(d.Digest)
 			if err != nil || len(bin) != 32 || d.KeyVersion <= 0 {
 				return fmt.Errorf("summary holds a malformed digest for kind %s", d.Kind)
-			}
-			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, d.Kind+":"+d.Digest); err != nil {
-				return err
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO identity_tombstones (kind, digest, key_version, class, account_ref, expires_at)

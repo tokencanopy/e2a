@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -697,6 +698,19 @@ func TestRevokeKeepsAHoldSharedWithAnotherAccount(t *testing.T) {
 	if _, err := store.CreateOrGetUser(ctx, "c@shared-corp.test", "C", "sub-c"); !errors.Is(err, identity.ErrRegistrationRefused) {
 		t.Fatalf("the other account's domain hold was lost: %v", err)
 	}
+	// The kept hold is re-attributed to b, at b's class and expiry.
+	var ref, class string
+	var until time.Time
+	if err := pool.QueryRow(ctx, `SELECT account_ref, class, expires_at FROM identity_tombstones WHERE kind = 'email_domain'`).Scan(&ref, &class, &until); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := store.GetDeletedAccountSummary(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != b.ID || class != bs.RetentionClass || !until.Equal(bs.ExpiresAt) {
+		t.Fatalf("kept hold = %s/%s/%v, want b's %s/%s/%v", ref, class, until, b.ID, bs.RetentionClass, bs.ExpiresAt)
+	}
 	if _, err := store.CreateOrGetUser(ctx, "fresh@example.test", "F", "sub-a"); err != nil {
 		t.Fatalf("a's own subject still held after revoke: %v", err)
 	}
@@ -1207,5 +1221,47 @@ func TestRestoreExtendsTheUpgradedSession(t *testing.T) {
 	}
 	if time.Until(expires) < identity.SessionTTL-time.Minute {
 		t.Fatalf("upgraded session expires in %v, want the ordinary %v", time.Until(expires), identity.SessionTTL)
+	}
+}
+
+// TestAccountStateHookRunsInsideTrashAndRestore: the durable billing notice
+// is enqueued in the transition's own transaction — a failing hook rolls the
+// trash back, and a restore emits its own notice.
+func TestAccountStateHookRunsInsideTrashAndRestore(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "hook@example.test", "H", "sub-hook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var modes []string
+	fail := true
+	store.SetAccountStateHook(func(ctx context.Context, tx pgx.Tx, userID, mode string) error {
+		if fail {
+			return errors.New("enqueue failed")
+		}
+		var trashed bool
+		if err := tx.QueryRow(ctx, `SELECT deleted_at IS NOT NULL FROM users WHERE id = $1`, userID).Scan(&trashed); err != nil {
+			return err
+		}
+		modes = append(modes, fmt.Sprintf("%s:%v", mode, trashed))
+		return nil
+	})
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err == nil {
+		t.Fatal("a failing account-state hook did not fail the trash")
+	}
+	if u, _ := store.GetUserByIDAnyState(ctx, user.ID); u.DeletedAt != nil {
+		t.Fatal("the trash committed although its billing notice could not be enqueued")
+	}
+	fail = false
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RestoreAccount(ctx, user.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(modes) != 2 || modes[0] != "trash:true" || modes[1] != "restore:false" {
+		t.Fatalf("hook calls = %v, want [trash:true restore:false] (inside each transaction)", modes)
 	}
 }

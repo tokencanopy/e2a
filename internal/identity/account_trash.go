@@ -235,6 +235,11 @@ func (s *Store) TrashAccount(ctx context.Context, userID string, perDomainInTx f
 			}
 		}
 		res.DomainsDeleted = int64(len(domains))
+		if s.accountStateHook != nil {
+			if err := s.accountStateHook(ctx, tx, userID, AccountDeleteModeTrash); err != nil {
+				return fmt.Errorf("trash: account-state notice: %w", err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -358,6 +363,11 @@ func (s *Store) RestoreAccount(ctx context.Context, userID, sessionToken string)
 				return fmt.Errorf("restore: session: %w", err)
 			}
 		}
+		if s.accountStateHook != nil {
+			if err := s.accountStateHook(ctx, tx, userID, "restore"); err != nil {
+				return fmt.Errorf("restore: account-state notice: %w", err)
+			}
+		}
 		u, err := scanUser(tx.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, userID))
 		if err != nil {
 			return err
@@ -410,6 +420,9 @@ func accountLoginIdentifiersTx(ctx context.Context, tx pgx.Tx, userID, email, su
 // window, writing abuse tombstones when the history says abuse).
 func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx func(ctx context.Context, tx pgx.Tx, domain string) error) (*DeleteUserDataResult, error) {
 	res := &DeleteUserDataResult{Mode: AccountDeleteModePermanent}
+	// Fast path with no side effects; the authoritative check runs under the
+	// user lock in the purge claim (a pause racing in after this read leaves
+	// the account trashed, not erased).
 	if held, err := s.AccountSendingPaused(ctx, userID); err != nil {
 		return nil, err
 	} else if held {
@@ -550,6 +563,21 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		}
 		if purgeToken == nil && !force && !expired {
 			return ErrNotInTrash
+		}
+		// On-demand erasure (force) re-checks the pause under the user lock:
+		// SetAccountPause takes users FOR SHARE, so a pause cannot commit
+		// between this read and the claim. The janitor's purge after the
+		// window is not held (it writes abuse tombstones when warranted).
+		if force && purgeToken == nil {
+			var paused bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM account_sending_controls WHERE user_id = $1 AND state = 'paused')`, userID,
+			).Scan(&paused); err != nil {
+				return err
+			}
+			if paused {
+				return ErrEraseHeld
+			}
 		}
 		if purgeToken != nil {
 			token = *purgeToken

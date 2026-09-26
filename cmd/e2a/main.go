@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -23,6 +24,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/apiserver"
 	"github.com/tokencanopy/e2a/internal/approvaltoken"
 	"github.com/tokencanopy/e2a/internal/auth"
+	"github.com/tokencanopy/e2a/internal/billingnotify"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/contactdue"
 	"github.com/tokencanopy/e2a/internal/delegated"
@@ -607,6 +609,23 @@ func main() {
 	)
 	registrars = append(registrars, contactdue.NewJobs(contactDueSweeper))
 	registrars = append(registrars, janitor.NewMaintenanceJobs(cleanupJanitor))
+	// Durable trash/restore billing notices (retried River jobs enqueued in
+	// the transition's transaction). Only when a billing service is
+	// configured; the poster is bound once the agent API exists.
+	var billingNotify *billingnotify.Jobs
+	if cfg.Limits.BillingHookURL != "" || cfg.Limits.BillingAccountStateURL != "" {
+		billingNotify = billingnotify.New(func(ctx context.Context, userID string) (bool, bool, error) {
+			u, err := store.GetUserByIDAnyState(ctx, userID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return false, false, nil
+			}
+			if err != nil {
+				return false, false, err
+			}
+			return true, u.DeletedAt != nil, nil
+		})
+		registrars = append(registrars, billingNotify)
+	}
 
 	if len(registrars) > 0 {
 		jc, jerr := jobs.New(pool, jobs.Config{}, registrars...)
@@ -621,6 +640,10 @@ func main() {
 			log.Printf("[sender-identity] SES provisioning enabled (region=%s)", cfg.SenderIdentity.SESRegion)
 		}
 		webhookDeliveryJobs.SetEnqueuer(jobsClient)
+		if billingNotify != nil {
+			billingNotify.SetEnqueuer(jobsClient)
+			store.SetAccountStateHook(billingNotify.EnqueueTx)
+		}
 		outboxWorker.WithDeliveryEnqueuer(webhookDeliveryJobs)
 		// One-shot cutover: the legacy SubscriberRetryWorker is gone, so enqueue
 		// every pre-existing pending row now — idempotent (job_id IS NULL guard),
@@ -880,6 +903,9 @@ func main() {
 	api.ConfigureProvisioning(cfg.Provisioning.Enabled, cfg.Provisioning.Secret)
 	api.SetBillingHookURL(cfg.Limits.BillingHookURL)
 	api.SetBillingAccountStateURL(cfg.Limits.BillingAccountStateURL)
+	if billingNotify != nil {
+		billingNotify.SetPoster(api.PostAccountState)
+	}
 	api.SetSubscriberStore(subscriberStore)
 	// Account-delete cascade (decision 4 / Slice 4): when SES is configured,
 	// DELETE /account enqueues an SES teardown job for every owned domain in

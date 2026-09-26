@@ -589,7 +589,21 @@ type Store struct {
 	// tombstones is the identity-tombstone policy (trash.identity_tombstones
 	// plus the dedicated tombstone key). Zero value = disabled.
 	tombstones TombstonePolicy
+	// accountStateHook, when set, runs inside the trash and restore
+	// transactions (mode "trash" / "restore") — how the durable billing
+	// notice is enqueued atomically with the transition.
+	accountStateHook func(ctx context.Context, tx pgx.Tx, userID, mode string) error
 }
+
+// SetAccountStateHook installs the in-transaction account-state hook (see
+// the field). Called once at startup.
+func (s *Store) SetAccountStateHook(h func(ctx context.Context, tx pgx.Tx, userID, mode string) error) {
+	s.accountStateHook = h
+}
+
+// HasAccountStateHook reports whether trash/restore notices are delivered
+// durably by the hook.
+func (s *Store) HasAccountStateHook() bool { return s.accountStateHook != nil }
 
 // OutboundJobCanceller is the narrow River cancellation surface identity needs
 // for hard deletes. The caller's transaction makes cancellation atomic with the
@@ -2660,11 +2674,6 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 // ErrEraseHeld: an account under a pause may trash its agents but may not
 // erase their content before an operator has classified the pause.
 func (s *Store) DeleteAgentIncarnation(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error) {
-	if held, herr := s.AccountSendingPaused(ctx, userID); herr != nil {
-		return 0, herr
-	} else if held {
-		return 0, ErrEraseHeld
-	}
 	var token string
 	var chunked bool
 	err = s.WithTx(ctx, func(tx pgx.Tx) error {
