@@ -82,7 +82,7 @@ func (m *Module) InspectExternalAccess(ctx context.Context, accountID string) (E
 	rec := ExternalAccessRecord{
 		AccountID:     accountID,
 		Approved:      facts.approved,
-		PaidEntitled:  facts.paidEntitled(policy),
+		PaidEntitled:  facts.entitled,
 		OwnerVerified: facts.ownerRecipientVerified(),
 	}
 	var state string
@@ -337,6 +337,9 @@ func scanAccessRequest(row pgx.Row) (AccessRequest, error) {
 // is therefore idempotent while a request is pending; after a decline a new
 // request (an appeal) may be filed within the rolling-window cap.
 func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in AccessRequestInput) (AccessRequest, bool, error) {
+	if err := m.requireExternalAccessEnabled(ctx); err != nil {
+		return AccessRequest{}, false, err
+	}
 	if err := in.validate(); err != nil {
 		return AccessRequest{}, false, err
 	}
@@ -403,6 +406,9 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 
 // LatestAccessRequest returns the account's most recent request, or nil.
 func (m *Module) LatestAccessRequest(ctx context.Context, userID string) (*AccessRequest, error) {
+	if err := m.requireExternalAccessEnabled(ctx); err != nil {
+		return nil, err
+	}
 	r, err := scanAccessRequest(m.pool.QueryRow(ctx,
 		`SELECT `+accessRequestColumns+` FROM external_sending_access_requests
 		  WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, userID))

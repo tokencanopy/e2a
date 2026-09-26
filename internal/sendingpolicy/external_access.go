@@ -26,8 +26,8 @@ import (
 //     account class: existing behavior.
 //  3. The message's ACTUAL outbound identity is the account's own currently
 //     verified custom domain: external recipients allowed.
-//  4. A current operator grant, or the paid-base entitlement (the account's
-//     account_limits.plan_code is in the hosted policy's paid_plan_codes):
+//  4. A current operator grant, or the billing-issued paid-base entitlement
+//     (account_limits.external_sending_entitled — never plan_code):
 //     external shared-identity sending allowed.
 //  5. Otherwise every envelope recipient (To, Cc AND Bcc) must be the
 //     account's currently verified owner mailbox or a live agent of the same
@@ -56,7 +56,7 @@ const (
 	RouteCustomIdentity ExternalAccessRoute = "custom_identity"
 	// RouteOperatorApproval: the operator grant.
 	RouteOperatorApproval ExternalAccessRoute = "operator_approval"
-	// RoutePaidEntitlement: the paid-base entitlement (plan_code listed).
+	// RoutePaidEntitlement: the billing-issued paid-base entitlement.
 	RoutePaidEntitlement ExternalAccessRoute = "paid_entitlement"
 	// RouteRestrictedRecipients: every recipient is the verified owner
 	// mailbox or a live agent of the same account.
@@ -74,7 +74,16 @@ type ExternalAccessVerdict struct {
 	// Allowed is the effective answer. In shadow mode a denial is computed
 	// (Route == RouteDenied) but Allowed stays true.
 	Allowed bool
+	// Paused is set by the preflight when the account's sending is paused.
+	// Pause wins over every access answer: the caller must report the
+	// pause, never a restriction a payment or approval could appear to fix.
+	Paused bool
 }
+
+// ErrExternalAccessDisabled means the deployment's policy leaves external
+// sending access disabled (absent or mode disabled). The status and request
+// surfaces answer "not available" rather than inventing a state.
+var ErrExternalAccessDisabled = errors.New("sendingpolicy: external sending access is disabled on this deployment")
 
 // Denied reports an enforced refusal.
 func (v ExternalAccessVerdict) Denied() bool { return !v.Allowed }
@@ -94,18 +103,11 @@ type accountAccessFacts struct {
 	// account has no proof.
 	proofAddress string
 	approved     bool
-	// planCode is account_limits.plan_code, "" when the row is missing.
-	planCode string
-}
-
-// paidEntitled reports the paid-base entitlement: the account's current
-// plan_code is in the hosted policy's paid_plan_codes list. A missing row,
-// an empty list, or any unlisted code is not entitled.
-func (f accountAccessFacts) paidEntitled(policy RuntimePolicy) bool {
-	if policy.ExternalSendingAccess == nil {
-		return false
-	}
-	return policy.ExternalSendingAccess.paidPlan(f.planCode)
+	// paused is account_sending_controls.state = 'paused'.
+	paused bool
+	// entitled is account_limits.external_sending_entitled — the
+	// billing-issued paid-base entitlement. False when the row is missing.
+	entitled bool
 }
 
 // errAccountMissing means the account row is gone. Callers already handle a
@@ -124,12 +126,13 @@ func loadAccountAccessFacts(ctx context.Context, q dbQuerier, userID string) (ac
 		SELECT u.created_at, u.account_class, u.email,
 		       u.owner_email_verified_address, u.owner_email_verified_at,
 		       COALESCE(c.external_sending_approved, false),
-		       COALESCE(l.plan_code, '')
+		       COALESCE(c.state, 'active') = 'paused',
+		       COALESCE(l.external_sending_entitled, false)
 		  FROM users AS u
 		  LEFT JOIN account_sending_controls AS c ON c.user_id = u.id
 		  LEFT JOIN account_limits AS l ON l.user_id = u.id
 		 WHERE u.id = $1`, userID,
-	).Scan(&f.createdAt, &f.class, &f.ownerEmail, &proofAddress, &proofAt, &f.approved, &f.planCode)
+	).Scan(&f.createdAt, &f.class, &f.ownerEmail, &proofAddress, &proofAt, &f.approved, &f.paused, &f.entitled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return accountAccessFacts{}, errAccountMissing
 	}
@@ -297,7 +300,7 @@ func decideExternalRoute(ctx context.Context, q dbQuerier, policy RuntimePolicy,
 	if facts.approved {
 		return RouteOperatorApproval, nil
 	}
-	if facts.paidEntitled(policy) {
+	if facts.entitled {
 		return RoutePaidEntitlement, nil
 	}
 	if len(in.envelope) == 0 {
@@ -415,11 +418,20 @@ func (m *Module) ExternalAccessPreflight(ctx context.Context, userID, agentID st
 	if policy.ExternalSendingMode() == ModeDisabled {
 		return ExternalAccessVerdict{Mode: ModeDisabled, Route: RouteNotApplicable, Allowed: true}, nil
 	}
+	facts, err := loadAccountAccessFacts(ctx, m.pool, userID)
+	if err != nil {
+		return ExternalAccessVerdict{}, err
+	}
+	if facts.paused {
+		return ExternalAccessVerdict{Mode: policy.ExternalSendingMode(), Route: RouteNotApplicable, Allowed: false, Paused: true}, nil
+	}
 	envelope, err := normalizeEnvelope(recipients)
 	if err != nil {
-		// Malformed recipients are the caller's validation problem, not a
-		// permission answer; refuse rather than guess.
-		return ExternalAccessVerdict{Mode: policy.ExternalSendingMode(), Route: RouteDenied, Allowed: policy.ExternalSendingMode() == ModeShadow}, nil
+		// Malformed or empty recipients are a validation problem that the
+		// composer answers with 400, not a permission answer. Nothing can be
+		// sent from here: acceptance re-judges the persisted, normalized
+		// envelope and fails closed on anything it cannot resolve.
+		return ExternalAccessVerdict{Mode: policy.ExternalSendingMode(), Route: RouteNotApplicable, Allowed: true}, nil
 	}
 	// The composer sends as the agent's own address exactly when its domain
 	// is ownership- and sending-verified, which is the step-3 predicate
@@ -440,8 +452,7 @@ type ExternalAccessStatus struct {
 	EnforcementApplies bool
 	// SharedExternalApproved reports the operator grant.
 	SharedExternalApproved bool
-	// PaidExternalSendingEntitled reports the paid-base entitlement derived
-	// from the account's current plan_code and the policy's paid_plan_codes.
+	// PaidExternalSendingEntitled reports the billing-issued entitlement.
 	PaidExternalSendingEntitled bool
 	// OwnerRecipientVerified reports valid proof for the current mailbox.
 	OwnerRecipientVerified bool
@@ -452,6 +463,10 @@ func (m *Module) ExternalAccessStatus(ctx context.Context, userID string) (Exter
 	policy, err := m.policyForRead(ctx, m.pool)
 	if err != nil {
 		return ExternalAccessStatus{}, err
+	}
+	if policy.ExternalSendingMode() == ModeDisabled {
+		// Feature off: no account read at all, and no object on the wire.
+		return ExternalAccessStatus{}, ErrExternalAccessDisabled
 	}
 	facts, err := loadAccountAccessFacts(ctx, m.pool, userID)
 	if err != nil {
@@ -464,7 +479,7 @@ func (m *Module) ExternalAccessStatus(ctx context.Context, userID string) (Exter
 	return ExternalAccessStatus{
 		EnforcementApplies:          applies && policy.ExternalSendingMode() == ModeEnforce,
 		SharedExternalApproved:      facts.approved,
-		PaidExternalSendingEntitled: facts.paidEntitled(policy),
+		PaidExternalSendingEntitled: facts.entitled,
 		OwnerRecipientVerified:      facts.ownerRecipientVerified(),
 	}, nil
 }
@@ -494,4 +509,18 @@ func observeExternalAccess(stage string, route ExternalAccessRoute, mode Mode) {
 	if o, ok := externalAccessObserver.Load().(ExternalAccessObserver); ok && o != nil {
 		o(stage, string(route), string(mode))
 	}
+}
+
+// requireExternalAccessEnabled refuses the customer request surfaces when the
+// control is disabled, so a deployment that never turns it on files no rows
+// and sends no operator mail.
+func (m *Module) requireExternalAccessEnabled(ctx context.Context) error {
+	policy, err := m.policyForRead(ctx, m.pool)
+	if err != nil {
+		return err
+	}
+	if policy.ExternalSendingMode() == ModeDisabled {
+		return ErrExternalAccessDisabled
+	}
+	return nil
 }

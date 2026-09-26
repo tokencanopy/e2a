@@ -987,3 +987,37 @@ func TestProviderSubmitterZeroNetworkWhenExternalAccessIsRevoked(t *testing.T) {
 		t.Fatalf("sockets = %d, want 0", n)
 	}
 }
+
+// TestProviderSubmitterZeroNetworkWhenPaidEntitlementIsLost: the billing
+// entitlement flipped off between authorization and redemption opens no
+// socket through the real adapter.
+func TestProviderSubmitterZeroNetworkWhenPaidEntitlementIsLost(t *testing.T) {
+	f := newGateFixture(t, func(p *sendingpolicy.RuntimePolicy) {
+		p.BudgetMode = sendingpolicy.ModeDisabled
+		p.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{
+			Mode: sendingpolicy.ModeEnforce, AccountsCreatedAtOrAfter: "2026-01-01T00:00:00Z",
+		}
+	})
+	relay, sockets := countingListener(t)
+	s := outbound.NewProviderSubmitter(relay, f.gate)
+	if _, err := f.pool.Exec(f.ctx, `
+		INSERT INTO account_limits (user_id, plan_code, max_agents, max_domains, max_messages_month, max_storage_bytes, external_sending_entitled)
+		VALUES ($1, 'pro', 10, 10, 1000, 1000000, true)`, f.userID); err != nil {
+		t.Fatal(err)
+	}
+	messageID, to := f.message(1)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE messages SET sent_as = 'relay' WHERE id = $1`, messageID); err != nil {
+		t.Fatal(err)
+	}
+	auth := f.authorize(f.prepare(messageID))
+	if _, err := f.pool.Exec(f.ctx, `UPDATE account_limits SET external_sending_entitled = false WHERE user_id = $1`, f.userID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if !errors.Is(err, sendingpolicy.ErrAuthorizationInvalid) {
+		t.Fatalf("err = %v, want ErrAuthorizationInvalid", err)
+	}
+	if n := sockets(); n != 0 {
+		t.Fatalf("sockets = %d, want 0 after entitlement loss", n)
+	}
+}

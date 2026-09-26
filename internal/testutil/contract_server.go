@@ -154,7 +154,6 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	sendingPolicy.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{
 		Mode:                     sendingpolicy.ModeEnforce,
 		AccountsCreatedAtOrAfter: ContractExternalAccessCutoff,
-		PaidPlanCodes:            []string{},
 	}
 	sendingModule := sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingPolicy)
 	var sendingGate sendingpolicy.Gate = sendingModule

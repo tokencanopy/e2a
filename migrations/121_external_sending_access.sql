@@ -4,10 +4,8 @@
 --
 -- Nothing here changes behaviour on its own: the gate only consults these
 -- columns when the runtime policy carries an `external_sending_access` object
--- in shadow or enforce mode, and every existing row starts unapproved and
--- without owner-mailbox proof. The paid-base entitlement needs no column: it is
--- derived at decision time from account_limits.plan_code against the hosted
--- policy's paid_plan_codes list.
+-- in shadow or enforce mode, and every existing row starts unapproved,
+-- unentitled and without owner-mailbox proof.
 
 -- Owner-mailbox proof. owner_email_verified_at is the proof (NULL = none).
 -- It is written only by a trusted login flow (Google OAuth asserting
@@ -58,6 +56,14 @@ DO $$ BEGIN
         CHECK ((external_sending_access_revision = 0) = (external_sending_access_changed_at IS NULL)
                AND (external_sending_access_revision > 0 OR NOT external_sending_approved));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Paid-base entitlement. Provider-neutral: the hosted billing writer derives it
+-- from verified subscription state (a recognized paid base plan whose status
+-- is `active` — not trialing or past_due). The OSS server only reads it and
+-- never writes it; existing writers of account_limits do not name the column,
+-- so they neither set nor clear it. plan_code is NOT authorization.
+ALTER TABLE account_limits
+    ADD COLUMN IF NOT EXISTS external_sending_entitled BOOLEAN NOT NULL DEFAULT false;
 
 -- Append-only audit of every operator change to the grant. Like
 -- account_sending_control_events it carries no foreign key: the audit outlives

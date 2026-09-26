@@ -385,7 +385,9 @@ lock is taken on the accept path: acceptance reads the runtime policy without
 the singleton share lock because it already holds source locks. The control
 is an optional `external_sending_access` runtime-policy object (absent =
 disabled, legacy hashes unchanged): `mode`, the immutable cohort cutoff
-`accounts_created_at_or_after`, and `paid_plan_codes`. Operator grants are
+and `accounts_created_at_or_after`. The paid-base entitlement is the
+billing-written `account_limits.external_sending_entitled` boolean (the
+server only reads it; `plan_code` is not authorization). Operator grants are
 local server commands (`-approve-external-sending` / `-revoke-external-sending`
 with a revision CAS and append-only `external_sending_access_events`); no API
 credential can grant access. Owner-mailbox proof

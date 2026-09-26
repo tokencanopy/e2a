@@ -47,7 +47,7 @@ func TestExternalAccessPresentChangesHashAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(canonical), `"external_sending_access":{"accounts_created_at_or_after":"2026-10-01T00:00:00Z","mode":"enforce","paid_plan_codes":[]}`) {
+	if !strings.Contains(string(canonical), `"external_sending_access":{"accounts_created_at_or_after":"2026-10-01T00:00:00Z","mode":"enforce"}`) {
 		t.Fatalf("canonical form missing object: %s", canonical)
 	}
 	parsed, err := ParsePolicy(canonical)
@@ -100,32 +100,10 @@ func TestExternalAccessNormalizedCopiesObject(t *testing.T) {
 	}
 }
 
-func TestExternalAccessPaidPlanCodes(t *testing.T) {
-	base := func(codes []string) RuntimePolicy {
-		p := DisabledPolicy()
-		p.ExternalSendingAccess = &ExternalSendingAccessPolicy{Mode: ModeEnforce, AccountsCreatedAtOrAfter: "2026-10-01T00:00:00Z", PaidPlanCodes: codes}
-		return p
-	}
-	for name, codes := range map[string][]string{"blank": {"a", " "}, "duplicate": {"a", "a"}} {
-		if err := base(codes).Validate(); err == nil {
-			t.Errorf("%s paid_plan_codes must be rejected", name)
-		}
-	}
-	nilHash, err := Hash(base(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	emptyHash, _ := Hash(base([]string{}))
-	if nilHash != emptyHash {
-		t.Fatal("nil and empty paid_plan_codes must hash alike")
-	}
-	listed := base([]string{"tier_b", "tier_a"}).ExternalSendingAccess
-	for code, want := range map[string]bool{"tier_a": true, "tier_b": true, "tier_c": false, "": false, "TIER_A": false} {
-		if got := listed.paidPlan(code); got != want {
-			t.Errorf("paidPlan(%q) = %v, want %v", code, got, want)
-		}
-	}
-	if base(nil).ExternalSendingAccess.paidPlan("tier_a") {
-		t.Error("an empty list entitles nobody")
+func TestExternalAccessRejectsRemovedPaidPlanCodesKey(t *testing.T) {
+	raw := strings.TrimSuffix(generationZeroCanonical, "}") +
+		`,"external_sending_access":{"accounts_created_at_or_after":"2026-10-01T00:00:00Z","mode":"enforce","paid_plan_codes":["pro"]}}`
+	if _, err := ParsePolicy([]byte(raw)); err == nil {
+		t.Fatal("plan codes are not authorization; the key must be rejected like any unknown key")
 	}
 }

@@ -368,7 +368,7 @@ func TestExternalSendingOperatorCommands(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.TestDB(t)
 	cfg := spTestConfig()
-	cfg.SendingProtect.ExternalSendingAccess = &config.ExternalSendingAccessConfig{Mode: "enforce", AccountsCreatedAtOrAfter: "2026-01-01T00:00:00Z", PaidPlanCodes: []string{"paid_tier_test"}}
+	cfg.SendingProtect.ExternalSendingAccess = &config.ExternalSendingAccessConfig{Mode: "enforce", AccountsCreatedAtOrAfter: "2026-01-01T00:00:00Z"}
 	clearEnvForTest(t)
 	if _, err := pool.Exec(ctx, `INSERT INTO users (id, email, google_subject) VALUES ('usr_cmd_esa', 'owner@cmd-esa.example.test', 'sub-cmd-esa')`); err != nil {
 		t.Fatal(err)
@@ -402,7 +402,7 @@ func TestExternalSendingOperatorCommands(t *testing.T) {
 	if err != nil || !strings.Contains(out, "external_sending_approved: true") || !strings.Contains(out, "external_sending_revision: 1") {
 		t.Fatalf("approve = %q err=%v", out, err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO account_limits (user_id, plan_code, max_agents, max_domains, max_messages_month, max_storage_bytes) VALUES ('usr_cmd_esa', 'paid_tier_test', 1, 1, 1, 1)`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO account_limits (user_id, plan_code, max_agents, max_domains, max_messages_month, max_storage_bytes, external_sending_entitled) VALUES ('usr_cmd_esa', 'pro', 1, 1, 1, 1, true)`); err != nil {
 		t.Fatal(err)
 	}
 	out, err = run(&sendingProtectionFlags{revokeExternal: true, accountID: "usr_cmd_esa", expectedExternal: 1, reason: "abuse report"})

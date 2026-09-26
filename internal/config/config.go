@@ -562,9 +562,6 @@ type SendingProtectionConfig struct {
 type ExternalSendingAccessConfig struct {
 	Mode                     string `yaml:"mode"`
 	AccountsCreatedAtOrAfter string `yaml:"accounts_created_at_or_after"`
-	// PaidPlanCodes are the account_limits.plan_code values whose base
-	// subscription grants external sending. Empty = nobody entitled.
-	PaidPlanCodes []string `yaml:"paid_plan_codes"`
 }
 
 // LimitsConfig is the operator-configured fallback applied to any user

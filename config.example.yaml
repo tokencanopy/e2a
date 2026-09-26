@@ -344,14 +344,14 @@ sending_protection:
   # External sending access (optional, absent = disabled). When set, accounts
   # created at/after the cutoff may reach only their verified owner mailbox
   # and their own live agents through the shared sending identity until an
-  # operator approves them (`e2a -approve-external-sending`), their plan_code is
-  # listed in paid_plan_codes, or they send from their own verified domain.
+  # operator approves them (`e2a -approve-external-sending`), a billing writer
+  # sets account_limits.external_sending_entitled (active paid base plan), or
+  # they send from their own verified domain.
   # The cutoff is an immutable RFC3339 UTC instant; leave the block out to keep
   # existing behavior (and the existing policy hash).
   # external_sending_access:
   #   mode: shadow                                   # disabled | shadow | enforce
   #   accounts_created_at_or_after: "2026-10-01T00:00:00Z"
-  #   paid_plan_codes: []                            # account_limits.plan_code values whose base plan grants external sending
 
 # Outbound delivery feedback (decision 9 / Slice 4b). When ses_configuration_set
 # is set, outbound mail is tagged with X-SES-CONFIGURATION-SET so SES publishes
