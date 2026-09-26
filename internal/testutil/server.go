@@ -181,6 +181,15 @@ func TestServer(t *testing.T, pool *pgxpool.Pool, opts ...TestServerOption) *E2A
 	}
 
 	store := identity.NewStore(pool)
+	// Mirrors production's boot-time call (cmd/e2a/main.go): the FK on
+	// agent_identities.registered_domain needs a domains row for the shared
+	// domain before any test can create a slug-based agent on it. The
+	// migration seed only covers the hardcoded customer shared domain (see
+	// EnsureSharedDomain's own doc comment), which no longer matches this
+	// harness's "agents.localhost" SharedDomain.
+	if err := store.EnsureSharedDomain(context.Background(), "agents.localhost"); err != nil {
+		t.Fatalf("ensure shared domain: %v", err)
+	}
 	outboundCfg := &config.OutboundSMTPConfig{
 		Host:            o.outboundSMTPHost,
 		Port:            o.outboundSMTPPort,
@@ -247,7 +256,7 @@ func TestServer(t *testing.T, pool *pgxpool.Pool, opts ...TestServerOption) *E2A
 		MaxMessagesMonth: 100000, MaxStorageBytes: 1 << 40,
 	}, time.Minute)
 	idempotencyStore := idempotency.NewStore(pool)
-	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
+	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.localhost", "", false)
 	api.SetProviderSubmitter(providerSubmitter, sendingGate)
 	api.SetIdempotencyStore(idempotencyStore)
 	api.SetSubscriberStore(subscriberStore)
@@ -269,7 +278,7 @@ func TestServer(t *testing.T, pool *pgxpool.Pool, opts ...TestServerOption) *E2A
 	v1 := apiserver.New(apiserver.Params{
 		API: api, Store: store, Enforcer: enforcer, UsageStore: usageStore,
 		SubscriberStore: subscriberStore, Idempotency: idempotencyStore, Pool: pool,
-		SMTPDomain: "test.e2a.dev", SharedDomain: "agents.e2a.dev",
+		SMTPDomain: "test.e2a.dev", SharedDomain: "agents.localhost",
 		PublicURL: "http://127.0.0.1", Production: false,
 		EventsEnabled: true,
 		Legacy:        router, WSHandle: wsHandler.ServeWithEmail,
