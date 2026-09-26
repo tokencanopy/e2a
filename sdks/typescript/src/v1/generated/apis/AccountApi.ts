@@ -569,6 +569,13 @@ export class AccountApiResponseProcessor {
      */
      public async createSendingAccessRequestWithHttpInfo(response: ResponseContext): Promise<HttpInfo<SendingAccessRequestView >> {
         const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
         if (isCodeInRange("201", response.httpStatusCode)) {
             const body: SendingAccessRequestView = ObjectSerializer.deserialize(
                 ObjectSerializer.parse(await response.body.text(), contentType),
@@ -581,7 +588,7 @@ export class AccountApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "ErrorEnvelope", ""
             ) as ErrorEnvelope;
-            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
         }
 
         // Work around for missing responses in specification, e.g. for petstore.yaml

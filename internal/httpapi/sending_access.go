@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -115,7 +116,17 @@ func (s *Server) registerSendingAccess() {
 			"Filing a request never grants access by itself. Account-scoped credentials only. " + sendingAccessBetaDoc,
 		Security:      []map[string][]string{{"bearer": {}}},
 		DefaultStatus: http.StatusCreated,
-		Extensions:    beta(),
+		// Two success statuses (201 created, 200 existing pending request),
+		// which Huma cannot infer from DefaultStatus alone. Undeclared, a
+		// spec-generated client has no case for 200 and hands the caller
+		// nothing on a resubmit. Re-adds `default`, which a custom Responses
+		// map otherwise suppresses.
+		Responses: map[string]*huma.Response{
+			"200": s.jsonResponse(reflect.TypeOf(SendingAccessRequestView{}), "SendingAccessRequestView",
+				"OK — a request is already pending; it is returned unchanged and no new request was created."),
+			"default": s.errorEnvelopeResponse(),
+		},
+		Extensions: beta(),
 	}, s.handleCreateSendingAccessRequest)
 }
 

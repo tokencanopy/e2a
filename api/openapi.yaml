@@ -5621,6 +5621,15 @@ paths:
               $ref: "#/components/schemas/SendingAccessRequestInput"
         required: true
       responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendingAccessRequestView"
+          description: OK — a request is already pending; it is returned unchanged and no new request was created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestID"
         "201":
           content:
             application/json:
@@ -5635,7 +5644,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-          description: Error
+          description: Error — the standard envelope; branch on error.code.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestID"

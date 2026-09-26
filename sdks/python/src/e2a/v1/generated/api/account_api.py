@@ -400,6 +400,7 @@ class AccountApi:
         )
 
         _response_types_map: Dict[str, Optional[str]] = {
+            '200': "SendingAccessRequestView",
             '201': "SendingAccessRequestView",
         }
         response_data = await self.api_client.call_api(
@@ -467,6 +468,7 @@ class AccountApi:
         )
 
         _response_types_map: Dict[str, Optional[str]] = {
+            '200': "SendingAccessRequestView",
             '201': "SendingAccessRequestView",
         }
         response_data = await self.api_client.call_api(
@@ -534,6 +536,7 @@ class AccountApi:
         )
 
         _response_types_map: Dict[str, Optional[str]] = {
+            '200': "SendingAccessRequestView",
             '201': "SendingAccessRequestView",
         }
         response_data = await self.api_client.call_api(
