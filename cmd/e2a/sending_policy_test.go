@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -329,7 +330,7 @@ func TestSendingProtectionCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("capabilities: %v", err)
 		}
-		for _, want := range []string{`"sending_protection_contract":0`, `"runtime_policy_source":"config"`, `"operator_notice_recipient_commitments":{}`} {
+		for _, want := range []string{`"sending_protection_contract":0`, `"runtime_policy_source":"config"`, `"operator_notice_recipient_commitments":{}`, `"runtime_policy_features":["external_sending_access"]`} {
 			if !strings.Contains(out, want) {
 				t.Errorf("capabilities missing %s in %s", want, out)
 			}
@@ -362,3 +363,50 @@ func clearEnvForTest(t *testing.T) {
 }
 
 func unsetEnvKey(key string) error { return os.Unsetenv(key) }
+
+func TestExternalSendingOperatorCommands(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	cfg := spTestConfig()
+	cfg.SendingProtect.ExternalSendingAccess = &config.ExternalSendingAccessConfig{Mode: "enforce", AccountsCreatedAtOrAfter: "2026-01-01T00:00:00Z"}
+	clearEnvForTest(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, email, google_subject) VALUES ('usr_cmd_esa', 'owner@cmd-esa.example.test', 'sub-cmd-esa')`); err != nil {
+		t.Fatal(err)
+	}
+	run := func(f *sendingProtectionFlags) (string, error) {
+		var out bytes.Buffer
+		err := runSendingProtectionCommand(ctx, cfg, pool, sendingpolicy.Secrets{}, f, &out)
+		return out.String(), err
+	}
+
+	if _, err := run(&sendingProtectionFlags{inspectExternal: true}); err == nil {
+		t.Fatal("a missing -account-id must be refused")
+	}
+	out, err := run(&sendingProtectionFlags{inspectExternal: true, accountID: "usr_cmd_esa"})
+	if err != nil || !strings.Contains(out, "external_sending_approved: false") || !strings.Contains(out, "external_sending_revision: 0") || !strings.Contains(out, "enforcement_applies:      true") {
+		t.Fatalf("inspect = %q err=%v", out, err)
+	}
+	if strings.Contains(out, "@") {
+		t.Fatalf("the readback must never print an address: %q", out)
+	}
+	if _, err := run(&sendingProtectionFlags{approveExternal: true, accountID: "usr_cmd_esa", expectedExternal: 0}); err == nil {
+		t.Fatal("an approval without -reason must be refused")
+	}
+	if _, err := run(&sendingProtectionFlags{approveExternal: true, accountID: "usr_cmd_esa", expectedExternal: -1, reason: "x"}); err == nil {
+		t.Fatal("an approval without the expected revision must be refused")
+	}
+	if _, err := run(&sendingProtectionFlags{approveExternal: true, accountID: "usr_cmd_esa", expectedExternal: 3, reason: "x"}); !errors.Is(err, sendingpolicy.ErrStaleExternalAccessRevision) {
+		t.Fatalf("stale approval err = %v", err)
+	}
+	out, err = run(&sendingProtectionFlags{approveExternal: true, accountID: "usr_cmd_esa", expectedExternal: 0, reason: "reviewed request"})
+	if err != nil || !strings.Contains(out, "external_sending_approved: true") || !strings.Contains(out, "external_sending_revision: 1") {
+		t.Fatalf("approve = %q err=%v", out, err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO account_limits (user_id, plan_code, max_agents, max_domains, max_messages_month, max_storage_bytes, external_sending_entitled) VALUES ('usr_cmd_esa', 'pro', 1, 1, 1, 1, true)`); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(&sendingProtectionFlags{revokeExternal: true, accountID: "usr_cmd_esa", expectedExternal: 1, reason: "abuse report"})
+	if err != nil || !strings.Contains(out, "external_sending_approved: false") || !strings.Contains(out, "paid-base entitlement") {
+		t.Fatalf("revoke = %q err=%v", out, err)
+	}
+}

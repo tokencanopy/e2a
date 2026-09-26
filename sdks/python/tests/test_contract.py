@@ -11,6 +11,12 @@ Runs against a live test server. Requires env vars:
     account, seeded already over its plan caps. The scenario proving the 402
     envelope's `current` field runs as that account and skips without it (a
     deployed staging target has no over-cap account to offer).
+  E2A_TEST_RESTRICTED_API_KEY: optional; key for the contract server's fourth
+    account, the only one inside the external-sending-access enforcement
+    cohort. Scenarios asserting that control (and the request-intake form,
+    which runs as this account so it never shares the per-account 3-per-30-day
+    quota with another scenario) run as that account and skip without it (a
+    deployed staging target has no restricted-cohort account to offer).
 
 The runner drives the server over raw HTTP (a thin scenario interpreter, not
 the ergonomic client):
@@ -38,7 +44,7 @@ import httpx
 import pytest
 import yaml
 
-from e2a.v1 import E2AClient
+from e2a.v1 import E2AClient, E2ANotFoundError
 from e2a.v1.generated.models import PageMessageLifecycleTransition
 
 # NOTE: the runner drives the server over raw HTTP (a thin scenario interpreter,
@@ -52,6 +58,7 @@ BASE_URL = os.environ.get("E2A_TEST_BASE_URL", "")
 API_KEY = os.environ.get("E2A_TEST_API_KEY", "")
 CAPPED_API_KEY = os.environ.get("E2A_TEST_CAPPED_API_KEY", "")
 OVERCAP_API_KEY = os.environ.get("E2A_TEST_OVERCAP_API_KEY", "")
+RESTRICTED_API_KEY = os.environ.get("E2A_TEST_RESTRICTED_API_KEY", "")
 
 # tests/test_contract.py -> sdks/python/tests/ -> sdks/python/ -> sdks/ -> repo root
 SCENARIOS_PATH = Path(__file__).resolve().parents[3] / "tests" / "contract" / "scenarios.yaml"
@@ -142,6 +149,7 @@ STORE_ACTIONS = {"inject_message", "verify_and_retry"}
 
 CAPPED_KEY_PLACEHOLDER = "{capped_api_key}"
 OVERCAP_KEY_PLACEHOLDER = "{overcap_api_key}"
+RESTRICTED_KEY_PLACEHOLDER = "{restricted_api_key}"
 
 
 def _scenario_uses_placeholder(sc: dict[str, Any], placeholder: str) -> bool:
@@ -180,6 +188,16 @@ def scenario_needs_overcap_account(sc: dict[str, Any]) -> bool:
     return _scenario_uses_placeholder(sc, OVERCAP_KEY_PLACEHOLDER)
 
 
+def scenario_needs_restricted_account(sc: dict[str, Any]) -> bool:
+    """True when the scenario authenticates as the restricted-cohort account.
+
+    Those scenarios need an account inside the external-sending-access
+    enforcement cohort, which only the contract server's seeded fourth account
+    provides.
+    """
+    return _scenario_uses_placeholder(sc, RESTRICTED_KEY_PLACEHOLDER)
+
+
 def scenario_needs_store(sc: dict[str, Any]) -> bool:
     setup = sc.get("setup") or []
     if any("inject_message" in s or "verify_domain" in s for s in setup):
@@ -214,6 +232,8 @@ class Runner:
             self.vars["capped_api_key"] = CAPPED_API_KEY
         if OVERCAP_API_KEY:
             self.vars["overcap_api_key"] = OVERCAP_API_KEY
+        if RESTRICTED_API_KEY:
+            self.vars["restricted_api_key"] = RESTRICTED_API_KEY
         self._http = httpx.Client(base_url=base_url, timeout=30)
 
     def close(self):
@@ -1186,6 +1206,59 @@ def test_limits_scenario_shape():
     ]
 
 
+def test_external_sending_access_scenario_shapes():
+    """Always-on guard for the two external-sending-access scenarios.
+
+    Both skip without a restricted key (a deployed target has no seeded
+    restricted-cohort account), so this shape test is what keeps that skip
+    from decaying into zero coverage. It fails if either scenario stops
+    authenticating as the restricted account or drops its core assertions.
+    """
+    restricted = _scenario_by_name("external_sending_access_restricted_account")
+    assert scenario_needs_restricted_account(restricted)
+    steps = {step["id"]: step for step in restricted["steps"]}
+
+    # An external To/Cc/Bcc refuses the WHOLE send with the typed error code —
+    # nothing queued, not a partial-recipient send.
+    for step_id in (
+        "external_to_is_refused",
+        "hidden_bcc_refuses_the_whole_send",
+        "external_cc_refuses_the_whole_send",
+    ):
+        expect = steps[step_id]["expect"]
+        assert expect["status"] == 403
+        assert expect["body_match"]["error.code"] == "external_sending_not_enabled"
+
+    # A refused, idempotency-keyed send is judged afresh on retry, not
+    # replayed as a cached success.
+    assert steps["keyed_refusal_is_not_replayed_as_success"]["expect"]["body_match"][
+        "error.code"
+    ] == "external_sending_not_enabled"
+
+    # ...and allowed when it should be: same-account agent-to-agent still
+    # works under the restriction.
+    allowed = steps["same_account_agent_is_allowed"]["expect"]
+    assert allowed["status"] == 202
+    assert allowed["body_match"]["status"] == "accepted"
+
+    intake = _scenario_by_name("external_sending_access_request_intake")
+    assert scenario_needs_restricted_account(intake)
+    intake_steps = {step["id"]: step for step in intake["steps"]}
+
+    assert intake_steps["invalid_volume_is_refused"]["expect"]["status"] == 422
+    assert intake_steps["file_request"]["expect"]["status"] == 201
+    assert intake_steps["file_request"]["expect"]["body_match"]["state"] == "pending"
+    # Idempotent-while-pending: a resubmit returns the FIRST request (200),
+    # not a second one, and doesn't adopt the resubmission's own fields.
+    resubmit = intake_steps["resubmit_returns_the_pending_request"]["expect"]
+    assert resubmit["status"] == 200
+    assert resubmit["body_match"]["id"] == "{sending_access_request_id}"
+    assert resubmit["body_match"]["use_case"] == "contract probe"
+    assert intake_steps["filing_does_not_grant_access"]["expect"]["body_match"][
+        "sending_access.shared_external_approved"
+    ] is False
+
+
 @pytest.fixture(params=_scenario_ids() if SCENARIOS_PATH.exists() else [])
 def scenario(request):
     return _scenario_by_name(request.param)
@@ -1202,6 +1275,8 @@ def test_contract_scenario(scenario):
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_CAPPED_API_KEY")
     if scenario_needs_overcap_account(scenario) and not OVERCAP_API_KEY:
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_OVERCAP_API_KEY")
+    if scenario_needs_restricted_account(scenario) and not RESTRICTED_API_KEY:
+        pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_RESTRICTED_API_KEY")
 
     runner = Runner(BASE_URL, API_KEY, scenario)
     try:
@@ -1284,3 +1359,43 @@ def test_client_send_managed_unsubscribe_is_accepted_and_held():
             assert res.message_id.startswith("msg_")
         finally:
             client.agents.delete(email)
+
+
+@requires_contract_server
+def test_client_sending_access_request_lifecycle():
+    # Runs as the PRIMARY account (not the restricted cohort account): no
+    # scenario in scenarios.yaml files a sending-access request as the primary
+    # account (external_sending_access_request_intake deliberately reserves
+    # the restricted account for that, "which no other scenario files
+    # requests for"), so the primary account starts with none filed here.
+    with E2AClient(API_KEY, base_url=BASE_URL) as client:
+        with pytest.raises(E2ANotFoundError) as ei:
+            client.account.get_sending_access_request()
+        assert ei.value.code == "not_found"
+
+        created = client.account.request_sending_access(
+            use_case="sdk contract probe",
+            recipients="our own customers who signed up",
+            expected_daily_volume=250,
+        )
+        assert created.state == "pending"
+        assert created.use_case == "sdk contract probe"
+        assert created.expected_daily_volume == 250
+
+        fetched = client.account.get_sending_access_request()
+        assert fetched.id == created.id
+        assert fetched.state == "pending"
+
+        # Idempotent while pending: resubmitting with DIFFERENT fields still
+        # returns the FIRST request untouched. The server answers this path
+        # with 200 (not 201); request_sending_access recovers the view itself
+        # rather than a bare None (see its docstring for the generated-base
+        # gap this works around).
+        resubmitted = client.account.request_sending_access(
+            use_case="a different reason",
+            recipients="someone else",
+            expected_daily_volume=999,
+        )
+        assert resubmitted.id == created.id
+        assert resubmitted.use_case == "sdk contract probe"
+        assert resubmitted.expected_daily_volume == 250

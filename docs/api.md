@@ -47,6 +47,7 @@ is currently 43 GA operations and 31 beta operations:
 | Agent-scoped suppressions | **beta** | `listAgentSuppressions`, `createAgentSuppression`, `deleteAgentSuppression` |
 | [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta) | **beta** | `getMessageLifecycle` |
 | Delivery metrics — per agent and account-wide | **beta** | `getAgentMetrics`, `getAccountMetrics` |
+| External sending access requests | **beta** | `getSendingAccessRequest`, `createSendingAccessRequest` |
 
 **Beta fields and capabilities on otherwise-GA operations** (property-level
 `x-stability-level: beta` in the spec — or, where only specific *values* of a
@@ -76,6 +77,10 @@ stable field are beta, `x-experimental-values` on that field):
   `email.bounced`, `email.complained`, `domain.suppression_added`). See
   [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta)
   and [events.md](events.md#lifecycle-transitions-on-events-beta).
+- **External sending access** — the `sending_access` object on
+  `GET /v1/account` and the `ExternalSendingNotEnabledDetails` shape of the
+  experimental `external_sending_not_enabled` error. The control ships
+  disabled; see the error-code table.
 - **Account export interior schemas** — `GET /v1/account/export` is a GA
   operation, but its interior record shapes are versioned by the export's
   `schema_version` envelope field rather than the v1 freeze, and are
@@ -85,8 +90,8 @@ stable field are beta, `x-experimental-values` on that field):
 the screening + review-hold event types (`email.flagged`, `email.blocked`,
 `email.review_requested`, `email.review_approved`, `email.review_rejected` —
 marked via `x-experimental-values` on the stable `type` field). The stable
-`error.code` vocabulary likewise marks only `blocked_by_policy` and
-`sending_paused` experimental.
+`error.code` vocabulary likewise marks only `blocked_by_policy`,
+`sending_paused` and `external_sending_not_enabled` experimental.
 See [events.md](events.md).
 
 The exact operation-level list is repeated with methods and paths in
@@ -315,6 +320,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `forbidden` | 403 | Authenticated but not allowed (key scope, cross-tenant access). |
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
 | `sending_paused` | 403 | **Experimental.** Outbound sending is paused for the account by the platform abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
+| `external_sending_not_enabled` | 403 | **Experimental.** The account may not send to one or more of the To/Cc/Bcc recipients through its sending identity. Nothing was queued. `error.details` (`ExternalSendingNotEnabledDetails`) lists the allowed destinations and the dashboard recovery URL; retrying the same request will not succeed. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |
@@ -409,6 +415,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `approveReview` | `POST /v1/reviews/{id}/approve` | Reviews |
 | `createAgentSuppression` | `POST /v1/agents/{email}/suppressions` | Agent suppressions |
 | `createContact` | `POST /v1/contacts` | Contacts |
+| `createSendingAccessRequest` | `POST /v1/account/sending-access/request` | External sending access |
 | `createTemplate` | `POST /v1/templates` | Templates |
 | `deleteAgentSuppression` | `DELETE /v1/agents/{email}/suppressions/{address}` | Agent suppressions |
 | `deleteContact` | `DELETE /v1/contacts/{address}` | Contacts |
@@ -422,6 +429,7 @@ every `/v1` operation not listed here is covered by the GA freeze.
 | `getEngagement` | `GET /v1/agents/{email}/contacts/{address}` | Contacts |
 | `getMessageLifecycle` | `GET /v1/agents/{email}/messages/{id}/lifecycle` | Message lifecycle |
 | `getReview` | `GET /v1/reviews/{id}` | Reviews |
+| `getSendingAccessRequest` | `GET /v1/account/sending-access/request` | External sending access |
 | `getStarterTemplate` | `GET /v1/starter-templates/{alias}` | Starter templates |
 | `getTemplate` | `GET /v1/templates/{id}` | Templates |
 | `importContacts` | `POST /v1/contacts/import` | Contacts |
@@ -867,6 +875,7 @@ retryability; clients must not reinterpret those fields independently:
 | `submission.cancelled` | `submission` | `failed` | false |
 | `submission.policy_budget_expired` | `submission` | `failed` | true |
 | `submission.sending_setup_expired` | `submission` | `failed` | true |
+| `submission.external_sending_not_enabled` | `submission` | `failed` | false |
 | `delivery.recipient_server_accepted` | `delivery` | `delivered` | false |
 | `delivery.temporary_delay` | `delivery` | `deferred` | true |
 | `delivery.permanent_bounce` | `delivery` | `bounced` | false |

@@ -25,6 +25,13 @@ export const accountUnreadKey = "account-unread";
 // too — see invalidateAgents / invalidateDomains below.
 export const limitsKey = "limits";
 
+// The account's latest external sending access request (beta), read by the
+// /sending-access page (GET /v1/account/sending-access/request). Separate
+// from `limitsKey` — a different resource on the same GET /v1/account
+// billing-adjacent namespace, but its own endpoint and its own lifecycle
+// (created on request, decided by an operator).
+export const sendingAccessRequestKey = "sending-access-request";
+
 // Account-wide delivery metrics (GET /v1/metrics), read by the Metrics page.
 // Keyed by the window so switching 7d/30d/90d caches separately instead of
 // showing the previous range's numbers under the new range's label.

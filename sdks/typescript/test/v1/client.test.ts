@@ -1231,6 +1231,65 @@ describe("E2AClient", () => {
     expect(lastCall().url).toContain("/v1/account/suppressions");
   });
 
+  it("account.requestSendingAccess POSTs the snake_case body and decodes the camelCase view", async () => {
+    globalThis.fetch = mockFetch(201, {
+      id: "sar_1",
+      state: "pending",
+      use_case: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expected_daily_volume: 500,
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    const filed = await client.account.requestSendingAccess({
+      useCase: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expectedDailyVolume: 500,
+    });
+    expect(filed).toMatchObject({
+      id: "sar_1",
+      state: "pending",
+      useCase: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expectedDailyVolume: 500,
+    });
+    expect(filed.createdAt).toBeInstanceOf(Date);
+
+    const { url, init } = lastCall();
+    expect(init.method).toBe("POST");
+    expect(url).toContain("/v1/account/sending-access/request");
+    expect(JSON.parse(init.body as string)).toEqual({
+      use_case: "billing reminders to our own customers",
+      recipients: "our own customers",
+      expected_daily_volume: 500,
+    });
+  });
+
+  it("account.getSendingAccessRequest reads the latest request back", async () => {
+    globalThis.fetch = mockFetch(200, {
+      id: "sar_1",
+      state: "pending",
+      use_case: "billing reminders",
+      recipients: "our own customers",
+      expected_daily_volume: 500,
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    const latest = await client.account.getSendingAccessRequest();
+    expect(latest.id).toBe("sar_1");
+    expect(latest.state).toBe("pending");
+    const { url, init } = lastCall();
+    expect(init.method).toBe("GET");
+    expect(url).toContain("/v1/account/sending-access/request");
+  });
+
+  it("account.getSendingAccessRequest surfaces 404 not_found as E2ANotFoundError (never filed)", async () => {
+    globalThis.fetch = mockFetch(404, {
+      error: { code: "not_found", message: "no sending access request has been filed" },
+    });
+    await expect(client.account.getSendingAccessRequest()).rejects.toBeInstanceOf(
+      E2ANotFoundError,
+    );
+  });
+
   // ── connection-error path through call() ────────────────────────
 
   it("maps a transport-level failure to E2AConnectionError", async () => {

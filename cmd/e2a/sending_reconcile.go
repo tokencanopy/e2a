@@ -211,6 +211,12 @@ func reconcileLegacySendingJob(ctx context.Context, pool *pgxpool.Pool, client *
 			// hold on the message and waits for the operator. Nothing to
 			// stamp yet; the rerun after the resume picks it up.
 			return legacyOutcomePaused, nil
+		case decision == sendingpolicy.AcceptanceExternalSendingNotEnabled:
+			// A definitive external-access refusal is the worker's to record:
+			// its legacy resolver fails the message terminally with the
+			// submission.external_sending_not_enabled lifecycle reason and
+			// email.failed. Stamping nothing leaves it on that path.
+			return legacyOutcomeSkipped, nil
 		case prepared.IsZero():
 			// The only accepted shape with no operation is an exact
 			// self-send, which never enqueues; a queued job that resolves to

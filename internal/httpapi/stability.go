@@ -247,7 +247,13 @@ func (s *Server) applyEvolutionStance() {
 	// ErrorBody.code is a stable open discriminator; the outbound gate-policy
 	// value and the sending-abuse pause value remain experimental — both are
 	// produced by controls that ship disabled.
-	markProperty(schemas, "ErrorBody", "code", extExperimentalValues, []string{"blocked_by_policy", "sending_paused"})
+	markProperty(schemas, "ErrorBody", "code", extExperimentalValues, []string{"blocked_by_policy", "sending_paused", "external_sending_not_enabled"})
+	// External sending access ships disabled: its additive account field and
+	// its 403 details shape are beta until the control is generally enforced.
+	markProperty(schemas, "AccountView", "sending_access", extStabilityLevel, stabilityBeta)
+	for _, schema := range []string{"SendingAccessView", "ExternalSendingNotEnabledDetails"} {
+		markSchema(schemas, schema, extStabilityLevel, stabilityBeta)
+	}
 	//
 	// The template hooks on send are beta (templates are beta) even though
 	// sendMessage itself is stable.

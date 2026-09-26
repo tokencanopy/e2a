@@ -423,6 +423,13 @@ func (w *Worker) autoApproveAsync(ctx context.Context, agent *identity.AgentIden
 			}
 			return true
 		}
+		if errors.Is(err, outboundsend.ErrExternalSendingNotEnabled) {
+			// A definitive permission refusal: expires-to-approve can never
+			// send this draft, and leaving it pending would re-pick it every
+			// sweep. Resolve it as rejected — nothing was sent.
+			w.autoReject(ctx, c.MessageID, "auto-approve refused: external sending is not enabled for this account")
+			return true
+		}
 		// Transient tx/enqueue failure: leave the row pending_review for the next
 		// cycle. Do NOT autoReject — no send happened, so this is not a "stuck" send.
 		log.Printf("[hitl-worker] auto-approve %s: accept+enqueue: %v", c.MessageID, err)

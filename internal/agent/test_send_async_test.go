@@ -360,3 +360,39 @@ func TestApprovePendingCore_TestHoldStaysPlatformSMTP(t *testing.T) {
 		t.Errorf("inbound rows = %d, want 0 (approval must not loopback a test)", n)
 	}
 }
+
+// TestApprovePendingCore_TestHoldRejectsEdits: a held platform test is
+// platform-branded mail to the agent's own address. Reviewer edits would turn
+// it into arbitrary platform-branded mail to arbitrary recipients, so any edit
+// is refused and the hold stays pending with nothing queued.
+func TestApprovePendingCore_TestHoldRejectsEdits(t *testing.T) {
+	api, store, _, _ := setupAsyncAPI(t)
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "testapproveedit")
+	msg, err := store.CreatePendingOutboundMessage(ctx, ag.ID,
+		[]string{ag.EmailAddress()}, nil, nil,
+		"Test email from e2a", "test body", "", nil, "test", "", "", "", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := []string{"victim@outside.example"}
+	subject := "Verify your account"
+	for name, edit := range map[string]agent.ApproveOverrides{
+		"recipients": {To: &to},
+		"subject":    {Subject: &subject},
+	} {
+		_, oerr := api.ApprovePendingCore(ctx, user.ID, msg.ID, ag.Email, edit, nil)
+		if oerr == nil || oerr.Status != 400 || oerr.Code != "invalid_request" {
+			t.Fatalf("%s edit: %+v, want 400 invalid_request", name, oerr)
+		}
+	}
+	var status string
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM messages WHERE id=$1`, msg.ID).Scan(&status)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status != identity.MessageStatusPendingReview {
+		t.Fatalf("status = %s, want the hold to stay pending", status)
+	}
+}

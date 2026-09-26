@@ -29,6 +29,9 @@ import {
   outreachDelete,
 } from "../commands/contacts.js";
 import { suppressionsList, suppressionsAdd, suppressionsRemove } from "../commands/suppressions.js";
+import {
+  sendingAccessStatus, sendingAccessRequest, SENDING_ACCESS_REQUEST_USAGE,
+} from "../commands/sending-access.js";
 import { EXIT, exitCodeForAPIError } from "../exit.js";
 import { E2AError } from "@e2a/sdk/v1";
 import { createRequire } from "module";
@@ -111,6 +114,16 @@ Usage:
         --reason <text> --json       Optional reason; JSON emits the record
   e2a suppressions remove <address>  Un-suppress (account-wide without --agent)
         --agent <email> --json       Remove only the agent-scoped block; JSON receipt
+  e2a sending-access status         Beta: show this account's external-sending restriction
+                                   and its latest access request, if any
+        --json                     Raw { sendingAccess, latestRequest } objects
+  e2a sending-access request        Beta: ask support to review external sending access
+        --use-case <text>          What you're building and why (1-2000 chars)
+        --recipients <text>        Who you'll email (1-1000 chars)
+        --volume <n>               Expected recipients per day (1-1000000)
+        --json                     Print the filed/pending request as JSON
+                                   Idempotent while pending; capped at 3 requests/30 days;
+                                   filing never grants access by itself
   e2a send [options]                Send an email as the agent
         --to <email>               Recipient (repeatable)
         --subject <s>              Subject line
@@ -479,6 +492,28 @@ async function main() {
       }
       break;
     }
+    case "sending-access": {
+      const sub = args[0];
+      const rest = args.slice(1);
+      if (sub === "status") {
+        checkFlags(rest, ["--json"]);
+        getPositionals(rest, 0, "usage: e2a sending-access status [--json]");
+        await sendingAccessStatus({ json: hasFlag(rest, "--json") });
+      } else if (sub === "request") {
+        checkFlags(rest, ["--use-case", "--recipients", "--volume", "--json"]);
+        getPositionals(rest, 0, SENDING_ACCESS_REQUEST_USAGE);
+        await sendingAccessRequest({
+          useCase: getFlagChecked(rest, "--use-case"),
+          recipients: getFlagChecked(rest, "--recipients"),
+          volume: getFlagChecked(rest, "--volume"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else {
+        process.stderr.write("Usage: e2a sending-access [status|request --use-case <text> --recipients <text> --volume <n>]\n");
+        process.exit(EXIT.USAGE);
+      }
+      break;
+    }
     case "contacts": {
       const sub = args[0];
       const rest = args.slice(1);
@@ -783,21 +818,63 @@ async function main() {
   }
 }
 
+/**
+ * The wire shape of `error.details` on an `external_sending_not_enabled`
+ * error (api/openapi.yaml `ExternalSendingNotEnabledDetails`). Deliberately
+ * NOT the generated `ExternalSendingNotEnabledDetails` model from
+ * `@e2a/sdk/v1`: that type's fields are camelCase
+ * (`allowedRecipients`/`recoveryUrl`), but `E2AError.details` is always the
+ * raw, never-renamed `{[key: string]: any}` map the server sent (see
+ * sdks/typescript/src/v1/errors.ts's CODE_TABLE entry and
+ * retryAfterFromDetails for the same gotcha) — casting to the generated type
+ * and reading `.allowedRecipients` would silently read `undefined`.
+ */
+interface ExternalSendingNotEnabledDetailsWire {
+  allowed_recipients?: string[];
+  recovery_url?: string;
+}
+
+/**
+ * Render a thrown error for the top-level catch. Every command (send, reply,
+ * and any future forward) that hits `external_sending_not_enabled` gets a
+ * richer rendering than the bare `Error: <message> [<code>]` line: the
+ * account's allowed destinations and the dashboard recovery URL, straight
+ * from `error.details`. This is a PERMISSION error — nothing was queued, and
+ * the identical invocation will refuse again — so the output never suggests
+ * retrying.
+ */
+function formatError(err: unknown): string {
+  const code = err instanceof E2AError && err.code ? ` [${err.code}]` : "";
+  const message = err instanceof Error ? err.message : String(err);
+  let out = `Error: ${message}${code}\n`;
+  if (err instanceof E2AError && err.code === "external_sending_not_enabled") {
+    const details = err.details as ExternalSendingNotEnabledDetailsWire | undefined;
+    const allowed = details?.allowed_recipients?.length
+      ? details.allowed_recipients.join(", ")
+      : "your verified account email and agent inboxes in this account";
+    out += `  allowed destinations: ${allowed}\n`;
+    if (details?.recovery_url) out += `  recover at: ${details.recovery_url}\n`;
+    out +=
+      "  request approval with: e2a sending-access request --use-case <text> --recipients <text> --volume <n>\n" +
+      "  do not retry this request as-is — the same recipients will refuse again.\n";
+  }
+  return out;
+}
+
 // Only skip main when imported for tests (vitest sets VITEST_WORKER_ID)
 const isTestImport = typeof process !== "undefined" && !!process.env.VITEST_WORKER_ID;
 
 if (!isTestImport) {
   main().catch((err) => {
-    // Print the API error code when present so scripts can grep it even
-    // without branching on exit codes.
-    const code = err instanceof E2AError && err.code ? ` [${err.code}]` : "";
-    process.stderr.write(`Error: ${err.message}${code}\n`);
+    process.stderr.write(formatError(err));
     // Contract mapping: AUTH (4) = fix your key; REQUEST (5) = permanent
     // request error (404/409/422 — the SDK marks these non-retryable), do NOT
     // retry the identical invocation; ERROR (1) = transient, retry may help.
     process.exit(err instanceof E2AError ? exitCodeForAPIError(err) : EXIT.ERROR);
   });
 }
+
+export { formatError };
 
 export {
   getFlag,

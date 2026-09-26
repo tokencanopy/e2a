@@ -81,13 +81,21 @@ type ContractServer struct {
 	// OverCapAPIKey authenticates the third account. See OverCapLimits.
 	OverCapAPIKey string
 	OverCapUserID string
-	DBPool        *pgxpool.Pool
-	Store         *identity.Store
-	WSHub         *ws.Hub
-	SMTPAddr      string
-	httpServer    *http.Server
-	httpLn        net.Listener
-	smtpServer    *relay.Server
+	// RestrictedAPIKey authenticates the fourth account: the ONLY account
+	// inside the external-sending-access cohort. The server enforces the
+	// control with a far-future cohort cutoff and this account alone is
+	// dated after it, so every other scenario keeps unrestricted sending.
+	// It owns one shared-domain agent, a second sibling agent, and verified
+	// owner-mailbox proof for its sign-in address.
+	RestrictedAPIKey string
+	RestrictedUserID string
+	DBPool           *pgxpool.Pool
+	Store            *identity.Store
+	WSHub            *ws.Hub
+	SMTPAddr         string
+	httpServer       *http.Server
+	httpLn           net.Listener
+	smtpServer       *relay.Server
 }
 
 func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, error) {
@@ -137,7 +145,18 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	// The same composition production uses: a config-source gate running the
 	// disabled policy (pass-through admission, every attempt still durable)
 	// and the authorized submitter that refuses to dial without its token.
-	sendingGate := sendingpolicy.NewGate(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	//
+	// External sending access is ENFORCED, with a far-future cohort cutoff:
+	// only the restricted account below (dated after it) is in the cohort,
+	// so every other scenario is unaffected while the restriction's contract
+	// is exercised over the wire.
+	sendingPolicy := sendingpolicy.DisabledPolicy()
+	sendingPolicy.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{
+		Mode:                     sendingpolicy.ModeEnforce,
+		AccountsCreatedAtOrAfter: ContractExternalAccessCutoff,
+	}
+	sendingModule := sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingPolicy)
+	var sendingGate sendingpolicy.Gate = sendingModule
 	providerSubmitter := outbound.NewProviderSubmitter(smtpRelay, sendingGate)
 	outboundJobs := outboundsend.NewJobs(
 		outboundSendStore,
@@ -155,6 +174,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	router := mux.NewRouter()
 	api := agent.NewAPI(store, sender, smtpRelay, nil, noopUsage, "e2a.dev", "test.e2a.dev", "agents.e2a.dev", "", false)
 	api.SetProviderSubmitter(providerSubmitter, sendingGate)
+	api.SetExternalAccess(sendingModule)
 	api.SetIdempotencyStore(idempotencyStore)
 	api.SetEnforcer(enforcer)
 	api.SetUsageStore(usageStore)
@@ -173,7 +193,8 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	v1 := apiserver.New(apiserver.Params{
 		API: api, Store: store, Enforcer: enforcer, UsageStore: usageStore,
 		SubscriberStore: subscriberStore, Idempotency: idempotencyStore, Pool: pool,
-		SMTPDomain: "test.e2a.dev", SharedDomain: "agents.e2a.dev",
+		SendingAccess: sendingModule,
+		SMTPDomain:    "test.e2a.dev", SharedDomain: "agents.e2a.dev",
 		PublicURL: "http://127.0.0.1", Production: false,
 		EventsEnabled:            true,
 		ManagedUnsubscribeIssuer: managedUnsubscribeIssuer,
@@ -333,21 +354,33 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		return nil, err
 	}
 
+	restrictedUser, restrictedKey, err := seedRestrictedAccount(ctx, pool, store)
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+
 	return &ContractServer{
-		BaseURL:       "http://" + httpLn.Addr().String(),
-		APIKey:        key.PlaintextKey,
-		UserID:        user.ID,
-		CappedAPIKey:  cappedKey.PlaintextKey,
-		CappedUserID:  cappedUser.ID,
-		OverCapAPIKey: overCapKey.PlaintextKey,
-		OverCapUserID: overCapUser.ID,
-		DBPool:        pool,
-		Store:         store,
-		WSHub:         wsHub,
-		SMTPAddr:      smtpAddr,
-		httpServer:    httpServer,
-		httpLn:        httpLn,
-		smtpServer:    smtpServer,
+		RestrictedAPIKey: restrictedKey,
+		RestrictedUserID: restrictedUser,
+		BaseURL:          "http://" + httpLn.Addr().String(),
+		APIKey:           key.PlaintextKey,
+		UserID:           user.ID,
+		CappedAPIKey:     cappedKey.PlaintextKey,
+		CappedUserID:     cappedUser.ID,
+		OverCapAPIKey:    overCapKey.PlaintextKey,
+		OverCapUserID:    overCapUser.ID,
+		DBPool:           pool,
+		Store:            store,
+		WSHub:            wsHub,
+		SMTPAddr:         smtpAddr,
+		httpServer:       httpServer,
+		httpLn:           httpLn,
+		smtpServer:       smtpServer,
 	}, nil
 }
 
@@ -368,4 +401,44 @@ func (s *ContractServer) Close(ctx context.Context) error {
 	}
 	s.DBPool.Close()
 	return firstErr
+}
+
+// ContractExternalAccessCutoff is the contract server's external-sending-access
+// cohort cutoff: far enough in the future that no ordinary account is in the
+// cohort. The restricted account is dated after it.
+const ContractExternalAccessCutoff = "2999-01-01T00:00:00Z"
+
+// Synthetic fixtures of the restricted account. The owner address is
+// verified; restricted-bot is the agent scenarios send from and
+// restricted-peer a same-account sibling.
+const (
+	ContractRestrictedOwner = "restricted-owner@test.dev"
+	ContractRestrictedAgent = "restricted-bot@agents.e2a.dev"
+	ContractRestrictedPeer  = "restricted-peer@agents.e2a.dev"
+)
+
+func seedRestrictedAccount(ctx context.Context, pool *pgxpool.Pool, store *identity.Store) (string, string, error) {
+	user, err := store.CreateOrGetUser(ctx, ContractRestrictedOwner, "Contract Restricted", "google-contract-restricted")
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE users
+		   SET created_at = '3000-01-01T00:00:00Z',
+		       owner_email_verified_at = now(),
+		       owner_email_verified_address = lower(email),
+		       owner_email_verified_source = 'google_oauth'
+		 WHERE id = $1`, user.ID); err != nil {
+		return "", "", err
+	}
+	for _, addr := range []string{ContractRestrictedAgent, ContractRestrictedPeer} {
+		if _, err := store.CreateAgentWithLimit(ctx, addr, "agents.e2a.dev", "Restricted Bot", user.ID, 0); err != nil {
+			return "", "", err
+		}
+	}
+	key, err := store.CreateAPIKey(ctx, user.ID, "contract-restricted-key", nil)
+	if err != nil {
+		return "", "", err
+	}
+	return user.ID, key.PlaintextKey, nil
 }

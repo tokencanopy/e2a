@@ -524,3 +524,34 @@ func TestGatedWorker_FailedSettlementAfterAcceptanceIsRetriedNotResent(t *testin
 		t.Fatalf("settlements = %v / %v, want one retried acceptance carrying the provider id", g.settled, g.settledIDs)
 	}
 }
+
+// An external-access refusal at final authorization fails the message with
+// its own stable lifecycle reason, cancels the attempt (both ledgers back) and
+// makes no provider call — it never waits for a later approval.
+func TestGatedWorker_ExternalSendingNotEnabledFailsWithItsReason(t *testing.T) {
+	st := &fakeStore{job: acceptedJob("msg_esa")}
+	dl := &fakeDeliverer{}
+	g := &fakeGate{reserve: sendingpolicy.Decision{Allow: true}, consume: sendingpolicy.Decision{Allow: false, Reason: sendingpolicy.ReasonExternalSendingNotEnabled, Terminal: true}}
+	err := outboundsend.NewSendWorker(st, dl).WithGate(g).Work(context.Background(), gatedJob("msg_esa", 1))
+	if !isCancel(err) || dl.calls != 0 {
+		t.Fatalf("err=%v delivers=%d, want cancel with no I/O", err, dl.calls)
+	}
+	if len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionExternalSendingNotEnabled {
+		t.Fatalf("failed = %+v, want one submission.external_sending_not_enabled", st.failed)
+	}
+	if len(g.cancelled) != 1 {
+		t.Fatalf("cancelled = %v, want the attempt given back", g.cancelled)
+	}
+	if len(st.holds) != 0 {
+		t.Fatalf("holds = %+v, a definitive refusal must not start a hold clock", st.holds)
+	}
+
+	// The same refusal arriving through the legacy resolver is equally terminal.
+	st = &fakeStore{job: acceptedJob("msg_esa_legacy")}
+	w := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(allowAll()).WithOperationResolver(func(context.Context, string) (sendingpolicy.AcceptanceDecision, sendingpolicy.OperationRef, error) {
+		return sendingpolicy.AcceptanceExternalSendingNotEnabled, sendingpolicy.OperationRef{}, nil
+	})
+	if err := w.Work(context.Background(), job("msg_esa_legacy", 1)); !isCancel(err) || len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionExternalSendingNotEnabled {
+		t.Fatalf("legacy refusal: err=%v failed=%+v", err, st.failed)
+	}
+}

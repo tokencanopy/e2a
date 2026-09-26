@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import type { AgentData } from "../../../components/types";
+import { useSendingAccess } from "../../../components/hooks/useSendingAccess";
+import { SendingAccessNotice } from "../../../components/SendingAccessNotice";
 
 type TestState = "idle" | "sending" | "delivered";
 
@@ -12,6 +14,7 @@ export function SuccessPanel({
 }) {
   const [testState, setTestState] = useState<TestState>("idle");
   const [sendError, setSendError] = useState("");
+  const { status: sendingAccessStatus } = useSendingAccess();
 
   async function sendTestEmail() {
     setSendError("");
@@ -60,6 +63,8 @@ export function SuccessPanel({
           {agent.email}
         </code>
       </div>
+
+      <SendingAccessNotice status={sendingAccessStatus} />
 
       <div className="mb-8">
         {testState === "idle" && (

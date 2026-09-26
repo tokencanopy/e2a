@@ -426,6 +426,13 @@ func reconstructEvent(snapshot Snapshot, event EventSnapshot) []reconstructionCa
 			reason = ReasonSubmissionProviderRejected
 		} else if snapshot.DeliveryFailureSource == "local" {
 			reason = ReasonSubmissionLocalRetriesExhausted
+			// A definitive external-sending-access refusal carries its own
+			// stable reason on the event; reconstruct it as that reason so it
+			// matches (and dedupes against) the persisted transition instead
+			// of appearing a second time as retries-exhausted.
+			if ReasonCode(jsonString(data, "reason_code")) == ReasonSubmissionExternalSendingNotEnabled {
+				reason = ReasonSubmissionExternalSendingNotEnabled
+			}
 		} else {
 			return nil
 		}

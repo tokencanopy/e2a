@@ -83,6 +83,7 @@ models/ErrorBody.ts
 models/ErrorEnvelope.ts
 models/EventEnvelope.ts
 models/EventView.ts
+models/ExternalSendingNotEnabledDetails.ts
 models/FieldError.ts
 models/ForwardRequest.ts
 models/ForwardRequestReplyTo.ts
@@ -151,6 +152,9 @@ models/RotateSecretResponse.ts
 models/SPFResult.ts
 models/SendEmailRequest.ts
 models/SendResultView.ts
+models/SendingAccessRequestInput.ts
+models/SendingAccessRequestView.ts
+models/SendingAccessView.ts
 models/SendingRampView.ts
 models/StarterTemplateDetailView.ts
 models/StarterTemplateVariableView.ts

@@ -172,6 +172,32 @@ describe("code-first class selection (F2)", () => {
       E2APermissionError,
     );
     expect(toE2AError({ status: 403, code: "sending_paused", message: "x" }).retryable).toBe(false);
+    // external_sending_not_enabled: PERMISSION (not quota), never retryable —
+    // the account may not send to one or more recipients through its shared
+    // sending identity, and nothing was queued.
+    expect(
+      toE2AError({ status: 403, code: "external_sending_not_enabled", message: "x" }),
+    ).toBeInstanceOf(E2APermissionError);
+    expect(
+      toE2AError({ status: 403, code: "external_sending_not_enabled", message: "x" }).retryable,
+    ).toBe(false);
+    // `.details` passes through unchanged — the raw wire shape (snake_case),
+    // matching every other `details` payload (see the retry_after_seconds
+    // test below): never renamed to ExternalSendingNotEnabledDetails' own
+    // camelCase field names.
+    {
+      const details = {
+        allowed_recipients: ["verified_owner_email", "same_account_agents"],
+        recovery_url: "https://e2a.test/dashboard/sending-access",
+      };
+      const err = toE2AError({
+        status: 403,
+        code: "external_sending_not_enabled",
+        message: "x",
+        details,
+      });
+      expect(err.details).toEqual(details);
+    }
     expect(toE2AError({ status: 409, code: "message_not_pending", message: "x" })).toBeInstanceOf(
       E2AConflictError,
     );

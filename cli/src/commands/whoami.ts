@@ -36,4 +36,18 @@ export async function whoami(opts: WhoamiOptions): Promise<void> {
     `usage: ${account.usage.agents}/${account.limits.maxAgents} agents, ` +
       `${account.usage.messagesMonth}/${account.limits.maxMessagesMonth} messages this month\n`,
   );
+
+  // Beta, additive: `sending_access` is omitted entirely on a deployment that
+  // doesn't run this control, so say nothing rather than printing a
+  // misleading "unrestricted". Only surface a line when this account is
+  // ACTUALLY restricted right now (enforced, and neither grant applies) —
+  // an unrestricted or already-approved account gets no new noise here.
+  const access = account.sendingAccess;
+  if (access && access.enforcementApplies && !access.sharedExternalApproved && !access.paidExternalSendingEntitled) {
+    process.stdout.write(
+      "External sending: restricted (send to your verified account email and agent inboxes in " +
+        "this account; request approval with: e2a sending-access request --use-case <text> " +
+        "--recipients <text> --volume <n>)\n",
+    );
+  }
 }

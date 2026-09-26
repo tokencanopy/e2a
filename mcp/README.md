@@ -139,7 +139,7 @@ shows the set your scope allows, with per-tool descriptions.
 
 | Tool | Description |
 | --- | --- |
-| `whoami` | Get the authenticated account's identity — user, scope, plan/limits; for an agent-scoped credential, also the bound agent address. |
+| `whoami` | Get the authenticated account's identity — user, scope, plan/limits; for an agent-scoped credential, also the bound agent address. On a deployment that reports it, also includes the additive beta `sending_access` object (see External sending access below). |
 | `list_agents` | List agent inboxes; pass `deleted:true` to list the 30-day trash. (Admin/account-scoped.) |
 | `get_agent` | Get one agent inbox by its full email address. |
 | `create_agent` | Register a new agent by its full email address — on a verified domain you own, or the deployment's shared domain. No delivery "mode": inbound is always available via `list_messages` (poll) or a `create_webhook` subscription. (Admin/account-scoped.) |
@@ -158,6 +158,19 @@ shows the set your scope allows, with per-tool descriptions.
 
 Scheduled sending via `send_at` / `scheduled_at` is **beta and may change
 before it is declared stable**.
+
+> **External sending access (beta).** On a deployment that restricts it, an
+> account may be limited to sending through the shared identity only to its
+> verified account email and to agent inboxes in the same account. A
+> `send_message` / `reply_to_message` / `forward_message` (or the deprecated
+> `send_email`) call with any other To/Cc/Bcc recipient refuses the WHOLE
+> send with `external_sending_not_enabled` (403) — nothing is queued, and the
+> identical call will not succeed on retry. `whoami`'s `sending_access` object
+> reports the current state (`enforcement_applies`, `shared_external_approved`,
+> `paid_external_sending_entitled`, `owner_recipient_verified`); recovery
+> (verifying a sending domain, or filing a request for review) happens in the
+> dashboard, named by the error's `recovery_url` — there is no MCP tool that
+> files a request or changes approval.
 
 | Tool | Description |
 | --- | --- |

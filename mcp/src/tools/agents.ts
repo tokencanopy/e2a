@@ -51,7 +51,7 @@ export function registerAgentTools(server: McpServer, client: McpClient): void {
       title: "Get the authenticated account's identity",
       annotations: { readOnlyHint: true },
       description:
-        "Use first when starting work on e2a to learn WHO you are: the authenticated user (email), the credential's scope (`account` or `agent`), and your plan + usage limits. For an agent-scoped credential it also returns `agent_email` — the single agent that credential IS. Account-scoped credentials own many agents; discover them with `list_agents`. This is identity, not an agent — it never guesses a 'default' agent.",
+        "Use first when starting work on e2a to learn WHO you are: the authenticated user (email), the credential's scope (`account` or `agent`), and your plan + usage limits. For an agent-scoped credential it also returns `agent_email` — the single agent that credential IS. Account-scoped credentials own many agents; discover them with `list_agents`. This is identity, not an agent — it never guesses a 'default' agent. When the deployment restricts external sending, the optional `sending_access` object reports whether this account may email external recipients (`enforcement_applies`, `shared_external_approved`, `paid_external_sending_entitled`, `owner_recipient_verified`).",
       inputSchema: strictInputSchema({}),
     },
     async () => runTool(() => client.whoami()),

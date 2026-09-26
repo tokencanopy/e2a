@@ -3273,3 +3273,207 @@ scenarios:
           body_match:
             deleted: true
             domain: acctmetrics-contract.test.dev
+
+  - name: external_sending_access_restricted_account
+    description: >
+      External sending access over the wire. The contract server enforces the
+      control with a far-future cohort cutoff, so ONLY the restricted account
+      ({restricted_api_key}) is in the cohort. It may send to its verified
+      owner email and its own live agents; any external To, Cc or Bcc refuses
+      the WHOLE send with 403 external_sending_not_enabled and nothing is
+      queued. The primary account is outside the cohort and unaffected. Every
+      refused send persists nothing; the one accepted send targets the
+      account's own sibling agent.
+    steps:
+      - id: restricted_account_reports_enforcement
+        action: request
+        method: GET
+        path: /v1/account
+        auth_override: "Bearer {restricted_api_key}"
+        expect:
+          status: 200
+          body_match:
+            "sending_access.enforcement_applies": true
+            "sending_access.shared_external_approved": false
+            "sending_access.paid_external_sending_entitled": false
+            "sending_access.owner_recipient_verified": true
+
+      - id: primary_account_is_outside_the_cohort
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 200
+          body_match:
+            "sending_access.enforcement_applies": false
+
+      - id: external_to_is_refused
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.e2a.dev/messages
+        auth_override: "Bearer {restricted_api_key}"
+        headers:
+          Idempotency-Key: esa-external-{scenario_token}
+        body:
+          to: ["customer-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_contains: [error]
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      # A refusal is not cached under the idempotency key: the same keyed
+      # request is judged afresh and refused the same way.
+      - id: keyed_refusal_is_not_replayed_as_success
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.e2a.dev/messages
+        auth_override: "Bearer {restricted_api_key}"
+        headers:
+          Idempotency-Key: esa-external-{scenario_token}
+        body:
+          to: ["customer-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      - id: hidden_bcc_refuses_the_whole_send
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.e2a.dev/messages
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          to: ["restricted-peer@agents.e2a.dev"]
+          bcc: ["hidden-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      - id: external_cc_refuses_the_whole_send
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.e2a.dev/messages
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          to: ["restricted-owner@test.dev"]
+          cc: ["copied-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": external_sending_not_enabled
+
+      # Tenant isolation: another account cannot send as the restricted
+      # account's agent at all.
+      - id: other_account_cannot_use_the_restricted_agent
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.e2a.dev/messages
+        body:
+          to: ["restricted-peer@agents.e2a.dev"]
+          subject: probe
+          text: probe
+        expect:
+          status: 404
+
+      - id: same_account_agent_is_allowed
+        action: request
+        method: POST
+        path: /v1/agents/restricted-bot@agents.e2a.dev/messages
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          to: ["restricted-peer@agents.e2a.dev"]
+          subject: probe {scenario_token}
+          text: probe
+        expect:
+          status: 202
+          body_match:
+            status: accepted
+
+  - name: external_sending_access_request_intake
+    description: >
+      The authenticated request form behind the dashboard recovery flow. The
+      account is bound from the credential; submitting while a request is
+      pending returns that request (200) instead of creating another (201);
+      bounds are validated; filing never grants access. Runs as the
+      restricted account ({restricted_api_key}), which no other scenario
+      files requests for. Requests are private support history with no
+      customer delete, so the pending request remains on that dedicated
+      account after the run.
+    steps:
+      - id: invalid_volume_is_refused
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          use_case: contract probe
+          recipients: our own customers
+          expected_daily_volume: 0
+        expect:
+          status: 422
+          body_match:
+            "error.code": invalid_request
+
+      - id: file_request
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          use_case: contract probe
+          recipients: our own customers
+          expected_daily_volume: 10
+        expect:
+          status: 201
+          body_match:
+            state: pending
+            expected_daily_volume: 10
+        capture:
+          sending_access_request_id: id
+
+      - id: resubmit_returns_the_pending_request
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        body:
+          use_case: a different reason
+          recipients: someone else
+          expected_daily_volume: 99
+        expect:
+          status: 200
+          body_match:
+            id: "{sending_access_request_id}"
+            state: pending
+            use_case: contract probe
+
+      - id: latest_request_is_readable
+        action: request
+        method: GET
+        path: /v1/account/sending-access/request
+        auth_override: "Bearer {restricted_api_key}"
+        expect:
+          status: 200
+          body_match:
+            id: "{sending_access_request_id}"
+            state: pending
+
+      - id: filing_does_not_grant_access
+        action: request
+        method: GET
+        path: /v1/account
+        auth_override: "Bearer {restricted_api_key}"
+        expect:
+          status: 200
+          body_match:
+            "sending_access.shared_external_approved": false

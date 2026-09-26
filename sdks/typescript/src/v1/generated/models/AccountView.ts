@@ -13,6 +13,7 @@
 import { AccountUserView } from '../models/AccountUserView.js';
 import { LimitsCapsView } from '../models/LimitsCapsView.js';
 import { LimitsUsageView } from '../models/LimitsUsageView.js';
+import { SendingAccessView } from '../models/SendingAccessView.js';
 import { HttpFile } from '../http/http.js';
 
 export class AccountView {
@@ -23,6 +24,10 @@ export class AccountView {
     * Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.
     */
     'scope': string;
+    /**
+    * External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable.
+    */
+    'sendingAccess'?: SendingAccessView;
     'upgradeUrl': string;
     'usage': LimitsUsageView;
     'user': AccountUserView;
@@ -54,6 +59,12 @@ export class AccountView {
             "name": "scope",
             "baseName": "scope",
             "type": "string",
+            "format": ""
+        },
+        {
+            "name": "sendingAccess",
+            "baseName": "sending_access",
+            "type": "SendingAccessView",
             "format": ""
         },
         {

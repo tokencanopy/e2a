@@ -18,6 +18,8 @@ import { DeleteUserDataResult } from '../models/DeleteUserDataResult.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
 import { PageSuppressionView } from '../models/PageSuppressionView.js';
+import { SendingAccessRequestInput } from '../models/SendingAccessRequestInput.js';
+import { SendingAccessRequestView } from '../models/SendingAccessRequestView.js';
 import { UserExport } from '../models/UserExport.js';
 
 /**
@@ -59,6 +61,54 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
         requestContext.setHeaderParam("Content-Type", contentType);
         const serializedBody = ObjectSerializer.stringify(
             ObjectSerializer.serialize(createAPIKeyRequest, "CreateAPIKeyRequest", ""),
+            contentType
+        );
+        requestContext.setBody(serializedBody);
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param sendingAccessRequestInput 
+     */
+    public async createSendingAccessRequest(sendingAccessRequestInput: SendingAccessRequestInput, _options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // verify required parameter 'sendingAccessRequestInput' is not null or undefined
+        if (sendingAccessRequestInput === null || sendingAccessRequestInput === undefined) {
+            throw new RequiredError("AccountApi", "createSendingAccessRequest", "sendingAccessRequestInput");
+        }
+
+
+        // Path Params
+        const localVarPath = '/v1/account/sending-access/request';
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.POST);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        // Body Params
+        const contentType = ObjectSerializer.getPreferredMediaType([
+            "application/json"
+        ]);
+        requestContext.setHeaderParam("Content-Type", contentType);
+        const serializedBody = ObjectSerializer.stringify(
+            ObjectSerializer.serialize(sendingAccessRequestInput, "SendingAccessRequestInput", ""),
             contentType
         );
         requestContext.setBody(serializedBody);
@@ -339,6 +389,36 @@ export class AccountApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     */
+    public async getSendingAccessRequest(_options?: Configuration): Promise<RequestContext> {
+        let _config = _options || this.configuration;
+
+        // Path Params
+        const localVarPath = '/v1/account/sending-access/request';
+
+        // Make Request Context
+        const requestContext = _config.baseServer.makeRequestContext(localVarPath, HttpMethod.GET);
+        requestContext.setHeaderParam("Accept", "application/json, */*;q=0.8")
+
+
+        let authMethod: SecurityAuthentication | undefined;
+        // Apply auth methods
+        authMethod = _config.authMethods["bearer"]
+        if (authMethod?.applySecurityAuthentication) {
+            await authMethod?.applySecurityAuthentication(requestContext);
+        }
+        
+        const defaultAuth: SecurityAuthentication | undefined = _config?.authMethods?.default
+        if (defaultAuth?.applySecurityAuthentication) {
+            await defaultAuth?.applySecurityAuthentication(requestContext);
+        }
+
+        return requestContext;
+    }
+
+    /**
      * API keys for the account (metadata only — secrets are shown once, at creation). Account scope only: an agent-scoped credential cannot manage keys.
      * List API keys
      * @param cursor Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
@@ -474,6 +554,49 @@ export class AccountApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "CreateAPIKeyResponse", ""
             ) as CreateAPIKeyResponse;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to createSendingAccessRequest
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async createSendingAccessRequestWithHttpInfo(response: ResponseContext): Promise<HttpInfo<SendingAccessRequestView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("201", response.httpStatusCode)) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error — the standard envelope; branch on error.code.", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 
@@ -704,6 +827,42 @@ export class AccountApiResponseProcessor {
                 ObjectSerializer.parse(await response.body.text(), contentType),
                 "AccountMetricsView", ""
             ) as AccountMetricsView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+
+        throw new ApiException<string | Blob | undefined>(response.httpStatusCode, "Unknown API Status Code!", await response.getBodyAsAny(), response.headers);
+    }
+
+    /**
+     * Unwraps the actual response sent by the server from the response context and deserializes the response content
+     * to the expected objects
+     *
+     * @params response Response returned by the server for a request to getSendingAccessRequest
+     * @throws ApiException if the response code was not in [200, 299]
+     */
+     public async getSendingAccessRequestWithHttpInfo(response: ResponseContext): Promise<HttpInfo<SendingAccessRequestView >> {
+        const contentType = ObjectSerializer.normalizeMediaType(response.headers["content-type"]);
+        if (isCodeInRange("200", response.httpStatusCode)) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
+            return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
+        }
+        if (isCodeInRange("0", response.httpStatusCode)) {
+            const body: ErrorEnvelope = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "ErrorEnvelope", ""
+            ) as ErrorEnvelope;
+            throw new ApiException<ErrorEnvelope>(response.httpStatusCode, "Error", body, response.headers);
+        }
+
+        // Work around for missing responses in specification, e.g. for petstore.yaml
+        if (response.httpStatusCode >= 200 && response.httpStatusCode <= 299) {
+            const body: SendingAccessRequestView = ObjectSerializer.deserialize(
+                ObjectSerializer.parse(await response.body.text(), contentType),
+                "SendingAccessRequestView", ""
+            ) as SendingAccessRequestView;
             return new HttpInfo(response.httpStatusCode, response.headers, response.body, body);
         }
 

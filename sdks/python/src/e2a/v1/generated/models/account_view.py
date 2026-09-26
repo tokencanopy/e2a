@@ -22,6 +22,7 @@ from typing import Any, ClassVar, Dict, List, Optional
 from e2a.v1.generated.models.account_user_view import AccountUserView
 from e2a.v1.generated.models.limits_caps_view import LimitsCapsView
 from e2a.v1.generated.models.limits_usage_view import LimitsUsageView
+from e2a.v1.generated.models.sending_access_view import SendingAccessView
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -33,11 +34,12 @@ class AccountView(BaseModel):
     limits: LimitsCapsView
     plan_code: StrictStr
     scope: StrictStr = Field(description="Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.")
+    sending_access: Optional[SendingAccessView] = Field(default=None, description="External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable.")
     upgrade_url: StrictStr
     usage: LimitsUsageView
     user: AccountUserView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "limits", "plan_code", "scope", "upgrade_url", "usage", "user"]
+    __properties: ClassVar[List[str]] = ["agent_email", "limits", "plan_code", "scope", "sending_access", "upgrade_url", "usage", "user"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -83,6 +85,9 @@ class AccountView(BaseModel):
         # override the default output from pydantic by calling `to_dict()` of limits
         if self.limits:
             _dict['limits'] = self.limits.to_dict()
+        # override the default output from pydantic by calling `to_dict()` of sending_access
+        if self.sending_access:
+            _dict['sending_access'] = self.sending_access.to_dict()
         # override the default output from pydantic by calling `to_dict()` of usage
         if self.usage:
             _dict['usage'] = self.usage.to_dict()
@@ -110,6 +115,7 @@ class AccountView(BaseModel):
             "limits": LimitsCapsView.from_dict(obj["limits"]) if obj.get("limits") is not None else None,
             "plan_code": obj.get("plan_code"),
             "scope": obj.get("scope"),
+            "sending_access": SendingAccessView.from_dict(obj["sending_access"]) if obj.get("sending_access") is not None else None,
             "upgrade_url": obj.get("upgrade_url"),
             "usage": LimitsUsageView.from_dict(obj["usage"]) if obj.get("usage") is not None else None,
             "user": AccountUserView.from_dict(obj["user"]) if obj.get("user") is not None else None

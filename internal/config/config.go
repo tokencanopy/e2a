@@ -547,6 +547,21 @@ type SendingProtectionConfig struct {
 	FeedbackPostAccountRetention int `yaml:"sending_feedback_post_account_retention_days"`
 
 	OperatorNoticeRecipientVersion int `yaml:"operator_notice_recipient_version"`
+
+	// ExternalSendingAccess is the optional external-sending-access control.
+	// Absent (the default, including every self-host) means disabled and keeps
+	// the runtime policy's canonical form — and therefore its stored hash —
+	// exactly what it was before the control existed.
+	ExternalSendingAccess *ExternalSendingAccessConfig `yaml:"external_sending_access"`
+}
+
+// ExternalSendingAccessConfig mirrors sendingpolicy.ExternalSendingAccessPolicy.
+// Mode is disabled|shadow|enforce; AccountsCreatedAtOrAfter is the immutable
+// RFC3339 UTC cohort cutoff (for example 2026-10-01T00:00:00Z). Both are
+// validated by internal/sendingpolicy.
+type ExternalSendingAccessConfig struct {
+	Mode                     string `yaml:"mode"`
+	AccountsCreatedAtOrAfter string `yaml:"accounts_created_at_or_after"`
 }
 
 // LimitsConfig is the operator-configured fallback applied to any user

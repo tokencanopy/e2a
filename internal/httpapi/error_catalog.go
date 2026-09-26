@@ -22,6 +22,7 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "forbidden", Status: "403", Family: "auth"},
 	{Code: "blocked_by_policy", Status: "403", Family: "auth"},
 	{Code: "sending_paused", Status: "403", Family: "auth"},
+	{Code: "external_sending_not_enabled", Status: "403", Family: "auth", DetailsSchema: "ExternalSendingNotEnabledDetails"},
 	{Code: "invalid_request", Status: "400 / 422", Family: "validation", DetailsSchema: "ValidationErrorDetails"},
 	{Code: "invalid_cursor", Status: "400", Family: "validation"},
 	{Code: "invalid_filter", Status: "400", Family: "validation"},

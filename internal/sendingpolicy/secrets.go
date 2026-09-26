@@ -89,7 +89,17 @@ type Capabilities struct {
 	SendingProtectionContract int               `json:"sending_protection_contract"`
 	RuntimePolicySource       string            `json:"runtime_policy_source"`
 	OperatorCommitments       map[string]string `json:"operator_notice_recipient_commitments"`
+	// PolicyFeatures lists the optional runtime-policy objects this binary
+	// understands. The ops deploy gate compares it across the active and
+	// candidate slots before activating a policy that carries one: an older
+	// binary rejects the unknown key (fail closed), so activation must wait
+	// until every serving slot lists the feature.
+	PolicyFeatures []string `json:"runtime_policy_features"`
 }
+
+// PolicyFeatureExternalSendingAccess is the capability marker for the
+// optional `external_sending_access` runtime-policy object.
+const PolicyFeatureExternalSendingAccess = "external_sending_access"
 
 // BuildCapabilities assembles the readback. A missing operator map yields an
 // empty commitments object rather than an error: the self-host disabled mode
@@ -103,5 +113,6 @@ func BuildCapabilities(source PolicySource, secrets Secrets) Capabilities {
 		SendingProtectionContract: ContractLevel,
 		RuntimePolicySource:       string(source),
 		OperatorCommitments:       commitments,
+		PolicyFeatures:            []string{PolicyFeatureExternalSendingAccess},
 	}
 }

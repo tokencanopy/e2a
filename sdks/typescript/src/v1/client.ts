@@ -96,6 +96,8 @@ import type {
   StarterTemplateDetailView,
   AgentSuppressionView,
   CreateAgentSuppressionRequest,
+  SendingAccessRequestInput,
+  SendingAccessRequestView,
 } from "./generated/index.js";
 import { RetryHttpLibrary, type RetryOptions } from "./retry.js";
 import { E2AError, E2AValidationError, fromApiException, connectionError } from "./errors.js";
@@ -935,5 +937,27 @@ class AccountResource {
     // supplies the ?confirm=DELETE guard the raw API requires. Returns the
     // deletion receipt ({deleted:true} plus per-table cascade counts).
     return call(() => this.api.deleteAccount("DELETE"));
+  }
+  /**
+   * Beta: this account's most recent request for external sending access
+   * (filed via {@link requestSendingAccess}), with its review state
+   * (`"pending" | "approved" | "declined"`, open set). Throws the typed
+   * `E2ANotFoundError` (`not_found`) when the account has never filed one.
+   * Account-scoped credentials only.
+   */
+  getSendingAccessRequest(): Promise<SendingAccessRequestView> {
+    return call(() => this.api.getSendingAccessRequest());
+  }
+  /**
+   * Beta: files a request for support to review this account's external
+   * sending access — the recovery path named by an
+   * `external_sending_not_enabled` error's `details.recovery_url (raw wire key)`. Idempotent
+   * while a request is pending: submitting again returns the SAME pending
+   * request instead of creating a second one. Capped at 3 requests per 30
+   * days (`E2ARateLimitError` beyond that). Filing never grants access by
+   * itself. Account-scoped credentials only.
+   */
+  requestSendingAccess(body: SendingAccessRequestInput): Promise<SendingAccessRequestView> {
+    return call(() => this.api.createSendingAccessRequest(body));
   }
 }

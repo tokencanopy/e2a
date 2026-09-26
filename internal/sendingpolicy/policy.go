@@ -12,8 +12,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-
 	"strings"
+	"time"
 
 	"github.com/gowebpki/jcs"
 )
@@ -114,33 +114,85 @@ const maxBasisPoints = 9999
 // struct is hashed, reviewed by a human, and then required by hash at
 // activation, so renaming a key is a policy-breaking change.
 type RuntimePolicy struct {
-	AllCustomerGlobalDailyRecipients int              `json:"all_customer_global_daily_recipients"`
-	BounceMinOutcomes                int              `json:"bounce_min_outcomes"`
-	BouncePauseBasisPoints           int              `json:"bounce_pause_basis_points"`
-	BudgetHoldMaxDays                int              `json:"budget_hold_max_days"`
-	BudgetMode                       Mode             `json:"budget_mode"`
-	ComplaintPauseBasisPoints        int              `json:"complaint_pause_basis_points"`
-	CriticalOperationalDailyRecip    int              `json:"critical_operational_daily_recipients"`
-	DailyUnlimitedPlanCodes          []string         `json:"daily_unlimited_plan_codes"`
-	DefaultAccountDailyRecipients    int              `json:"default_account_daily_recipients"`
-	DetectorIntervalSeconds          int              `json:"detector_interval_seconds"`
-	DetectorMode                     Mode             `json:"detector_mode"`
-	DetectorWindowDays               int              `json:"detector_window_days"`
-	OperatorNoticeRecipientVersion   int              `json:"operator_notice_recipient_version"`
-	ProbationGlobalDailyRecipients   int              `json:"probation_global_daily_recipients"`
-	RampDays                         int              `json:"ramp_days"`
-	RampEnabled                      bool             `json:"ramp_enabled"`
-	RampStartDaily                   int              `json:"ramp_start_daily"`
-	RampTargetDaily                  int              `json:"ramp_target_daily"`
-	SendingControlAuditRetentionDays int              `json:"sending_control_audit_retention_days"`
-	SendingFeedbackPostAcctRetention int              `json:"sending_feedback_post_account_retention_days"`
-	SharedDomainAccountDailyRecip    int              `json:"shared_domain_account_daily_recipients"`
-	SharedReputationBounceMinOutcome int              `json:"shared_reputation_bounce_min_outcomes"`
-	TenantHeaderCanaryAccountIDs     []string         `json:"tenant_header_canary_account_ids"`
-	TenantHeaderMode                 TenantHeaderMode `json:"tenant_header_mode"`
-	TenantProvisioningMode           ToggleMode       `json:"tenant_provisioning_mode"`
-	TenantSuppressionSyncMode        ToggleMode       `json:"tenant_suppression_sync_mode"`
-	ViolationOperationalDailyRecip   int              `json:"violation_operational_daily_recipients"`
+	AllCustomerGlobalDailyRecipients int      `json:"all_customer_global_daily_recipients"`
+	BounceMinOutcomes                int      `json:"bounce_min_outcomes"`
+	BouncePauseBasisPoints           int      `json:"bounce_pause_basis_points"`
+	BudgetHoldMaxDays                int      `json:"budget_hold_max_days"`
+	BudgetMode                       Mode     `json:"budget_mode"`
+	ComplaintPauseBasisPoints        int      `json:"complaint_pause_basis_points"`
+	CriticalOperationalDailyRecip    int      `json:"critical_operational_daily_recipients"`
+	DailyUnlimitedPlanCodes          []string `json:"daily_unlimited_plan_codes"`
+	DefaultAccountDailyRecipients    int      `json:"default_account_daily_recipients"`
+	DetectorIntervalSeconds          int      `json:"detector_interval_seconds"`
+	DetectorMode                     Mode     `json:"detector_mode"`
+	DetectorWindowDays               int      `json:"detector_window_days"`
+	// ExternalSendingAccess is the optional external-sending-access control.
+	// It is a pointer with omitempty on purpose: a legacy payload without it
+	// must canonicalize to exactly the bytes it always had, so every stored
+	// policy hash stays valid across the upgrade. Absent means disabled.
+	ExternalSendingAccess            *ExternalSendingAccessPolicy `json:"external_sending_access,omitempty"`
+	OperatorNoticeRecipientVersion   int                          `json:"operator_notice_recipient_version"`
+	ProbationGlobalDailyRecipients   int                          `json:"probation_global_daily_recipients"`
+	RampDays                         int                          `json:"ramp_days"`
+	RampEnabled                      bool                         `json:"ramp_enabled"`
+	RampStartDaily                   int                          `json:"ramp_start_daily"`
+	RampTargetDaily                  int                          `json:"ramp_target_daily"`
+	SendingControlAuditRetentionDays int                          `json:"sending_control_audit_retention_days"`
+	SendingFeedbackPostAcctRetention int                          `json:"sending_feedback_post_account_retention_days"`
+	SharedDomainAccountDailyRecip    int                          `json:"shared_domain_account_daily_recipients"`
+	SharedReputationBounceMinOutcome int                          `json:"shared_reputation_bounce_min_outcomes"`
+	TenantHeaderCanaryAccountIDs     []string                     `json:"tenant_header_canary_account_ids"`
+	TenantHeaderMode                 TenantHeaderMode             `json:"tenant_header_mode"`
+	TenantProvisioningMode           ToggleMode                   `json:"tenant_provisioning_mode"`
+	TenantSuppressionSyncMode        ToggleMode                   `json:"tenant_suppression_sync_mode"`
+	ViolationOperationalDailyRecip   int                          `json:"violation_operational_daily_recipients"`
+}
+
+// ExternalSendingAccessPolicy restricts which recipients an account inside the
+// rollout cohort may reach through a shared sending identity.
+//
+// The cutoff is an immutable instant written by an operator, never computed at
+// startup or first send: a rollback, a restart, or a second slot must all
+// agree on exactly which accounts are in the cohort, and "now" is different
+// on each of them.
+type ExternalSendingAccessPolicy struct {
+	Mode                     Mode   `json:"mode"`
+	AccountsCreatedAtOrAfter string `json:"accounts_created_at_or_after"`
+}
+
+// Cutoff parses the validated cohort cutoff.
+func (p ExternalSendingAccessPolicy) Cutoff() (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, p.AccountsCreatedAtOrAfter)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("sendingpolicy: external_sending_access.accounts_created_at_or_after must be RFC3339 UTC: %w", err)
+	}
+	return t, nil
+}
+
+// validate enforces the object's own invariants. The cutoff must be written
+// in exactly one spelling — second precision, UTC, a literal Z — because it
+// is part of the reviewed hash, and two spellings of one instant would give
+// one intent two hashes.
+func (p ExternalSendingAccessPolicy) validate() error {
+	if !p.Mode.valid() {
+		return fmt.Errorf("sendingpolicy: external_sending_access.mode must be disabled, shadow, or enforce (got %q)", p.Mode)
+	}
+	t, err := p.Cutoff()
+	if err != nil {
+		return err
+	}
+	if canonical := t.UTC().Format(time.RFC3339); canonical != p.AccountsCreatedAtOrAfter {
+		return fmt.Errorf("sendingpolicy: external_sending_access.accounts_created_at_or_after must be written as %s", canonical)
+	}
+	return nil
+}
+
+// ExternalSendingMode reports the effective mode: absent is disabled.
+func (p RuntimePolicy) ExternalSendingMode() Mode {
+	if p.ExternalSendingAccess == nil {
+		return ModeDisabled
+	}
+	return p.ExternalSendingAccess.Mode
 }
 
 // DisabledPolicy returns the generation-zero policy: every control off, every
@@ -250,6 +302,12 @@ func (p RuntimePolicy) Validate() error {
 			p.RampTargetDaily, p.RampStartDaily)
 	}
 
+	if p.ExternalSendingAccess != nil {
+		if err := p.ExternalSendingAccess.validate(); err != nil {
+			return err
+		}
+	}
+
 	if err := validateCodeSet("daily_unlimited_plan_codes", p.DailyUnlimitedPlanCodes); err != nil {
 		return err
 	}
@@ -289,6 +347,10 @@ func validateCodeSet(key string, values []string) error {
 func (p RuntimePolicy) normalized() RuntimePolicy {
 	p.DailyUnlimitedPlanCodes = nonNilCopy(p.DailyUnlimitedPlanCodes)
 	p.TenantHeaderCanaryAccountIDs = nonNilCopy(p.TenantHeaderCanaryAccountIDs)
+	if p.ExternalSendingAccess != nil {
+		copied := *p.ExternalSendingAccess
+		p.ExternalSendingAccess = &copied
+	}
 	return p
 }
 

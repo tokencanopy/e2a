@@ -66,6 +66,7 @@ import { ErrorBody } from '../models/ErrorBody.js';
 import { ErrorEnvelope } from '../models/ErrorEnvelope.js';
 import { EventEnvelope } from '../models/EventEnvelope.js';
 import { EventView } from '../models/EventView.js';
+import { ExternalSendingNotEnabledDetails } from '../models/ExternalSendingNotEnabledDetails.js';
 import { FieldError } from '../models/FieldError.js';
 import { ForwardRequest } from '../models/ForwardRequest.js';
 import { ForwardRequestReplyTo } from '../models/ForwardRequestReplyTo.js';
@@ -133,6 +134,9 @@ import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
+import { SendingAccessRequestInput } from '../models/SendingAccessRequestInput.js';
+import { SendingAccessRequestView } from '../models/SendingAccessRequestView.js';
+import { SendingAccessView } from '../models/SendingAccessView.js';
 import { StarterTemplateDetailView } from '../models/StarterTemplateDetailView.js';
 import { StarterTemplateVariableView } from '../models/StarterTemplateVariableView.js';
 import { StarterTemplateView } from '../models/StarterTemplateView.js';
@@ -217,6 +221,40 @@ export class ObservableAccountApi {
      */
     public createApiKey(createAPIKeyRequest: CreateAPIKeyRequest, idempotencyKey?: string, _options?: ConfigurationOptions): Observable<CreateAPIKeyResponse> {
         return this.createApiKeyWithHttpInfo(createAPIKeyRequest, idempotencyKey, _options).pipe(map((apiResponse: HttpInfo<CreateAPIKeyResponse>) => apiResponse.data));
+    }
+
+    /**
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param sendingAccessRequestInput
+     */
+    public createSendingAccessRequestWithHttpInfo(sendingAccessRequestInput: SendingAccessRequestInput, _options?: ConfigurationOptions): Observable<HttpInfo<SendingAccessRequestView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.createSendingAccessRequest(sendingAccessRequestInput, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.createSendingAccessRequestWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Request external sending access (beta)
+     * @param sendingAccessRequestInput
+     */
+    public createSendingAccessRequest(sendingAccessRequestInput: SendingAccessRequestInput, _options?: ConfigurationOptions): Observable<SendingAccessRequestView> {
+        return this.createSendingAccessRequestWithHttpInfo(sendingAccessRequestInput, _options).pipe(map((apiResponse: HttpInfo<SendingAccessRequestView>) => apiResponse.data));
     }
 
     /**
@@ -427,6 +465,38 @@ export class ObservableAccountApi {
      */
     public getAccountMetrics(start?: Date, end?: Date, bucket?: 'day', groupBy?: 'agent', _options?: ConfigurationOptions): Observable<AccountMetricsView> {
         return this.getAccountMetricsWithHttpInfo(start, end, bucket, groupBy, _options).pipe(map((apiResponse: HttpInfo<AccountMetricsView>) => apiResponse.data));
+    }
+
+    /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     */
+    public getSendingAccessRequestWithHttpInfo(_options?: ConfigurationOptions): Observable<HttpInfo<SendingAccessRequestView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.getSendingAccessRequest(_config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.getSendingAccessRequestWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Get your latest external sending access request (beta)
+     */
+    public getSendingAccessRequest(_options?: ConfigurationOptions): Observable<SendingAccessRequestView> {
+        return this.getSendingAccessRequestWithHttpInfo(_options).pipe(map((apiResponse: HttpInfo<SendingAccessRequestView>) => apiResponse.data));
     }
 
     /**

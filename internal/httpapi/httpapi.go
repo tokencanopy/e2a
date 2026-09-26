@@ -20,6 +20,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
 	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 	"github.com/tokencanopy/e2a/internal/webhook"
 )
@@ -139,6 +140,15 @@ type MessageRestoreOp func(ctx context.Context, messageID, agentID string) (*ide
 // Deps are the collaborators the v1 layer needs. Everything is injected so
 // the package has no hidden globals and is straightforward to test.
 type Deps struct {
+	// External sending access (all optional; nil = surface absent/501).
+	// SendingAccessStatus backs the additive sending_access object on GET
+	// /v1/account; the request pair backs /v1/account/sending-access/request;
+	// NotifySendingAccessRequest emails the operator after a new request.
+	SendingAccessStatus        func(ctx context.Context, userID string) (sendingpolicy.ExternalAccessStatus, error)
+	SubmitSendingAccessRequest func(ctx context.Context, userID string, in sendingpolicy.AccessRequestInput) (sendingpolicy.AccessRequest, bool, error)
+	LatestSendingAccessRequest func(ctx context.Context, userID string) (*sendingpolicy.AccessRequest, error)
+	NotifySendingAccessRequest func(ctx context.Context, userID string, req sendingpolicy.AccessRequest)
+
 	Authenticator          Authenticator
 	PrincipalAuthenticator PrincipalAuthenticator
 	// AuthChallenge builds the RFC 6750 §3 WWW-Authenticate header value for a
@@ -785,6 +795,7 @@ func (s *Server) registerOperations() {
 	s.registerStarterTemplates()
 	s.registerEvents()
 	s.registerAccount()
+	s.registerSendingAccess()
 	s.registerAgentSuppressions()
 	s.registerContacts()
 	s.registerContactImport()

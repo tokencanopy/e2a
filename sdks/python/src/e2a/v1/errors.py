@@ -194,6 +194,12 @@ _CODE_MAP: "dict[str, tuple[type[E2AError], bool]]" = {
     "forbidden": (E2APermissionError, False),
     "blocked_by_policy": (E2APermissionError, False),
     "sending_paused": (E2APermissionError, False),
+    # 403 — the account may not send to one or more of the recipients through
+    # its shared sending identity (see ExternalSendingNotEnabledDetails on
+    # `.details`: allowed_recipients + an optional recovery_url). Not
+    # retryable: nothing was queued and retrying the same request will not
+    # succeed. Experimental.
+    "external_sending_not_enabled": (E2APermissionError, False),
     # 404/410 family — also covers *_not_found via the suffix check in _resolve.
     "not_found": (E2ANotFoundError, False),
     "gone": (E2ANotFoundError, False),

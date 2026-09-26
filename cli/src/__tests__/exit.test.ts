@@ -11,6 +11,16 @@ describe("API error exit classification", () => {
   it("keeps retryable API errors transient", () => {
     expect(exitCodeForAPIError({ code: "rate_limited", retryable: true })).toBe(EXIT.ERROR);
   });
+
+  it("maps external_sending_not_enabled to the permanent-request code, not AUTH", () => {
+    // It's a 403 PERMISSION error like forbidden/sending_paused, but only
+    // unauthorized/forbidden get the AUTH bucket (fix your key) — this one is
+    // "your recipients are out of scope for this key", which is REQUEST (5):
+    // do not retry the identical invocation, but the credential itself is fine.
+    expect(
+      exitCodeForAPIError({ code: "external_sending_not_enabled", retryable: false }),
+    ).toBe(EXIT.REQUEST);
+  });
 });
 
 describe("exit code contract", () => {

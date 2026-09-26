@@ -74,6 +74,8 @@ from .generated.models import (
     RotateSecretResponse,
     SendEmailRequest,
     SendResultView,
+    SendingAccessRequestInput,
+    SendingAccessRequestView,
     StarterTemplateDetailView,
     StarterTemplateView,
     SuppressionView,
@@ -1432,4 +1434,38 @@ class AccountResource:
         # confirmation; the SDK supplies the ?confirm=DELETE guard.
         return await self._c._write_unsafe(
             lambda h: self._api.delete_account(confirm="DELETE", _headers=h)
+        )
+
+    async def get_sending_access_request(self) -> SendingAccessRequestView:
+        """Beta: the account's most recent external sending access request.
+
+        Raises :class:`~e2a.v1.errors.E2ANotFoundError` (``not_found``) when
+        the account has never filed one. Account-scoped credentials only.
+        """
+        return await self._c._read(
+            lambda h: self._api.get_sending_access_request(_headers=h)
+        )
+
+    async def request_sending_access(
+        self, *, use_case: str, recipients: str, expected_daily_volume: int
+    ) -> SendingAccessRequestView:
+        """Beta: file a request for support to review external sending access.
+
+        Idempotent while a request is pending — calling this again returns the
+        existing pending request instead of creating another. After a decline,
+        a new request may be filed as an appeal (``rate_limited`` beyond 3 per
+        30 days). Filing a request never grants access by itself.
+        Account-scoped credentials only.
+
+        A first filing answers 201 and a resubmit-while-pending answers 200
+        with the existing request; both are declared in the spec and decode
+        to the same view.
+        """
+        req = SendingAccessRequestInput(
+            use_case=use_case,
+            recipients=recipients,
+            expected_daily_volume=expected_daily_volume,
+        )
+        return await self._c._write_unsafe(
+            lambda h: self._api.create_sending_access_request(req, _headers=h)
         )

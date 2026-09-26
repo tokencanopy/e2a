@@ -13,14 +13,20 @@
 // edit helpers so untouched fields keep their agent-authored original.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import useSWR from "swr";
-import { messageDetailKey } from "../../../../lib/swrKeys";
+import { agentsKey, domainsKey, limitsKey, messageDetailKey } from "../../../../lib/swrKeys";
 import {
   approvePendingMessage,
+  getAccountInfo,
   getReviewDetailWire,
+  listAgents,
+  listDomains,
   projectPending,
   rejectPendingMessage,
 } from "../../../components/onboarding/api";
+import { outboundCapability } from "../../../components/onboarding/state";
+import type { DomainInfo } from "../../../components/onboarding/types";
 import type {
   PendingMessageDetail,
   PendingMessageSummary,
@@ -30,6 +36,12 @@ import { diffApproveEdits, joinCSV } from "./edits";
 import { categoryLabel, holdReasonSummary } from "./reviewReason";
 import { MessageLifecycleData } from "../../../components/messages/MessageLifecycleTimeline";
 import { EmailHtmlBody } from "../../../components/messages/EmailHtmlBody";
+import {
+  disallowedRecipients,
+  isSendingRestricted,
+  parseExternalSendingNotEnabledError,
+  parseRecipientList,
+} from "../../../../lib/sendingAccess";
 
 function formatQueuedAgo(iso: string): string {
   const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -122,6 +134,26 @@ export function PendingRow({
     [wire, agentEmail],
   );
 
+  // External-sending-access preflight (beta) — only fetched once the row is
+  // open and only matters for an outbound draft (approving an inbound hold
+  // releases it to the inbox; nothing is sent). Keys are shared with the
+  // dashboard notice / Billing page (`agentsKey`/`domainsKey`/`limitsKey`),
+  // so this dedupes onto whatever's already cached rather than firing its
+  // own round trip.
+  const wantsAccessCheck = expanded && !isInbound;
+  const { data: accessAgents } = useSWR(
+    wantsAccessCheck ? agentsKey : null,
+    () => listAgents(),
+  );
+  const { data: accessDomains } = useSWR(
+    wantsAccessCheck ? domainsKey : null,
+    () => listDomains().catch(() => [] as DomainInfo[]),
+  );
+  const { data: accessAccount } = useSWR(
+    wantsAccessCheck ? limitsKey : null,
+    () => getAccountInfo(),
+  );
+
   const [editing, setEditing] = useState(false);
   // Flips once the reviewer opens the editor or types, so a background
   // revalidation can't stomp an in-progress edit.
@@ -175,6 +207,12 @@ export function PendingRow({
   }, [expanded]);
 
   const busy = approving || rejecting;
+  // A failed approve/reject may be the external_sending_not_enabled 403 —
+  // recognize it so the error line can add a Request approval link instead
+  // of just the raw server message.
+  const parsedActionError = actionError
+    ? parseExternalSendingNotEnabledError(actionError)
+    : null;
   const error =
     actionError || (fetchError ? fetchError.message || "Failed to load" : "");
 
@@ -223,6 +261,30 @@ export function PendingRow({
   const hasScreeningDetails =
     holdReason?.type === "scan" &&
     (hasValidConfidence || !!holdReason.category || !!scanFinding?.detector);
+
+  // Client-side recipient preflight (guidance only — the server decides).
+  // Skipped when the agent's own domain already has a verified custom
+  // sending identity, since the shared-identity restriction may not apply
+  // to it.
+  const agentDomain = agentEmail.split("@")[1] ?? "";
+  const domainRecord = accessDomains?.find((d) => d.domain === agentDomain);
+  const domainSendingVerified = domainRecord
+    ? outboundCapability(domainRecord) === "verified"
+    : false;
+  const restrictedSend =
+    wantsAccessCheck &&
+    isSendingRestricted(accessAccount?.sending_access) &&
+    !domainSendingVerified;
+  const candidateRecipients = editing
+    ? [...parseRecipientList(to), ...parseRecipientList(cc), ...parseRecipientList(bcc)]
+    : [...(msg?.to ?? []), ...(msg?.cc ?? []), ...(msg?.bcc ?? [])];
+  const disallowed = restrictedSend
+    ? disallowedRecipients(candidateRecipients, {
+        accountAgentEmails: (accessAgents ?? []).map((a) => a.email),
+        ownerEmail: accessAccount?.user?.email,
+        ownerVerified: Boolean(accessAccount?.sending_access?.owner_recipient_verified),
+      })
+    : [];
 
   return (
     <div
@@ -515,6 +577,26 @@ export function PendingRow({
                 </div>
               )}
 
+              {!notPending && disallowed.length > 0 && (
+                <div
+                  role="alert"
+                  className="text-[12px] px-4 py-2.5"
+                  style={{
+                    background: "var(--warn-bg)",
+                    color: "var(--warn-strong)",
+                    borderTop: "1px solid var(--border-sub)",
+                  }}
+                >
+                  External sending is restricted for this account. These
+                  recipients may not be reachable through the shared sending
+                  identity: {disallowed.join(", ")}. You can still approve —
+                  e2a decides on send.{" "}
+                  <Link href="/sending-access" className="underline">
+                    Request approval
+                  </Link>
+                </div>
+              )}
+
               {/* Action bar */}
               {!notPending && (
                 <div
@@ -619,7 +701,18 @@ export function PendingRow({
                   className="text-[12px] px-4 py-2"
                   style={{ color: "var(--danger-strong)" }}
                 >
-                  {error}
+                  {parsedActionError ? parsedActionError.message : error}
+                  {parsedActionError && (
+                    <>
+                      {" "}
+                      <Link
+                        href={parsedActionError.recoveryUrl || "/sending-access"}
+                        className="underline"
+                      >
+                        Request approval
+                      </Link>
+                    </>
+                  )}
                 </p>
               )}
             </div>

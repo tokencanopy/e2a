@@ -19,6 +19,9 @@ For vulnerability reporting and the security model, see [SECURITY.md](../SECURIT
 | OAuth sessions | Postgres `user_sessions` | 7 days; cleanup worker removes expired rows hourly |
 | Usage events / summaries (only when `E2A_USAGE_TRACKING=true`) | Postgres `usage_events`, `usage_summaries` | Indefinite by default — operator can purge or override |
 | Per-webhook signing secret (`whsec_…`) | Postgres, **plaintext** | Until the webhook is deleted. Returned once at creation; rotate via `POST /v1/webhooks/{id}/rotate-secret` (the previous secret stays valid for a 24h grace window). |
+| Owner-mailbox proof (the sign-in address a verified Google login confirmed, its source and timestamp) | Postgres `users.owner_email_verified_*` | Until the account is deleted; stops applying as soon as the account email changes. |
+| External sending access requests (use case, intended recipients, expected volume, review state) | Postgres `external_sending_access_requests` | Until the account is deleted (cascade). Private support data — never filed to a public tracker. |
+| External sending access audit (operator grant/revoke: account id, old/new state, actor, reason; no addresses) | Postgres `external_sending_access_events` | Append-only; no account foreign key, so it outlives account deletion. Each row carries an `expires_at` (the `sending_control_audit_retention_days` policy value, 90 days by default); like `account_sending_control_events`, the purge of expired rows is not yet automated and is an operator task. |
 | Deployment-wide HMAC secret (operator key) | Operator's env (`E2A_HMAC_SECRET`); never written to DB | Lifetime of the deployment. Used for HITL approval / magic-link tokens and internal key derivation. SDKs verify webhook deliveries with the per-webhook `whsec_` secret, not this. |
 
 ## What's logged

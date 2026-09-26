@@ -368,3 +368,28 @@ message row, and the SNS consumer acks it as unknown (a log line, no
 suppression). And the closure guard fences `net/smtp` and the SES v2 SDK
 import; a send through some other HTTP provider API would be a new
 dependency, which is where review catches it.
+
+## Addendum (2026-09-26): external sending access
+
+`internal/sendingpolicy/external_access.go` adds one permission decision that
+every customer-message seam applies to the durable sender and the whole
+To/Cc/Bcc envelope: the API preflight (before screening can hold a draft),
+`PrepareExternalTx` (inside the accept transaction; a refusal rolls the accept
+back → HTTP 403 `external_sending_not_enabled`), `ConsumeAttempt` (under the
+normative locks — the users, account-control and plan rows it already holds —
+a refusal is a TERMINAL hold that releases the reservation and fails the
+message with `submission.external_sending_not_enabled` + `email.failed`) and
+`RedeemProviderCall` (refuse-only unlocked reads immediately before the
+socket, invalidating the token exactly like the pause re-check). No new row
+lock is taken on the accept path: acceptance reads the runtime policy without
+the singleton share lock because it already holds source locks. The control
+is an optional `external_sending_access` runtime-policy object (absent =
+disabled, legacy hashes unchanged): `mode`, the immutable cohort cutoff
+and `accounts_created_at_or_after`. The paid-base entitlement is the
+billing-written `account_limits.external_sending_entitled` boolean (the
+server only reads it; `plan_code` is not authorization). Operator grants are
+local server commands (`-approve-external-sending` / `-revoke-external-sending`
+with a revision CAS and append-only `external_sending_access_events`); no API
+credential can grant access. Owner-mailbox proof
+(`users.owner_email_verified_at` + the bound address) is written only by a
+verified Google login.

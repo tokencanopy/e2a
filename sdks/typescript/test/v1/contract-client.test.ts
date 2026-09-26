@@ -11,6 +11,12 @@
  * Requires env vars (same as contract.test.ts):
  *   E2A_TEST_BASE_URL  — test server URL
  *   E2A_TEST_API_KEY   — valid API key for the test user
+ *   E2A_TEST_RESTRICTED_API_KEY — optional; key for the contract server's
+ *     account inside the external-sending-access enforcement cohort (see
+ *     contract.test.ts). The account.getSendingAccessRequest /
+ *     .requestSendingAccess coverage below runs as that account and skips
+ *     without it (a deployed staging target has no such account), mirroring
+ *     how the capped/over-cap accounts are treated.
  *
  * Contract-server send topology (cmd/e2a-contract-server): the real River
  * enqueuer is wired but its outbound worker is not started, so external sends
@@ -25,6 +31,7 @@ import { E2ANotFoundError } from "../../src/v1/errors.js";
 
 const baseUrl = process.env.E2A_TEST_BASE_URL;
 const apiKey = process.env.E2A_TEST_API_KEY;
+const restrictedApiKey = process.env.E2A_TEST_RESTRICTED_API_KEY;
 
 /** Shared-domain slug — must satisfy the server's ^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$
  *  rule (2–40 chars, no underscores). */
@@ -213,3 +220,61 @@ describe.skipIf(!baseUrl || !apiKey)("E2AClient contract (high-level)", () => {
     }
   });
 });
+
+// The external-sending-access request-intake flow is only safe to exercise
+// against the DEDICATED restricted account (tests/contract/scenarios.yaml's
+// external_sending_access_request_intake): a filed request is private support
+// history with no customer-delete affordance, so running this against the
+// shared primary contract-server account would leave permanent litter on it.
+// Skips gracefully without the key, exactly like the capped/over-cap accounts
+// in contract.test.ts.
+//
+// That scenario is ALSO the one raw-HTTP caller that may be the FIRST to file
+// a request on this account: it asserts a fresh 201 on its own `file_request`
+// step, and vitest gives no ordering guarantee between separate test files
+// (this one and contract.test.ts run concurrently). This test therefore never
+// creates unconditionally — it only replays `requestSendingAccess` once a
+// request already exists (idempotent-while-pending, so a replay is always
+// safe), which still proves the ergonomic method live either way:
+//   - a request already exists (the common case: the scenario's several
+//     create/resubmit steps are fast) → exercises the create/replay decode
+//     path against a real 200.
+//   - nothing has been filed yet → exercises getSendingAccessRequest's live
+//     404 → E2ANotFoundError mapping instead, and skips the create call so it
+//     can never race the scenario for first-filer status.
+describe.skipIf(!baseUrl || !restrictedApiKey)(
+  "E2AClient contract (restricted account: external sending access)",
+  () => {
+    const client = new E2AClient({ apiKey: restrictedApiKey!, baseUrl: baseUrl! });
+
+    it("account.getSendingAccessRequest reads the account's request state, replaying account.requestSendingAccess only when one already exists", async () => {
+      let latest;
+      try {
+        latest = await client.account.getSendingAccessRequest();
+      } catch (err) {
+        expect(err).toBeInstanceOf(E2ANotFoundError);
+      }
+
+      if (!latest) return; // Nothing filed yet in this run — see comment above.
+
+      expect(["pending", "approved", "declined"]).toContain(latest.state);
+      expect(latest.expectedDailyVolume).toBeGreaterThan(0);
+      expect(latest.createdAt).toBeInstanceOf(Date);
+
+      const replay = await client.account.requestSendingAccess({
+        useCase: "contract-client coverage probe",
+        recipients: "our own customers",
+        expectedDailyVolume: 25,
+      });
+      if (latest.state === "pending") {
+        // Idempotent while pending: filing again returns the SAME request.
+        expect(replay.id).toBe(latest.id);
+        expect(replay.state).toBe("pending");
+      } else {
+        // A decided (approved/declined) request allows a fresh appeal —
+        // a NEW request, not a replay of the old one.
+        expect(replay.state).toBe("pending");
+      }
+    });
+  },
+);
