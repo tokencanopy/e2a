@@ -82,7 +82,7 @@ func (m *Module) InspectExternalAccess(ctx context.Context, accountID string) (E
 	rec := ExternalAccessRecord{
 		AccountID:     accountID,
 		Approved:      facts.approved,
-		PaidEntitled:  facts.entitled,
+		PaidEntitled:  facts.paidEntitled(policy),
 		OwnerVerified: facts.ownerRecipientVerified(),
 	}
 	var state string

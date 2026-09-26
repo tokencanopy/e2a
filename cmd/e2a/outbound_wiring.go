@@ -29,7 +29,10 @@ type outboundSendingDeps struct {
 
 // outboundSending is the composed outbound send path.
 type outboundSending struct {
-	gate      sendingpolicy.Gate
+	gate sendingpolicy.Gate
+	// module is the same policy owner behind gate, exposed through its other
+	// narrow roles (external-sending-access preflight/status/requests).
+	module    *sendingpolicy.Module
 	submitter *outbound.ProviderSubmitter
 	jobs      *outboundsend.Jobs
 }
@@ -41,7 +44,8 @@ type outboundSending struct {
 // enqueue and authorizes every worker execution through the same gate. No
 // raw sender and no direct ramp store reach the worker from here.
 func newOutboundSending(d outboundSendingDeps) outboundSending {
-	gate := sendingpolicy.NewGate(d.pool, d.secrets, d.source, d.policy)
+	module := sendingpolicy.NewPolicyModule(d.pool, d.secrets, d.source, d.policy)
+	var gate sendingpolicy.Gate = module
 	submitter := outbound.NewProviderSubmitter(d.relay, gate)
 	// Delivery feedback: tag outbound with the SES configuration set so SES
 	// publishes delivery/bounce/complaint events. Empty = off.
@@ -50,7 +54,7 @@ func newOutboundSending(d outboundSendingDeps) outboundSending {
 		WithGate(gate).
 		WithMetrics(d.metrics).
 		WithRateGate(d.rate)
-	return outboundSending{gate: gate, submitter: submitter, jobs: jobs}
+	return outboundSending{gate: gate, module: module, submitter: submitter, jobs: jobs}
 }
 
 // notificationDeps is what the notification composition needs: the same gate
@@ -93,4 +97,5 @@ func newNotificationJobs(d notificationDeps) notificationJobs {
 // itself (public feedback).
 func (s outboundSending) armAPI(api *agent.API) {
 	api.SetProviderSubmitter(s.submitter, s.gate)
+	api.SetExternalAccess(s.module)
 }

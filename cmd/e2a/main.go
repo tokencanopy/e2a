@@ -947,6 +947,7 @@ func main() {
 		Enforcer:                  enforcer,
 		UsageStore:                usageStore,
 		SubscriberStore:           subscriberStore,
+		SendingAccess:             outboundSending.module,
 		Idempotency:               idempotencyStore,
 		Pool:                      pool,
 		SMTPDomain:                cfg.SMTP.Domain,

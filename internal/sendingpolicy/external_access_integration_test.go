@@ -16,12 +16,16 @@ import (
 
 const esaCutoff = "2026-01-01T00:00:00Z"
 
+// esaPaidPlan is a synthetic plan code the test policy lists as paid. Real
+// plan names live only in hosted configuration.
+const esaPaidPlan = "paid_tier_test"
+
 // esaPolicy is the disabled default with the external-access control armed.
 // Budgets stay disabled so these tests isolate the permission from the
 // independent budget controls.
 func esaPolicy(mode sendingpolicy.Mode) sendingpolicy.RuntimePolicy {
 	p := sendingpolicy.DisabledPolicy()
-	p.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{Mode: mode, AccountsCreatedAtOrAfter: esaCutoff}
+	p.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{Mode: mode, AccountsCreatedAtOrAfter: esaCutoff, PaidPlanCodes: []string{esaPaidPlan}}
 	return p
 }
 
@@ -68,9 +72,13 @@ func (f *fixture) setApproved(userID string, approved bool) {
 	        external_sending_access_changed_at = now() WHERE user_id = $1`, userID, approved)
 }
 
+// setEntitled moves the account onto (or off) the listed paid plan code.
 func (f *fixture) setEntitled(userID string, entitled bool) {
-	f.plan(userID, "starter")
-	f.exec(`UPDATE account_limits SET external_sending_entitled = $2 WHERE user_id = $1`, userID, entitled)
+	if entitled {
+		f.plan(userID, esaPaidPlan)
+		return
+	}
+	f.plan(userID, "free_tier_test")
 }
 
 // esaAgent inserts a live agent whose id is its address, the production shape.
@@ -163,8 +171,15 @@ func TestExternalAccessAcceptanceMatrix(t *testing.T) {
 			f.setEntitled(u, true)
 			return shared(f, u), []string{external}, nil, nil, "relay"
 		}, sendingpolicy.AcceptanceAccept},
-		{"paid plan code without the entitlement does not allow", sendingpolicy.ModeEnforce, func(f *fixture, u string) (string, []string, []string, []string, string) {
+		{"unlisted plan code is not entitled", sendingpolicy.ModeEnforce, func(f *fixture, u string) (string, []string, []string, []string, string) {
 			f.setEntitled(u, false)
+			return shared(f, u), []string{external}, nil, nil, "relay"
+		}, sendingpolicy.AcceptanceExternalSendingNotEnabled},
+		{"unknown price plan code is not entitled", sendingpolicy.ModeEnforce, func(f *fixture, u string) (string, []string, []string, []string, string) {
+			f.plan(u, "unknown_price")
+			return shared(f, u), []string{external}, nil, nil, "relay"
+		}, sendingpolicy.AcceptanceExternalSendingNotEnabled},
+		{"missing account_limits row is not entitled", sendingpolicy.ModeEnforce, func(f *fixture, u string) (string, []string, []string, []string, string) {
 			return shared(f, u), []string{external}, nil, nil, "relay"
 		}, sendingpolicy.AcceptanceExternalSendingNotEnabled},
 		{"pause wins over approval", sendingpolicy.ModeEnforce, func(f *fixture, u string) (string, []string, []string, []string, string) {
@@ -571,19 +586,19 @@ func TestExternalAccessMigrationIsIdempotentAndConservative(t *testing.T) {
 		}
 	}
 
-	// Existing rows stay unapproved, unentitled, and without proof — a paid
-	// plan_code is not the entitlement and a nonempty email is not proof.
-	var approved, entitled bool
+	// Existing rows stay unapproved and without proof — a nonempty email is
+	// not proof, and no entitlement column exists to backfill.
+	var approved bool
 	var revision int64
 	var proof *string
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT c.external_sending_approved, c.external_sending_access_revision, l.external_sending_entitled, u.owner_email_verified_address
-		  FROM users u JOIN account_sending_controls c ON c.user_id = u.id JOIN account_limits l ON l.user_id = u.id
-		 WHERE u.id = $1`, user).Scan(&approved, &revision, &entitled, &proof); err != nil {
+		SELECT c.external_sending_approved, c.external_sending_access_revision, u.owner_email_verified_address
+		  FROM users u JOIN account_sending_controls c ON c.user_id = u.id
+		 WHERE u.id = $1`, user).Scan(&approved, &revision, &proof); err != nil {
 		t.Fatal(err)
 	}
-	if approved || revision != 0 || entitled || proof != nil {
-		t.Fatalf("defaults: approved=%v revision=%d entitled=%v proof=%v", approved, revision, entitled, proof)
+	if approved || revision != 0 || proof != nil {
+		t.Fatalf("defaults: approved=%v revision=%d proof=%v", approved, revision, proof)
 	}
 
 	for name, stmt := range map[string]string{
@@ -606,5 +621,22 @@ func TestExternalAccessMigrationIsIdempotentAndConservative(t *testing.T) {
 	var reason string
 	if err := f.pool.QueryRow(f.ctx, `SELECT stage || '/' || outcome || '/' || retryable::text FROM message_lifecycle_reason_codes WHERE code = 'submission.external_sending_not_enabled'`).Scan(&reason); err != nil || reason != "submission/failed/false" {
 		t.Fatalf("lifecycle reason row = %q err=%v", reason, err)
+	}
+}
+
+func TestExternalAccessEmptyPaidListEntitlesNobody(t *testing.T) {
+	f := newFixture(t)
+	policy := esaPolicy(sendingpolicy.ModeEnforce)
+	policy.ExternalSendingAccess.PaidPlanCodes = nil
+	g := f.gate(policy)
+	user := f.user("standard")
+	f.plan(user, esaPaidPlan)
+	msg := f.esaMessage(f.esaAgent(user, "agents.e2a.dev"), "relay", []string{external}, nil, nil)
+	if got, _ := f.prepareMessage(g, msg); got != sendingpolicy.AcceptanceExternalSendingNotEnabled {
+		t.Fatalf("an empty paid_plan_codes list must entitle nobody, got %q", got)
+	}
+	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, policy)
+	if st, err := m.ExternalAccessStatus(f.ctx, user); err != nil || st.PaidExternalSendingEntitled {
+		t.Fatalf("status = %+v err=%v", st, err)
 	}
 }

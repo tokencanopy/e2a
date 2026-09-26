@@ -26,6 +26,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/limits"
 	"github.com/tokencanopy/e2a/internal/messagelifecycle"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/internal/sendramp"
 	"github.com/tokencanopy/e2a/internal/usage"
 	"github.com/tokencanopy/e2a/internal/webhook"
@@ -40,8 +41,11 @@ type Params struct {
 	Enforcer        *limits.DBEnforcer
 	UsageStore      *usage.Store
 	SubscriberStore *webhook.SubscriberStore
-	Idempotency     *idempotency.Store
-	Pool            *pgxpool.Pool
+	// SendingAccess is the external-sending-access owner (status readback
+	// and request intake). Optional — nil leaves those surfaces absent.
+	SendingAccess *sendingpolicy.Module
+	Idempotency   *idempotency.Store
+	Pool          *pgxpool.Pool
 
 	SMTPDomain   string
 	SharedDomain string
@@ -222,6 +226,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		EnforceMessageSend:           p.Enforcer.CheckMessageSend,
 		GetRepliableMessage:          p.Store.GetRepliableMessage,
 		GetLimits:                    p.Enforcer.Get,
+		NotifySendingAccessRequest:   p.API.NotifySendingAccessRequest,
 		ExportUserData:               p.API.ExportUserDataCore,
 		DeleteUserData:               p.API.DeleteUserDataCore,
 		ListSuppressions:             p.Store.ListSuppressions,
@@ -321,6 +326,12 @@ func BuildDeps(p Params) httpapi.Deps {
 		Legacy:       p.Legacy,
 		Metrics:      p.Metrics,
 	}
+	if p.SendingAccess != nil {
+		deps.SendingAccessStatus = p.SendingAccess.ExternalAccessStatus
+		deps.SubmitSendingAccessRequest = p.SendingAccess.SubmitAccessRequest
+		deps.LatestSendingAccessRequest = p.SendingAccess.LatestAccessRequest
+	}
+
 	deps.ResolveUnsubscribeToken = p.Store.ResolveUnsubscribeToken
 	deps.AddAgentSuppressionFromTokenScope = p.Store.AddAgentSuppressionFromTokenScope
 	deps.AgentSuppressionAddedHook = p.AgentSuppressionAddedHook

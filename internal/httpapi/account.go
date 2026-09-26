@@ -34,6 +34,10 @@ type AccountView struct {
 	Limits       LimitsCapsView  `json:"limits"`
 	Usage        LimitsUsageView `json:"usage"`
 	UpgradeURL   string          `json:"upgrade_url"`
+	// SendingAccess is the additive external-sending-access eligibility
+	// object (booleans only). Omitted when the deployment does not wire it or
+	// its state could not be read.
+	SendingAccess *SendingAccessView `json:"sending_access,omitempty" doc:"External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when unavailable."`
 }
 
 type LimitsCapsView struct {
@@ -333,7 +337,8 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 			MaxMessagesMonth: caps.MaxMessagesMonth,
 			MaxStorageBytes:  caps.MaxStorageBytes,
 		},
-		Usage:      usage,
-		UpgradeURL: caps.UpgradeURL,
+		Usage:         usage,
+		UpgradeURL:    caps.UpgradeURL,
+		SendingAccess: s.accountSendingAccess(ctx, user.ID),
 	}}, nil
 }

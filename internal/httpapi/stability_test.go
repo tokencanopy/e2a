@@ -16,6 +16,7 @@ var betaOperationIDs = []string{
 	"approveReview",
 	"createAgentSuppression",
 	"createContact",
+	"createSendingAccessRequest",
 	"createTemplate",
 	"deleteAgentSuppression",
 	"deleteContact",
@@ -30,6 +31,7 @@ var betaOperationIDs = []string{
 	"importContacts",
 	"getMessageLifecycle",
 	"getReview",
+	"getSendingAccessRequest",
 	"getStarterTemplate",
 	"getTemplate",
 	"listAgentSuppressions",
@@ -441,8 +443,8 @@ func TestSpecBetaMarkers(t *testing.T) {
 	// abuse pause — are experimental.
 	errorCode, _ := schemaProps(t, doc, "ErrorBody")["code"].(map[string]any)
 	rawErrorValues, _ := errorCode["x-experimental-values"].([]any)
-	if len(rawErrorValues) != 2 || rawErrorValues[0] != "blocked_by_policy" || rawErrorValues[1] != "sending_paused" {
-		t.Errorf("ErrorBody.code x-experimental-values = %v, want [blocked_by_policy sending_paused]", rawErrorValues)
+	if len(rawErrorValues) != 3 || rawErrorValues[0] != "blocked_by_policy" || rawErrorValues[1] != "sending_paused" || rawErrorValues[2] != "external_sending_not_enabled" {
+		t.Errorf("ErrorBody.code x-experimental-values = %v, want [blocked_by_policy sending_paused external_sending_not_enabled]", rawErrorValues)
 	}
 
 	// Managed unsubscribe is a beta opt-in nested inside otherwise-stable

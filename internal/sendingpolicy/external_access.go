@@ -25,7 +25,8 @@ import (
 //     account class: existing behavior.
 //  3. The message's ACTUAL outbound identity is the account's own currently
 //     verified custom domain: external recipients allowed.
-//  4. A current operator grant or billing-issued paid-base entitlement:
+//  4. A current operator grant, or the paid-base entitlement (the account's
+//     account_limits.plan_code is in the hosted policy's paid_plan_codes):
 //     external shared-identity sending allowed.
 //  5. Otherwise every envelope recipient (To, Cc AND Bcc) must be the
 //     account's currently verified owner mailbox or a live agent of the same
@@ -54,7 +55,7 @@ const (
 	RouteCustomIdentity ExternalAccessRoute = "custom_identity"
 	// RouteOperatorApproval: the operator grant.
 	RouteOperatorApproval ExternalAccessRoute = "operator_approval"
-	// RoutePaidEntitlement: the billing-issued paid-base entitlement.
+	// RoutePaidEntitlement: the paid-base entitlement (plan_code listed).
 	RoutePaidEntitlement ExternalAccessRoute = "paid_entitlement"
 	// RouteRestrictedRecipients: every recipient is the verified owner
 	// mailbox or a live agent of the same account.
@@ -92,7 +93,18 @@ type accountAccessFacts struct {
 	// account has no proof.
 	proofAddress string
 	approved     bool
-	entitled     bool
+	// planCode is account_limits.plan_code, "" when the row is missing.
+	planCode string
+}
+
+// paidEntitled reports the paid-base entitlement: the account's current
+// plan_code is in the hosted policy's paid_plan_codes list. A missing row,
+// an empty list, or any unlisted code is not entitled.
+func (f accountAccessFacts) paidEntitled(policy RuntimePolicy) bool {
+	if policy.ExternalSendingAccess == nil {
+		return false
+	}
+	return policy.ExternalSendingAccess.paidPlan(f.planCode)
 }
 
 // errAccountMissing means the account row is gone. Callers already handle a
@@ -111,12 +123,12 @@ func loadAccountAccessFacts(ctx context.Context, q dbQuerier, userID string) (ac
 		SELECT u.created_at, u.account_class, u.email,
 		       u.owner_email_verified_address, u.owner_email_verified_at,
 		       COALESCE(c.external_sending_approved, false),
-		       COALESCE(l.external_sending_entitled, false)
+		       COALESCE(l.plan_code, '')
 		  FROM users AS u
 		  LEFT JOIN account_sending_controls AS c ON c.user_id = u.id
 		  LEFT JOIN account_limits AS l ON l.user_id = u.id
 		 WHERE u.id = $1`, userID,
-	).Scan(&f.createdAt, &f.class, &f.ownerEmail, &proofAddress, &proofAt, &f.approved, &f.entitled)
+	).Scan(&f.createdAt, &f.class, &f.ownerEmail, &proofAddress, &proofAt, &f.approved, &f.planCode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return accountAccessFacts{}, errAccountMissing
 	}
@@ -283,7 +295,7 @@ func decideExternalRoute(ctx context.Context, q dbQuerier, policy RuntimePolicy,
 	if facts.approved {
 		return RouteOperatorApproval, nil
 	}
-	if facts.entitled {
+	if facts.paidEntitled(policy) {
 		return RoutePaidEntitlement, nil
 	}
 	if len(in.envelope) == 0 {
@@ -426,7 +438,8 @@ type ExternalAccessStatus struct {
 	EnforcementApplies bool
 	// SharedExternalApproved reports the operator grant.
 	SharedExternalApproved bool
-	// PaidExternalSendingEntitled reports the billing-issued entitlement.
+	// PaidExternalSendingEntitled reports the paid-base entitlement derived
+	// from the account's current plan_code and the policy's paid_plan_codes.
 	PaidExternalSendingEntitled bool
 	// OwnerRecipientVerified reports valid proof for the current mailbox.
 	OwnerRecipientVerified bool
@@ -449,7 +462,7 @@ func (m *Module) ExternalAccessStatus(ctx context.Context, userID string) (Exter
 	return ExternalAccessStatus{
 		EnforcementApplies:          applies && policy.ExternalSendingMode() == ModeEnforce,
 		SharedExternalApproved:      facts.approved,
-		PaidExternalSendingEntitled: facts.entitled,
+		PaidExternalSendingEntitled: facts.paidEntitled(policy),
 		OwnerRecipientVerified:      facts.ownerRecipientVerified(),
 	}, nil
 }

@@ -285,6 +285,10 @@ func approveAsyncError(agentID, messageID string, err error) *OutboundError {
 		// The draft stays pending_review (the approval transaction rolled
 		// back); the reviewer learns why rather than seeing a 500.
 		return &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account; the draft remains pending"}
+	case errors.Is(err, outboundsend.ErrExternalSendingNotEnabled):
+		// The approval transaction rolled back; the draft remains pending so
+		// the reviewer can reject it or approve after access is granted.
+		return &OutboundError{Status: http.StatusForbidden, Code: "external_sending_not_enabled", Msg: "External sending is not enabled for this account, so this draft cannot be sent to its recipients; it remains pending. Verify a sending domain or request approval in the dashboard."}
 	default:
 		var ve *outbound.ValidationError
 		if errors.As(err, &ve) {

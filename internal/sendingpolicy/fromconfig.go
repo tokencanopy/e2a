@@ -54,6 +54,7 @@ func FromConfig(cfg *config.Config) (RuntimePolicy, error) {
 		policy.ExternalSendingAccess = &ExternalSendingAccessPolicy{
 			Mode:                     Mode(esa.Mode),
 			AccountsCreatedAtOrAfter: esa.AccountsCreatedAtOrAfter,
+			PaidPlanCodes:            esa.PaidPlanCodes,
 		}
 	}
 

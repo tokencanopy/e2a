@@ -158,6 +158,25 @@ type RuntimePolicy struct {
 type ExternalSendingAccessPolicy struct {
 	Mode                     Mode   `json:"mode"`
 	AccountsCreatedAtOrAfter string `json:"accounts_created_at_or_after"`
+	// PaidPlanCodes lists the account_limits.plan_code values that carry the
+	// paid-base entitlement (external shared-identity sending). Plan names
+	// live only in hosted policy, never in this code; empty (the default)
+	// entitles nobody. Any other code — including a free plan, an unknown or
+	// unset code, or a missing account_limits row — is not entitled.
+	PaidPlanCodes []string `json:"paid_plan_codes"`
+}
+
+// paidPlan reports whether planCode carries the paid-base entitlement.
+func (p ExternalSendingAccessPolicy) paidPlan(planCode string) bool {
+	if planCode == "" {
+		return false
+	}
+	for _, code := range p.PaidPlanCodes {
+		if code == planCode {
+			return true
+		}
+	}
+	return false
 }
 
 // Cutoff parses the validated cohort cutoff.
@@ -184,7 +203,7 @@ func (p ExternalSendingAccessPolicy) validate() error {
 	if canonical := t.UTC().Format(time.RFC3339); canonical != p.AccountsCreatedAtOrAfter {
 		return fmt.Errorf("sendingpolicy: external_sending_access.accounts_created_at_or_after must be written as %s", canonical)
 	}
-	return nil
+	return validateCodeSet("external_sending_access.paid_plan_codes", p.PaidPlanCodes)
 }
 
 // ExternalSendingMode reports the effective mode: absent is disabled.
@@ -349,6 +368,7 @@ func (p RuntimePolicy) normalized() RuntimePolicy {
 	p.TenantHeaderCanaryAccountIDs = nonNilCopy(p.TenantHeaderCanaryAccountIDs)
 	if p.ExternalSendingAccess != nil {
 		copied := *p.ExternalSendingAccess
+		copied.PaidPlanCodes = nonNilCopy(copied.PaidPlanCodes)
 		p.ExternalSendingAccess = &copied
 	}
 	return p

@@ -186,7 +186,10 @@ type API struct {
 	// unset means the platform cannot send feedback mail.
 	submitter *outbound.ProviderSubmitter
 	gate      sendingpolicy.Gate
-	userAuth  *auth.UserAuth
+	// externalAccess is the external-sending-access preflight/status role;
+	// nil skips the API preflight (the gate still enforces).
+	externalAccess sendingpolicy.ExternalAccess
+	userAuth       *auth.UserAuth
 	// oidcAuth wires optional, generic OpenID Connect browser login. Nil means
 	// both OIDC routes are absent; it is independent of legacy Google login.
 	oidcAuth   *auth.OIDCAuth
@@ -1463,6 +1466,11 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	if supErr := a.checkSuppression(ctx, user.ID, agent.ID, req); supErr != nil {
 		return nil, supErr
 	}
+	// External sending access: refuse before screening can durably hold a
+	// draft the account could never send, and before anything is persisted.
+	if xerr := a.preflightExternalAccess(ctx, user.ID, agent.ID, req); xerr != nil {
+		return nil, xerr
+	}
 
 	// Conversation threading (#328): resolve the thread id once, here, so every
 	// downstream use — the X-E2A-Conversation-Id header (compose), the
@@ -1622,6 +1630,11 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 			// committed — the message row rolled back with the job.
 			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
 		}
+		if errors.Is(txErr, outboundsend.ErrExternalSendingNotEnabled) {
+			// The gate refused the durable envelope inside the accept
+			// transaction (a change after the preflight). Nothing committed.
+			return nil, a.externalSendingNotEnabledError(ctx, user.ID)
+		}
 		log.Printf("[api] async accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
 	}
@@ -1756,6 +1769,9 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 	}); txErr != nil {
 		if errors.Is(txErr, outboundsend.ErrSendingPaused) {
 			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
+		}
+		if errors.Is(txErr, outboundsend.ErrExternalSendingNotEnabled) {
+			return nil, a.externalSendingNotEnabledError(ctx, agent.UserID)
 		}
 		log.Printf("[api] platform accept tx failed: agent=%s to_count=%d to_domains=%v error=%v", agent.Domain, len(req.To), logredact.AddressDomains(req.To), txErr)
 		return nil, &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "failed to accept message for send"}
