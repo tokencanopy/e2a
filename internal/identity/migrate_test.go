@@ -516,6 +516,20 @@ func TestSendingBudgetMigrationDoesNotDeadlockSourceFirstJobCancellation(t *test
 		cleanupData()
 		if _, err := pool.Exec(context.Background(), string(migration)); err != nil {
 			t.Errorf("restore budget migration after source-first race: %v", err)
+			return
+		}
+		// Replay every later migration that shapes account_sending_controls:
+		// the runner has already recorded them, so stopping at 113 would
+		// leave later test binaries on this database without their columns.
+		for _, later := range []string{"115_sending_controls_foreign_key.sql", "121_external_sending_access.sql"} {
+			sql, err := migrations.FS.ReadFile(later)
+			if err != nil {
+				t.Errorf("read %s: %v", later, err)
+				return
+			}
+			if _, err := pool.Exec(context.Background(), string(sql)); err != nil {
+				t.Errorf("restore %s after source-first race: %v", later, err)
+			}
 		}
 	})
 
