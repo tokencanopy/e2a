@@ -253,20 +253,26 @@ func scanProtectionEventsForUser(ctx context.Context, tx pgx.Tx, userID string) 
 // {deleted:true, ...}); the /v1 handler sets it. It is always true on a
 // response — a failed delete is an error envelope, never deleted:false.
 type DeleteUserDataResult struct {
-	Deleted                       bool  `json:"deleted" doc:"Always true — the account no longer exists. A failed delete is an error envelope, never deleted:false."`
-	UsageEventsDeleted            int64 `json:"usage_events_deleted"`
-	UsageSummariesDeleted         int64 `json:"usage_summaries_deleted"`
-	MessagesDeleted               int64 `json:"messages_deleted"`
-	AgentsDeleted                 int64 `json:"agents_deleted"`
-	DomainsDeleted                int64 `json:"domains_deleted"`
-	APIKeysDeleted                int64 `json:"api_keys_deleted"`
-	SessionsDeleted               int64 `json:"sessions_deleted"`
-	AgentSuppressionsDeleted      int64 `json:"agent_suppressions_deleted"`
-	AgentUnsubscribeTokensDeleted int64 `json:"agent_unsubscribe_tokens_deleted"`
-	OAuthAuthCodesDeleted         int64 `json:"oauth_auth_codes_deleted,omitempty"`
-	OAuthAccessTokensDeleted      int64 `json:"oauth_access_tokens_deleted,omitempty"`
-	OAuthRefreshTokensDeleted     int64 `json:"oauth_refresh_tokens_deleted,omitempty"`
-	UserDeleted                   bool  `json:"user_deleted"`
+	Deleted bool `json:"deleted" doc:"Always true — the account is no longer usable. A failed delete is an error envelope, never deleted:false."`
+	// Mode is additive: "trash" (the default — the account is restorable by
+	// signing in until purge_after) or "permanent" (?permanent=true, or a
+	// deployment with account trash disabled — the content is erased now).
+	Mode string `json:"mode,omitempty" doc:"How the account was deleted. trash: the account is inert and restorable by signing in to the dashboard until purge_after, after which it is purged; messages_deleted is 0 and the other counts describe rows trashed, revoked or unverified. permanent: the content was erased now (?permanent=true, or a deployment with account trash disabled) and the counts are the rows removed. Open set: tolerate unknown values."`
+	// PurgeAfter is when a trashed account will be purged (trash mode only).
+	PurgeAfter                    *time.Time `json:"purge_after,omitempty" doc:"When the trashed account becomes eligible for permanent purge. Present only when mode is trash."`
+	UsageEventsDeleted            int64      `json:"usage_events_deleted"`
+	UsageSummariesDeleted         int64      `json:"usage_summaries_deleted"`
+	MessagesDeleted               int64      `json:"messages_deleted"`
+	AgentsDeleted                 int64      `json:"agents_deleted"`
+	DomainsDeleted                int64      `json:"domains_deleted"`
+	APIKeysDeleted                int64      `json:"api_keys_deleted"`
+	SessionsDeleted               int64      `json:"sessions_deleted"`
+	AgentSuppressionsDeleted      int64      `json:"agent_suppressions_deleted"`
+	AgentUnsubscribeTokensDeleted int64      `json:"agent_unsubscribe_tokens_deleted"`
+	OAuthAuthCodesDeleted         int64      `json:"oauth_auth_codes_deleted,omitempty"`
+	OAuthAccessTokensDeleted      int64      `json:"oauth_access_tokens_deleted,omitempty"`
+	OAuthRefreshTokensDeleted     int64      `json:"oauth_refresh_tokens_deleted,omitempty"`
+	UserDeleted                   bool       `json:"user_deleted" doc:"True only when the account row itself was erased (mode permanent)."`
 } // @name DeleteUserDataResult
 
 // DeleteUserData wipes everything tied to a user in a single transaction.

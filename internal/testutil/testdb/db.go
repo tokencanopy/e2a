@@ -315,6 +315,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 //   - sending-protection security ledgers: provider operations, budget rows,
 //     control audit, notice outbox, and feedback provenance deliberately have no
 //     customer-tree FK so account/message deletion cannot erase them.
+//   - account-deletion residue: identity_tombstones and
+//     deleted_account_summaries deliberately outlive the purged account.
 //   - sending-protection policy state: the event/marker tables have no FK, while
 //     the runtime-policy and attestation singletons must be restored to their
 //     migration-owned generation-zero sentinels between tests.
@@ -356,6 +358,8 @@ func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 		DELETE FROM sending_protection_policy_events;
 		DELETE FROM sending_protection_runtime_attestation_events;
 		DELETE FROM sending_ramp_grandfathering;
+		DELETE FROM identity_tombstones;
+		DELETE FROM deleted_account_summaries;
 
 		-- This registry is append-only in application/migration use; its
 		-- unconditional trigger intentionally rejects DELETE. The disposable
