@@ -352,6 +352,7 @@ func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 		DELETE FROM sending_budget_counters;
 		DELETE FROM sending_provider_operations;
 		DELETE FROM account_sending_control_events;
+		DELETE FROM external_sending_access_events;
 		DELETE FROM sending_protection_policy_events;
 		DELETE FROM sending_protection_runtime_attestation_events;
 		DELETE FROM sending_ramp_grandfathering;

@@ -252,6 +252,24 @@ func (m *Module) PrepareExternalTx(ctx context.Context, tx pgx.Tx, messageID str
 		return AcceptanceAccept, OperationRef{}, nil
 	}
 
+	// External sending access: the whole durable envelope (To, Cc and Bcc)
+	// and the durable sender are judged against the account's current state
+	// inside the accept transaction, so a change between the API preflight
+	// and this commit cannot slip past. A refusal rolls the accept back —
+	// nothing is queued. The policy read is deliberately unlocked (see
+	// policyForRead): this transaction already holds source locks.
+	policy, err := m.policyForRead(ctx, tx)
+	if err != nil {
+		return "", OperationRef{}, err
+	}
+	verdict, err := evaluateMessageAccess(ctx, tx, policy, userID, messageID, "acceptance")
+	if err != nil {
+		return "", OperationRef{}, err
+	}
+	if verdict.Denied() {
+		return AcceptanceExternalSendingNotEnabled, OperationRef{}, nil
+	}
+
 	notBefore := time.Time{}
 	if scheduledAt != nil {
 		notBefore = *scheduledAt

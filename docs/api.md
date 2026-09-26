@@ -867,6 +867,7 @@ retryability; clients must not reinterpret those fields independently:
 | `submission.cancelled` | `submission` | `failed` | false |
 | `submission.policy_budget_expired` | `submission` | `failed` | true |
 | `submission.sending_setup_expired` | `submission` | `failed` | true |
+| `submission.external_sending_not_enabled` | `submission` | `failed` | false |
 | `delivery.recipient_server_accepted` | `delivery` | `delivered` | false |
 | `delivery.temporary_delay` | `delivery` | `deferred` | true |
 | `delivery.permanent_bounce` | `delivery` | `bounced` | false |

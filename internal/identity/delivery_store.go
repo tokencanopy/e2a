@@ -805,7 +805,8 @@ func isCompleteTerminalFallback(source, reason string, occurredAt *time.Time, at
 	case messagelifecycle.ReasonSubmissionProviderRejected:
 		return delivery.FailureSource(source) == delivery.FailureSourceProvider
 	case messagelifecycle.ReasonSubmissionLocalRetriesExhausted, messagelifecycle.ReasonSubmissionCancelled,
-		messagelifecycle.ReasonSubmissionPolicyBudgetExpired, messagelifecycle.ReasonSubmissionSendingSetupExpired:
+		messagelifecycle.ReasonSubmissionPolicyBudgetExpired, messagelifecycle.ReasonSubmissionSendingSetupExpired,
+		messagelifecycle.ReasonSubmissionExternalSendingNotEnabled:
 		return delivery.FailureSource(source) == delivery.FailureSourceLocal
 	default:
 		return false

@@ -73,13 +73,19 @@ const (
 	// ReasonSubmissionSendingSetupExpired means the account's provider-side
 	// sending setup (SES tenant readiness) did not complete within the
 	// 72-hour setup deadline.
-	ReasonSubmissionSendingSetupExpired   ReasonCode = "submission.sending_setup_expired"
-	ReasonDeliveryRecipientServerAccepted ReasonCode = "delivery.recipient_server_accepted"
-	ReasonDeliveryTemporaryDelay          ReasonCode = "delivery.temporary_delay"
-	ReasonDeliveryPermanentBounce         ReasonCode = "delivery.permanent_bounce"
-	ReasonDeliveryTransientBounce         ReasonCode = "delivery.transient_bounce"
-	ReasonDeliveryUndeterminedBounce      ReasonCode = "delivery.undetermined_bounce"
-	ReasonComplaintRecipientReported      ReasonCode = "complaint.recipient_reported"
+	ReasonSubmissionSendingSetupExpired ReasonCode = "submission.sending_setup_expired"
+	// ReasonSubmissionExternalSendingNotEnabled means the account was not
+	// allowed to send to one or more of the message's recipients through its
+	// sending identity when the message came up for submission (external
+	// sending access). Terminal: the customer submits new mail once access
+	// is granted; queued mail never waits for an approval.
+	ReasonSubmissionExternalSendingNotEnabled ReasonCode = "submission.external_sending_not_enabled"
+	ReasonDeliveryRecipientServerAccepted     ReasonCode = "delivery.recipient_server_accepted"
+	ReasonDeliveryTemporaryDelay              ReasonCode = "delivery.temporary_delay"
+	ReasonDeliveryPermanentBounce             ReasonCode = "delivery.permanent_bounce"
+	ReasonDeliveryTransientBounce             ReasonCode = "delivery.transient_bounce"
+	ReasonDeliveryUndeterminedBounce          ReasonCode = "delivery.undetermined_bounce"
+	ReasonComplaintRecipientReported          ReasonCode = "complaint.recipient_reported"
 )
 
 // Definition is the fixed meaning of a reason code.
@@ -90,38 +96,39 @@ type Definition struct {
 }
 
 var canonicalCatalog = map[ReasonCode]Definition{
-	ReasonAcceptanceInboundSMTP:             {StageAccepted, OutcomeAccepted, false},
-	ReasonAcceptanceOutboundAPI:             {StageAccepted, OutcomeAccepted, false},
-	ReasonAcceptanceLocalLoopback:           {StageAccepted, OutcomeAccepted, false},
-	ReasonAuthenticationDMARCPass:           {StageAuthentication, OutcomePassed, false},
-	ReasonAuthenticationDMARCFail:           {StageAuthentication, OutcomeFailed, false},
-	ReasonAuthenticationDMARCNone:           {StageAuthentication, OutcomeIndeterminate, false},
-	ReasonAuthenticationDMARCTemporaryError: {StageAuthentication, OutcomeIndeterminate, true},
-	ReasonAuthenticationDMARCPermanentError: {StageAuthentication, OutcomeIndeterminate, false},
-	ReasonReviewHoldCreated:                 {StageReview, OutcomePending, false},
-	ReasonReviewApproved:                    {StageReview, OutcomeApproved, false},
-	ReasonReviewRejected:                    {StageReview, OutcomeRejected, false},
-	ReasonReviewExpiredApproved:             {StageReview, OutcomeApproved, false},
-	ReasonReviewExpiredRejected:             {StageReview, OutcomeRejected, false},
-	ReasonSuppressionRecipientBlocked:       {StageSuppression, OutcomeBlocked, false},
-	ReasonSuppressionHardBounceApplied:      {StageSuppression, OutcomeApplied, false},
-	ReasonSuppressionComplaintApplied:       {StageSuppression, OutcomeApplied, false},
-	ReasonQueueInboundProcessing:            {StageQueued, OutcomeEnqueued, false},
-	ReasonQueueOutboundSubmission:           {StageQueued, OutcomeEnqueued, false},
-	ReasonSubmissionUpstreamAccepted:        {StageSubmission, OutcomeAccepted, false},
-	ReasonSubmissionLocalLoopbackAccepted:   {StageSubmission, OutcomeAccepted, false},
-	ReasonSubmissionTemporaryFailure:        {StageSubmission, OutcomeDeferred, true},
-	ReasonSubmissionProviderRejected:        {StageSubmission, OutcomeFailed, false},
-	ReasonSubmissionLocalRetriesExhausted:   {StageSubmission, OutcomeFailed, true},
-	ReasonSubmissionCancelled:               {StageSubmission, OutcomeFailed, false},
-	ReasonSubmissionPolicyBudgetExpired:     {StageSubmission, OutcomeFailed, true},
-	ReasonSubmissionSendingSetupExpired:     {StageSubmission, OutcomeFailed, true},
-	ReasonDeliveryRecipientServerAccepted:   {StageDelivery, OutcomeDelivered, false},
-	ReasonDeliveryTemporaryDelay:            {StageDelivery, OutcomeDeferred, true},
-	ReasonDeliveryPermanentBounce:           {StageDelivery, OutcomeBounced, false},
-	ReasonDeliveryTransientBounce:           {StageDelivery, OutcomeBounced, true},
-	ReasonDeliveryUndeterminedBounce:        {StageDelivery, OutcomeBounced, false},
-	ReasonComplaintRecipientReported:        {StageComplaint, OutcomeReported, false},
+	ReasonAcceptanceInboundSMTP:               {StageAccepted, OutcomeAccepted, false},
+	ReasonAcceptanceOutboundAPI:               {StageAccepted, OutcomeAccepted, false},
+	ReasonAcceptanceLocalLoopback:             {StageAccepted, OutcomeAccepted, false},
+	ReasonAuthenticationDMARCPass:             {StageAuthentication, OutcomePassed, false},
+	ReasonAuthenticationDMARCFail:             {StageAuthentication, OutcomeFailed, false},
+	ReasonAuthenticationDMARCNone:             {StageAuthentication, OutcomeIndeterminate, false},
+	ReasonAuthenticationDMARCTemporaryError:   {StageAuthentication, OutcomeIndeterminate, true},
+	ReasonAuthenticationDMARCPermanentError:   {StageAuthentication, OutcomeIndeterminate, false},
+	ReasonReviewHoldCreated:                   {StageReview, OutcomePending, false},
+	ReasonReviewApproved:                      {StageReview, OutcomeApproved, false},
+	ReasonReviewRejected:                      {StageReview, OutcomeRejected, false},
+	ReasonReviewExpiredApproved:               {StageReview, OutcomeApproved, false},
+	ReasonReviewExpiredRejected:               {StageReview, OutcomeRejected, false},
+	ReasonSuppressionRecipientBlocked:         {StageSuppression, OutcomeBlocked, false},
+	ReasonSuppressionHardBounceApplied:        {StageSuppression, OutcomeApplied, false},
+	ReasonSuppressionComplaintApplied:         {StageSuppression, OutcomeApplied, false},
+	ReasonQueueInboundProcessing:              {StageQueued, OutcomeEnqueued, false},
+	ReasonQueueOutboundSubmission:             {StageQueued, OutcomeEnqueued, false},
+	ReasonSubmissionUpstreamAccepted:          {StageSubmission, OutcomeAccepted, false},
+	ReasonSubmissionLocalLoopbackAccepted:     {StageSubmission, OutcomeAccepted, false},
+	ReasonSubmissionTemporaryFailure:          {StageSubmission, OutcomeDeferred, true},
+	ReasonSubmissionProviderRejected:          {StageSubmission, OutcomeFailed, false},
+	ReasonSubmissionLocalRetriesExhausted:     {StageSubmission, OutcomeFailed, true},
+	ReasonSubmissionCancelled:                 {StageSubmission, OutcomeFailed, false},
+	ReasonSubmissionPolicyBudgetExpired:       {StageSubmission, OutcomeFailed, true},
+	ReasonSubmissionSendingSetupExpired:       {StageSubmission, OutcomeFailed, true},
+	ReasonSubmissionExternalSendingNotEnabled: {StageSubmission, OutcomeFailed, false},
+	ReasonDeliveryRecipientServerAccepted:     {StageDelivery, OutcomeDelivered, false},
+	ReasonDeliveryTemporaryDelay:              {StageDelivery, OutcomeDeferred, true},
+	ReasonDeliveryPermanentBounce:             {StageDelivery, OutcomeBounced, false},
+	ReasonDeliveryTransientBounce:             {StageDelivery, OutcomeBounced, true},
+	ReasonDeliveryUndeterminedBounce:          {StageDelivery, OutcomeBounced, false},
+	ReasonComplaintRecipientReported:          {StageComplaint, OutcomeReported, false},
 }
 
 // Catalog returns a copy of the canonical reason-code catalog.

@@ -175,6 +175,9 @@ func (j *Jobs) enqueueSendTx(ctx context.Context, tx pgx.Tx, messageID string, a
 		if decision == sendingpolicy.AcceptanceSendingPaused {
 			return 0, ErrSendingPaused
 		}
+		if decision == sendingpolicy.AcceptanceExternalSendingNotEnabled {
+			return 0, ErrExternalSendingNotEnabled
+		}
 		if ref.IsZero() {
 			// The only accepted shape without an operation is an exact
 			// self-send, and those never enqueue. Refusing here keeps a

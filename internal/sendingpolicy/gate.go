@@ -786,6 +786,25 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	st.envelope = envelope
 	st.units = len(st.envelope)
 
+	// External sending access, decided under the locks just taken: the users
+	// row (FOR SHARE), the account control row and the plan row are all held
+	// by this transaction, so a grant, entitlement or owner-proof change that
+	// committed first binds this decision. A definitive refusal is terminal —
+	// queued mail must never wait silently for an approval — while a read
+	// error is returned so the worker retries without any provider I/O.
+	if op.Purpose == PurposeCustomerMessage && ownerExists {
+		verdict, err := evaluateMessageAccess(ctx, tx, policy, op.accountRef(), op.OperationID, "authorization")
+		if err != nil {
+			if errors.Is(err, ErrSourceUnavailable) || errors.Is(err, ErrEnvelopeUnavailable) {
+				return st, terminalHold(ReasonSourceUnavailable), nil
+			}
+			return st, Decision{}, err
+		}
+		if verdict.Denied() {
+			return st, terminalHold(ReasonExternalSendingNotEnabled), nil
+		}
+	}
+
 	st.ramp, err = m.rampSubjectFor(ctx, tx, policy, op, st.units)
 	if err != nil {
 		// Defensive: rampProbation resolves the same rows earlier and would
@@ -1480,7 +1499,8 @@ func (m *Module) RedeemProviderCall(ctx context.Context, auth ProviderAuthorizat
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := m.effectivePolicy(ctx, tx); err != nil {
+	policy, err := m.effectivePolicy(ctx, tx)
+	if err != nil {
 		return err
 	}
 
@@ -1550,6 +1570,25 @@ func (m *Module) RedeemProviderCall(ctx context.Context, auth ProviderAuthorizat
 			return fmt.Errorf("sendingpolicy: read account control: %w", err)
 		}
 		if state == "paused" {
+			return m.invalidate(ctx, tx, auth.attempt)
+		}
+	}
+
+	// Re-prove external sending access immediately before the socket, for
+	// the same reason and with the same unlocked, refuse-only reads as the
+	// pause above: a revocation, an entitlement loss, an owner-email change,
+	// a trashed recipient agent or a lost domain verification that committed
+	// after ConsumeAttempt must still stop this call. This read is the
+	// linearization point; an authorization already past it may still dial.
+	if op.Purpose == PurposeCustomerMessage && op.SourceAccountRef != nil {
+		verdict, err := evaluateMessageAccess(ctx, tx, policy, *op.SourceAccountRef, op.OperationID, "redemption")
+		if err != nil {
+			if errors.Is(err, ErrSourceUnavailable) || errors.Is(err, ErrEnvelopeUnavailable) {
+				return m.invalidate(ctx, tx, auth.attempt)
+			}
+			return err
+		}
+		if verdict.Denied() {
 			return m.invalidate(ctx, tx, auth.attempt)
 		}
 	}

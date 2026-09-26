@@ -923,3 +923,67 @@ func TestProviderSubmitterPostDataRejectionIsDefinite(t *testing.T) {
 		t.Fatalf("settlements = %+v, want one permanent rejection", got)
 	}
 }
+
+// TestProviderSubmitterZeroNetworkWhenExternalAccessIsRevoked drives external
+// sending access through the REAL provider adapter: a token minted while the
+// account held an operator grant opens no socket once the grant is revoked,
+// and a message the account may not send never obtains a token at all.
+func TestProviderSubmitterZeroNetworkWhenExternalAccessIsRevoked(t *testing.T) {
+	f := newGateFixture(t, func(p *sendingpolicy.RuntimePolicy) {
+		p.BudgetMode = sendingpolicy.ModeDisabled
+		p.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{
+			Mode: sendingpolicy.ModeEnforce, AccountsCreatedAtOrAfter: "2026-01-01T00:00:00Z",
+		}
+	})
+	relay, sockets := countingListener(t)
+	s := outbound.NewProviderSubmitter(relay, f.gate)
+
+	setApproved := func(approved bool) {
+		t.Helper()
+		if _, err := f.pool.Exec(f.ctx, `
+			UPDATE account_sending_controls
+			   SET external_sending_approved = $2,
+			       external_sending_access_revision = external_sending_access_revision + 1,
+			       external_sending_access_changed_at = now()
+			 WHERE user_id = $1`, f.userID, approved); err != nil {
+			t.Fatalf("set approval: %v", err)
+		}
+	}
+	// Send as the shared relay: the fixture's own_address marker without a
+	// verified domain is not identity proof anyway, but be explicit.
+	messageID, to := f.message(1)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE messages SET sent_as = 'relay' WHERE id = $1`, messageID); err != nil {
+		t.Fatal(err)
+	}
+
+	setApproved(true)
+	auth := f.authorize(f.prepare(messageID))
+	setApproved(false)
+
+	_, err := s.SubmitOnce(f.ctx, auth, outbound.Envelope{From: "agent@agents.e2a.dev", Recipients: to, Message: []byte("Subject: x\r\n\r\nbody")})
+	if !errors.Is(err, sendingpolicy.ErrAuthorizationInvalid) {
+		t.Fatalf("err = %v, want ErrAuthorizationInvalid", err)
+	}
+	if n := sockets(); n != 0 {
+		t.Fatalf("sockets = %d, want 0 for a revoked grant", n)
+	}
+
+	// A fresh message while unapproved is refused at acceptance: no operation,
+	// so no token can exist for the seam to redeem.
+	denied, _ := f.message(1)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE messages SET sent_as = 'relay' WHERE id = $1`, denied); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, ref, err := f.gate.PrepareExternalTx(f.ctx, tx, denied)
+	_ = tx.Rollback(f.ctx)
+	if err != nil || decision != sendingpolicy.AcceptanceExternalSendingNotEnabled || !ref.IsZero() {
+		t.Fatalf("prepare = %q ref=%v err=%v", decision, ref.ID(), err)
+	}
+	if n := sockets(); n != 0 {
+		t.Fatalf("sockets = %d, want 0", n)
+	}
+}
