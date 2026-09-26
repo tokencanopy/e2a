@@ -370,6 +370,19 @@ func main() {
 	// seam with tokens from the same gate.
 	sendingGate, providerSubmitter := outboundSending.gate, outboundSending.submitter
 	registrars = append(registrars, sendramp.NewMaintenanceJobs(rampStore))
+	// Deletion-resistant feedback provenance (B8): refuse to start if any
+	// retained recipient row was signed under a key version this keyring
+	// does not hold — feedback for it could never be matched and the
+	// detector would be silently blind. The retention janitor and the
+	// consumer's accounting seam hang off the same module.
+	if outboundSending.module == nil {
+		log.Fatalf("sending policy gate is not the concrete module; feedback accounting cannot be wired")
+	}
+	if err := outboundSending.module.VerifyKeyringCoverage(ctx); err != nil {
+		log.Fatalf("Sending feedback keyring coverage: %v", err)
+	}
+	store.SetFeedbackRetention(time.Duration(spPolicy.SendingFeedbackPostAcctRetention) * 24 * time.Hour)
+	registrars = append(registrars, outboundSending.feedbackMaintenance())
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job
 	// per queue+state (docs/observability.md).
 	registrars = append(registrars, jobs.NewQueueStatsJobs(pool, metrics))
@@ -907,7 +920,8 @@ func main() {
 	// 4b). Fail-closed: the SNS signature is verified and the TopicArn must be
 	// in the configured allow-list (empty allow-list → every message is
 	// rejected, so this is inert until ops wires the topic).
-	deliveryConsumer := delivery.NewConsumer(store, deliveryEventFirer(webhookOutbox), outboundSendStore.FinalizeProviderAcceptedTx)
+	deliveryConsumer := outboundSending.armDeliveryConsumer(
+		delivery.NewConsumer(store, deliveryEventFirer(webhookOutbox), outboundSendStore.FinalizeProviderAcceptedTx))
 	deliveryVerifier := delivery.NewVerifier(cfg.DeliveryFeedback.SNSTopicARNs, delivery.HTTPCertFetcher)
 	// Public webhook receiver for AWS SNS (SES delivery/bounce/complaint). Named
 	// /webhooks/<provider> — it's an inbound third-party callback, not an internal
