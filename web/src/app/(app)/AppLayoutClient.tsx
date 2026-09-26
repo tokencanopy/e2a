@@ -14,6 +14,7 @@ const FOCUSABLE_SELECTOR =
 const APP_LOGIN_RETURN_PATHS = [
   "/get-started",
   "/reviews",
+  "/agent-signups",
   "/inboxes/messages",
 ] as const;
 

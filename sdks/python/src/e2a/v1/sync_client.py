@@ -51,12 +51,12 @@ import threading
 import weakref
 from typing import Any, Callable, Coroutine, Generic, Iterator, List, Optional, TypeVar
 
-from .client import AsyncE2AClient
+from .client import AsyncE2AClient, async_signup_agent
 from .errors import E2AError
 from .pagination import AutoPager, Page
 from .inbound import AsyncInboundResource, InboundResource
 
-__all__ = ["E2AClient", "SyncAutoPager", "SyncStream"]
+__all__ = ["E2AClient", "SyncAutoPager", "SyncStream", "signup_agent"]
 
 T = TypeVar("T")
 
@@ -68,6 +68,18 @@ _ASYNC_CONTEXT_MESSAGE = (
 #: Async-lifecycle members that must not leak onto the sync surface — the sync
 #: client's lifecycle is close()/with, not aclose()/async with.
 _EXCLUDED_ATTRS = frozenset({"aclose"})
+
+
+def signup_agent(body: Any, **kwargs: Any) -> Any:
+    """Synchronous public agent-signup entry point; no API key required."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_signup_agent(body, **kwargs))
+    raise RuntimeError(
+        "signup_agent (sync) called from inside a running event loop — "
+        "use async_signup_agent in async code"
+    )
 
 
 def _closed_error() -> E2AError:

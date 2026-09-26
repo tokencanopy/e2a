@@ -133,6 +133,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: "clock",
     matchPrefix: true,
   },
+  {
+    href: "/agent-signups",
+    label: "Agent requests",
+    icon: "user",
+  },
   // Delivery health sits with the other check-in surfaces (Inboxes, Pending)
   // rather than down in the configuration block. Named "Metrics" to match
   // /v1/metrics, `e2a metrics`, and the MCP tools — one word everywhere. Not

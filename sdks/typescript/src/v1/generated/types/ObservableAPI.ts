@@ -11,9 +11,14 @@ import { AccountView } from '../models/AccountView.js';
 import { AgentIdentity } from '../models/AgentIdentity.js';
 import { AgentMetricsGroupView } from '../models/AgentMetricsGroupView.js';
 import { AgentMetricsView } from '../models/AgentMetricsView.js';
+import { AgentSignupCreateResponse } from '../models/AgentSignupCreateResponse.js';
+import { AgentSignupRequest } from '../models/AgentSignupRequest.js';
+import { AgentSignupRestrictionsView } from '../models/AgentSignupRestrictionsView.js';
+import { AgentSignupView } from '../models/AgentSignupView.js';
 import { AgentSuppressionAddedData } from '../models/AgentSuppressionAddedData.js';
 import { AgentSuppressionView } from '../models/AgentSuppressionView.js';
 import { AgentView } from '../models/AgentView.js';
+import { ApproveAgentSignupInputBody } from '../models/ApproveAgentSignupInputBody.js';
 import { ApproveRequest } from '../models/ApproveRequest.js';
 import { Attachment } from '../models/Attachment.js';
 import { AttachmentMetaView } from '../models/AttachmentMetaView.js';
@@ -88,6 +93,7 @@ import { MetricsRatesView } from '../models/MetricsRatesView.js';
 import { MetricsSummaryView } from '../models/MetricsSummaryView.js';
 import { OAuthConnectionEntry } from '../models/OAuthConnectionEntry.js';
 import { PageAPIKeyView } from '../models/PageAPIKeyView.js';
+import { PageAgentSignupView } from '../models/PageAgentSignupView.js';
 import { PageAgentSuppressionView } from '../models/PageAgentSuppressionView.js';
 import { PageAgentView } from '../models/PageAgentView.js';
 import { PageContactEngagementView } from '../models/PageContactEngagementView.js';
@@ -123,6 +129,7 @@ import { RedeliverDelivery } from '../models/RedeliverDelivery.js';
 import { RedeliverEventRequest } from '../models/RedeliverEventRequest.js';
 import { RedeliverView } from '../models/RedeliverView.js';
 import { RegisterDomainRequest } from '../models/RegisterDomainRequest.js';
+import { RejectAgentSignupOutputBody } from '../models/RejectAgentSignupOutputBody.js';
 import { RejectRequest } from '../models/RejectRequest.js';
 import { RejectResultView } from '../models/RejectResultView.js';
 import { RenderedTemplateView } from '../models/RenderedTemplateView.js';
@@ -159,6 +166,7 @@ import { UserExportUser } from '../models/UserExportUser.js';
 import { ValidateTemplateRequest } from '../models/ValidateTemplateRequest.js';
 import { ValidateTemplateResponse } from '../models/ValidateTemplateResponse.js';
 import { ValidationErrorDetails } from '../models/ValidationErrorDetails.js';
+import { VerifyAgentSignupRequest } from '../models/VerifyAgentSignupRequest.js';
 import { VerifyDomainView } from '../models/VerifyDomainView.js';
 import { WebhookDeliveryView } from '../models/WebhookDeliveryView.js';
 import { WebhookEndpointMetricsView } from '../models/WebhookEndpointMetricsView.js';
@@ -499,6 +507,198 @@ export class ObservableAccountApi {
      */
     public listSuppressions(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<PageSuppressionView> {
         return this.listSuppressionsWithHttpInfo(cursor, limit, _options).pipe(map((apiResponse: HttpInfo<PageSuppressionView>) => apiResponse.data));
+    }
+
+}
+
+import { AgentSignupApiRequestFactory, AgentSignupApiResponseProcessor} from "../apis/AgentSignupApi.js";
+export class ObservableAgentSignupApi {
+    private requestFactory: AgentSignupApiRequestFactory;
+    private responseProcessor: AgentSignupApiResponseProcessor;
+    private configuration: Configuration;
+
+    public constructor(
+        configuration: Configuration,
+        requestFactory?: AgentSignupApiRequestFactory,
+        responseProcessor?: AgentSignupApiResponseProcessor
+    ) {
+        this.configuration = configuration;
+        this.requestFactory = requestFactory || new AgentSignupApiRequestFactory(configuration);
+        this.responseProcessor = responseProcessor || new AgentSignupApiResponseProcessor();
+    }
+
+    /**
+     * Account-scoped. Optionally routes the verified agent\'s non-human outbound through the existing review queue.
+     * Approve a pending agent identity (beta)
+     * @param id
+     * @param approveAgentSignupInputBody
+     */
+    public approveAgentSignupWithHttpInfo(id: string, approveAgentSignupInputBody: ApproveAgentSignupInputBody, _options?: ConfigurationOptions): Observable<HttpInfo<AgentSignupView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.approveAgentSignup(id, approveAgentSignupInputBody, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.approveAgentSignupWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Account-scoped. Optionally routes the verified agent\'s non-human outbound through the existing review queue.
+     * Approve a pending agent identity (beta)
+     * @param id
+     * @param approveAgentSignupInputBody
+     */
+    public approveAgentSignup(id: string, approveAgentSignupInputBody: ApproveAgentSignupInputBody, _options?: ConfigurationOptions): Observable<AgentSignupView> {
+        return this.approveAgentSignupWithHttpInfo(id, approveAgentSignupInputBody, _options).pipe(map((apiResponse: HttpInfo<AgentSignupView>) => apiResponse.data));
+    }
+
+    /**
+     * Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
+     * Create a provisional agent identity (beta)
+     * @param agentSignupRequest
+     */
+    public createAgentSignupWithHttpInfo(agentSignupRequest: AgentSignupRequest, _options?: ConfigurationOptions): Observable<HttpInfo<AgentSignupCreateResponse>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.createAgentSignup(agentSignupRequest, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.createAgentSignupWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Public, no API key required for first signup. Creates one receiving inbox and an agent-scoped key, then sends a six-digit code to the human. Repeating the same human_email + display_name requires current_api_key, rotates that key, and resends verification.
+     * Create a provisional agent identity (beta)
+     * @param agentSignupRequest
+     */
+    public createAgentSignup(agentSignupRequest: AgentSignupRequest, _options?: ConfigurationOptions): Observable<AgentSignupCreateResponse> {
+        return this.createAgentSignupWithHttpInfo(agentSignupRequest, _options).pipe(map((apiResponse: HttpInfo<AgentSignupCreateResponse>) => apiResponse.data));
+    }
+
+    /**
+     * List pending agent identities for the signed-in human (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listPendingAgentSignupsWithHttpInfo(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<HttpInfo<PageAgentSignupView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.listPendingAgentSignups(cursor, limit, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.listPendingAgentSignupsWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * List pending agent identities for the signed-in human (beta)
+     * @param [cursor] Opaque pagination cursor from a previous response\&#39;s next_cursor. Continuation requests must not change the other filters.
+     * @param [limit] Maximum number of items to return (1-100).
+     */
+    public listPendingAgentSignups(cursor?: string, limit?: number, _options?: ConfigurationOptions): Observable<PageAgentSignupView> {
+        return this.listPendingAgentSignupsWithHttpInfo(cursor, limit, _options).pipe(map((apiResponse: HttpInfo<PageAgentSignupView>) => apiResponse.data));
+    }
+
+    /**
+     * Account-scoped. Revokes the signup key and deactivates the inbox.
+     * Reject and deactivate a pending agent identity (beta)
+     * @param id
+     * @param requestBody
+     */
+    public rejectAgentSignupWithHttpInfo(id: string, requestBody: { [key: string]: any; }, _options?: ConfigurationOptions): Observable<HttpInfo<RejectAgentSignupOutputBody>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.rejectAgentSignup(id, requestBody, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.rejectAgentSignupWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Account-scoped. Revokes the signup key and deactivates the inbox.
+     * Reject and deactivate a pending agent identity (beta)
+     * @param id
+     * @param requestBody
+     */
+    public rejectAgentSignup(id: string, requestBody: { [key: string]: any; }, _options?: ConfigurationOptions): Observable<RejectAgentSignupOutputBody> {
+        return this.rejectAgentSignupWithHttpInfo(id, requestBody, _options).pipe(map((apiResponse: HttpInfo<RejectAgentSignupOutputBody>) => apiResponse.data));
+    }
+
+    /**
+     * Requires the agent-scoped key returned by signup. A successful code verification unlocks normal plan limits and may enable the existing human-review queue.
+     * Verify a provisional identity with its code (beta)
+     * @param verifyAgentSignupRequest
+     */
+    public verifyAgentSignupWithHttpInfo(verifyAgentSignupRequest: VerifyAgentSignupRequest, _options?: ConfigurationOptions): Observable<HttpInfo<AgentSignupView>> {
+        const _config = mergeConfiguration(this.configuration, _options);
+
+        const requestContextPromise = this.requestFactory.verifyAgentSignup(verifyAgentSignupRequest, _config);
+        // build promise chain
+        let middlewarePreObservable = from<RequestContext>(requestContextPromise);
+        for (const middleware of _config.middleware) {
+            middlewarePreObservable = middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => middleware.pre(ctx)));
+        }
+
+        return middlewarePreObservable.pipe(mergeMap((ctx: RequestContext) => _config.httpApi.send(ctx))).
+            pipe(mergeMap((response: ResponseContext) => {
+                let middlewarePostObservable = of(response);
+                for (const middleware of _config.middleware.reverse()) {
+                    middlewarePostObservable = middlewarePostObservable.pipe(mergeMap((rsp: ResponseContext) => middleware.post(rsp)));
+                }
+                return middlewarePostObservable.pipe(map((rsp: ResponseContext) => this.responseProcessor.verifyAgentSignupWithHttpInfo(rsp)));
+            }));
+    }
+
+    /**
+     * Requires the agent-scoped key returned by signup. A successful code verification unlocks normal plan limits and may enable the existing human-review queue.
+     * Verify a provisional identity with its code (beta)
+     * @param verifyAgentSignupRequest
+     */
+    public verifyAgentSignup(verifyAgentSignupRequest: VerifyAgentSignupRequest, _options?: ConfigurationOptions): Observable<AgentSignupView> {
+        return this.verifyAgentSignupWithHttpInfo(verifyAgentSignupRequest, _options).pipe(map((apiResponse: HttpInfo<AgentSignupView>) => apiResponse.data));
     }
 
 }

@@ -292,6 +292,17 @@ type Deps struct {
 	// review_reason. Callers must have already proven ownership of the message
 	// (the review detail handler does, via GetReviewWithContent).
 	ListProtectionEventsByMessage func(ctx context.Context, messageID string) ([]identity.ProtectionEvent, error)
+
+	// Public agent signup and its two verification actors. The create seam
+	// owns code generation + notification delivery; the remaining seams expose
+	// the storage transitions without giving this transport layer DB access.
+	RegisterAgentSignup     func(ctx context.Context, humanEmail, displayName, noteToHuman, harness, currentAPIKey string) (*identity.AgentSignupResult, error)
+	VerifyAgentSignup       func(ctx context.Context, agentID, code string, reviewOutbound bool) (*identity.AgentSignup, error)
+	ListPendingAgentSignups func(ctx context.Context, humanEmail string, limit int, afterCreatedAt time.Time, afterID string) ([]identity.AgentSignup, error)
+	ApproveAgentSignup      func(ctx context.Context, signupID, humanEmail, userID string, reviewOutbound bool) (*identity.AgentSignup, error)
+	RejectAgentSignup       func(ctx context.Context, signupID, humanEmail string) error
+	CheckAgentSignupSend    func(ctx context.Context, ag *identity.AgentIdentity, recipients []string, scheduled bool) (*identity.AgentIdentity, *agent.OutboundError)
+	AgentSignupConsoleURL   string
 	// SendLimit is the per-agent outbound rate limiter (mirrors
 	// sendLimit.AllowWithRetryAfter; key = agent id). Optional.
 	SendLimit func(key string) (ok bool, retryAfter time.Duration)
@@ -299,8 +310,9 @@ type Deps struct {
 	// the per-IP agent-registration limiter (key = client ip). Both return
 	// the IETF RateLimit snapshot so the middleware can set the headers.
 	// Optional — nil disables that limiter on the /v1 surface.
-	PollLimit RateSnapshot
-	RegLimit  RateSnapshot
+	PollLimit   RateSnapshot
+	RegLimit    RateSnapshot
+	SignupLimit RateSnapshot
 	// Raw capability routes sit outside Huma's authenticated middleware and use
 	// separate per-IP budgets so traffic to one surface cannot starve another.
 	// Optional — nil disables the corresponding limiter.
@@ -792,6 +804,7 @@ func (s *Server) registerOperations() {
 	s.registerAPIKeys()
 	s.registerOutbound()
 	s.registerReviews()
+	s.registerAgentSignup()
 	// Not an operation: exports the typed per-event `data` payload schemas
 	// (EmailReceivedData, …) into components.schemas for docs + codegen.
 	s.registerEventPayloadSchemas()

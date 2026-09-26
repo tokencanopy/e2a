@@ -398,6 +398,13 @@ func (s *Server) handleTestSend(ctx context.Context, in *AddressParam) (*sendOut
 	if uerr != nil {
 		return nil, uerr
 	}
+	if s.deps.CheckAgentSignupSend != nil {
+		ag, signupErr := s.deps.CheckAgentSignupSend(ctx, ag, []string{ag.EmailAddress()}, false)
+		if signupErr != nil {
+			return nil, envelopeFromOutboundError(signupErr)
+		}
+		user.ID = ag.UserID
+	}
 	if env := s.checkSendLimit(ag.ID); env != nil {
 		return nil, env
 	}
@@ -1025,6 +1032,18 @@ func (s *Server) deliver(ctx context.Context, user *identity.User, ag *identity.
 		}
 		if env := composedMessageSizeError(req.Subject, req.Body, req.HTMLBody, req.Attachments); env != nil {
 			return 0, SendResultView{}, env
+		}
+		if s.deps.CheckAgentSignupSend != nil {
+			recipients := make([]string, 0, len(req.To)+len(req.CC)+len(req.BCC))
+			recipients = append(recipients, req.To...)
+			recipients = append(recipients, req.CC...)
+			recipients = append(recipients, req.BCC...)
+			var signupErr *agent.OutboundError
+			ag, signupErr = s.deps.CheckAgentSignupSend(ctx, ag, recipients, req.ScheduledAt != nil)
+			if signupErr != nil {
+				return 0, SendResultView{}, envelopeFromOutboundError(signupErr)
+			}
+			user.ID = ag.UserID
 		}
 		if env := s.checkSendLimit(ag.ID); env != nil {
 			return 0, SendResultView{}, env

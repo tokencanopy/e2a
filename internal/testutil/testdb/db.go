@@ -318,6 +318,8 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 //   - sending-protection policy state: the event/marker tables have no FK, while
 //     the runtime-policy and attestation singletons must be restored to their
 //     migration-owned generation-zero sentinels between tests.
+//   - agent_signup_verification_events: recipient-keyed abuse throttle with no
+//     customer FK, so rejection/account cleanup cannot erase its history.
 //
 // Use DELETE for FK-less tables instead of adding them to TRUNCATE. The test suite
 // calls this helper hundreds of times; repeatedly truncating inbound_intake also
@@ -355,6 +357,7 @@ func truncateAll(ctx context.Context, pool *pgxpool.Pool) error {
 		DELETE FROM sending_protection_policy_events;
 		DELETE FROM sending_protection_runtime_attestation_events;
 		DELETE FROM sending_ramp_grandfathering;
+		DELETE FROM agent_signup_verification_events;
 
 		-- This registry is append-only in application/migration use; its
 		-- unconditional trigger intentionally rejects DELETE. The disposable

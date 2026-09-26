@@ -22,6 +22,7 @@ import {
   PromiseTemplatesApi,
   PromiseContactsApi,
   PromiseMetaApi,
+  PromiseAgentSignupApi,
 } from "./generated/types/PromiseAPI.js";
 import type {
   AgentView,
@@ -96,6 +97,12 @@ import type {
   StarterTemplateDetailView,
   AgentSuppressionView,
   CreateAgentSuppressionRequest,
+  AgentSignupRequest,
+  AgentSignupCreateResponse,
+  AgentSignupView,
+  ApproveAgentSignupInputBody,
+  VerifyAgentSignupRequest,
+  RejectAgentSignupOutputBody,
 } from "./generated/index.js";
 import { RetryHttpLibrary, type RetryOptions } from "./retry.js";
 import { E2AError, E2AValidationError, fromApiException, connectionError } from "./errors.js";
@@ -123,6 +130,9 @@ export interface E2AClientOptions {
    *  maxRetries/maxElapsedMs. */
   timeoutMs?: RetryOptions["timeoutMs"];
 }
+
+/** Transport options for the unauthenticated agent-signup entry point. */
+export type AgentSignupOptions = Omit<E2AClientOptions, "apiKey">;
 
 /** Per-call options for unsafe writes. */
 export interface RequestOptions {
@@ -173,6 +183,33 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+function generatedConfiguration(opts: AgentSignupOptions, apiKey?: string) {
+  const baseUrl = opts.baseUrl ?? resolveBaseUrl() ?? DEFAULT_BASE_URL;
+  const httpApi = new RetryHttpLibrary(new IsomorphicFetchHttpLibrary(), {
+    maxRetries: opts.maxRetries,
+    maxElapsedMs: opts.maxElapsedMs,
+    timeoutMs: opts.timeoutMs ?? 30000,
+  });
+  return createConfiguration({
+    baseServer: new ServerConfiguration(baseUrl, {}),
+    httpApi,
+    ...(apiKey
+      ? { authMethods: { bearer: { tokenProvider: { getToken: () => apiKey } } } }
+      : {}),
+  });
+}
+
+/** Create a provisional agent without an existing e2a credential. The returned
+ * API key is shown once; use it to construct E2AClient and verify the code sent
+ * to the named human. */
+export function signupAgent(
+  body: AgentSignupRequest,
+  opts: AgentSignupOptions = {},
+): Promise<AgentSignupCreateResponse> {
+  const api = new PromiseAgentSignupApi(generatedConfiguration(opts));
+  return call(() => api.createAgentSignup(body));
+}
+
 // A path-parameter value of exactly ".." collapses the built URL onto the
 // PRECEDING segment, and exactly "." collapses onto the segment's own parent
 // collection (i.e. it drops itself, not the segment before it); neither is
@@ -203,6 +240,7 @@ export class E2AClient {
   readonly reviews: ReviewsResource;
   readonly templates: TemplatesResource;
   readonly contacts: ContactsResource;
+  readonly agentSignup: AgentSignupResource;
   private readonly meta: PromiseMetaApi;
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -220,17 +258,7 @@ export class E2AClient {
     const baseUrl = opts.baseUrl ?? resolveBaseUrl() ?? DEFAULT_BASE_URL;
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
-    const httpApi = new RetryHttpLibrary(new IsomorphicFetchHttpLibrary(), {
-      maxRetries: opts.maxRetries,
-      maxElapsedMs: opts.maxElapsedMs,
-      // `?? 30000` defaults the timeout; an explicit 0 disables it (0 is not nullish).
-      timeoutMs: opts.timeoutMs ?? 30000,
-    });
-    const config = createConfiguration({
-      baseServer: new ServerConfiguration(baseUrl, {}),
-      httpApi,
-      authMethods: { bearer: { tokenProvider: { getToken: () => apiKey } } },
-    });
+    const config = generatedConfiguration({ ...opts, baseUrl }, apiKey);
 
     this.agents = new AgentsResource(new PromiseAgentsApi(config));
     this.messages = new MessagesResource(new PromiseMessagesApi(config));
@@ -243,6 +271,7 @@ export class E2AClient {
     this.reviews = new ReviewsResource(new PromiseReviewsApi(config));
     this.templates = new TemplatesResource(new PromiseTemplatesApi(config));
     this.contacts = new ContactsResource(new PromiseContactsApi(config));
+    this.agentSignup = new AgentSignupResource(new PromiseAgentSignupApi(config));
     this.meta = new PromiseMetaApi(config);
   }
 
@@ -273,6 +302,34 @@ export class E2AClient {
       });
     }
     return new WSStream({ apiKey: this.apiKey, agentEmail: email, baseUrl: this.baseUrl });
+  }
+}
+
+/** Agent-side verification plus human, account-scoped approval operations. */
+class AgentSignupResource {
+  constructor(private readonly api: PromiseAgentSignupApi) {}
+
+  /** Verify the six-digit code with the provisional agent key. */
+  verify(body: VerifyAgentSignupRequest): Promise<AgentSignupView> {
+    return call(() => this.api.verifyAgentSignup(body));
+  }
+
+  /** List requests awaiting the signed-in human. Account-scoped credentials only. */
+  listPending(params: { limit?: number } = {}): AutoPager<AgentSignupView> {
+    return new AutoPager(async (cursor) => {
+      const page = await call(() => this.api.listPendingAgentSignups(cursor, params.limit));
+      return { items: page.items ?? [], next_cursor: page.nextCursor };
+    });
+  }
+
+  /** Approve and bind a verified request to the human's account. */
+  approve(id: string, body: ApproveAgentSignupInputBody = {}): Promise<AgentSignupView> {
+    return call(() => this.api.approveAgentSignup(assertNotDotSegment(id, "id"), body));
+  }
+
+  /** Reject the request and deactivate its provisional key and inbox. */
+  reject(id: string): Promise<RejectAgentSignupOutputBody> {
+    return call(() => this.api.rejectAgentSignup(assertNotDotSegment(id, "id"), {}));
   }
 }
 

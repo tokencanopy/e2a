@@ -10,6 +10,11 @@ import { MetricsRegistry, type RouteLabel } from "./metrics.js";
 import { correlationMiddleware, requestIdOf } from "./correlation.js";
 import { defaultLogger, type Logger } from "./logging.js";
 import { ReadinessProber, type ReadyzOptions } from "./readyz.js";
+import {
+  buildAgentSignupServer,
+  sdkAgentSignupProvider,
+  type AgentSignupProvider,
+} from "./tools/signup.js";
 
 export interface HttpServerOptions {
   /** Base URL of the e2a backend (Bearer is forwarded as-is). */
@@ -73,6 +78,8 @@ export interface HttpServerOptions {
    * tests that only care about the bearer can ignore it.
    */
   clientFactory?: (bearer: string, opts?: { agentEmail?: string; scope?: Scope }) => McpClient;
+  /** Test/custom transport seam for the unauthenticated /mcp/signup tools. */
+  agentSignupProvider?: AgentSignupProvider;
 }
 
 interface BuiltApp {
@@ -100,7 +107,7 @@ const QUIET_ROUTES: ReadonlySet<RouteLabel> = new Set(["healthz", "readyz", "met
 // classifyRoute maps a request path to its bounded metric/log label. Any
 // path outside the known set collapses to "other" so cardinality stays fixed.
 function classifyRoute(path: string): RouteLabel {
-  if (path === "/mcp") return "mcp";
+  if (path === "/mcp" || path === "/mcp/signup") return "mcp";
   if (path === "/healthz") return "healthz";
   if (path === "/readyz") return "readyz";
   if (path === "/metrics") return "metrics";
@@ -277,6 +284,20 @@ export function buildApp(opts: HttpServerOptions): BuiltApp {
   // Route-local parsing ensures a missing/revoked credential cannot spend that
   // parser budget. The fronting proxy remains the outer wire-size guard.
   const parseMcpJson = express.json({ limit: "40mb" });
+  // Public bootstrap surface lives at a separate MCP endpoint so the primary
+  // /mcp endpoint can keep returning its OAuth challenge when no bearer is
+  // present. Its tools need no curl and expose only signup + code verification.
+  // A small parser limit is sufficient because neither tool accepts content or
+  // attachments.
+  app.post(
+    "/mcp/signup",
+    express.json({ limit: "64kb" }),
+    async (req, res) => {
+      const provider = opts.agentSignupProvider ?? sdkAgentSignupProvider(opts.baseUrl);
+      const server = buildAgentSignupServer(provider);
+      await handleMcpServerRequest(req, res, server);
+    },
+  );
   app.post(
     "/mcp",
     authenticateClient(rt),
@@ -293,6 +314,8 @@ export function buildApp(opts: HttpServerOptions): BuiltApp {
   // reference server.
   app.get("/mcp", methodNotAllowed);
   app.delete("/mcp", methodNotAllowed);
+  app.get("/mcp/signup", methodNotAllowed);
+  app.delete("/mcp/signup", methodNotAllowed);
 
   // Terminal error handler (MUST be last; the 4-arg signature is how Express
   // identifies it). Without it, Express's default finalhandler dumps the error
@@ -320,6 +343,26 @@ export function buildApp(opts: HttpServerOptions): BuiltApp {
   });
 
   return { app, cache, metrics };
+}
+
+async function handleMcpServerRequest(
+  req: Request,
+  res: Response,
+  server: ReturnType<typeof buildAgentSignupServer>,
+): Promise<void> {
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  res.on("close", () => {
+    void transport.close();
+    void server.close();
+  });
+  try {
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    await transport.close().catch(() => undefined);
+    await server.close().catch(() => undefined);
+    throw err;
+  }
 }
 
 function methodNotAllowed(_req: Request, res: Response): void {

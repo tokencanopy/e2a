@@ -35,6 +35,7 @@ test("maps every public agent document to its canonical plugin source", () => {
     ["plugins/e2a/docs/auth.md", "web/public/auth.md"],
     ["plugins/e2a/docs/sdk.md", "web/public/sdk.md"],
     ["plugins/e2a/docs/templates.md", "web/public/templates.md"],
+    ["plugins/e2a/docs/agent-signup.md", "web/public/agent-signup.md"],
     ["plugins/e2a/docs/llms.txt", "web/public/llms.txt"],
   ]);
 });

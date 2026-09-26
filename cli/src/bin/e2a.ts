@@ -29,6 +29,7 @@ import {
   outreachDelete,
 } from "../commands/contacts.js";
 import { suppressionsList, suppressionsAdd, suppressionsRemove } from "../commands/suppressions.js";
+import { signupCreate, signupVerify } from "../commands/signup.js";
 import { EXIT, exitCodeForAPIError } from "../exit.js";
 import { E2AError } from "@e2a/sdk/v1";
 import { createRequire } from "module";
@@ -44,6 +45,17 @@ management (domains, webhooks, review queues) lives in the MCP tools, the SDKs
 (@e2a/sdk, e2a), and the dashboard.
 
 Usage:
+  e2a signup create                 Create a provisional inbox without an API key
+        --human-email <email>      Human who receives the six-digit verification code
+        --display-name <name>      Human-readable agent name used for its inbox slug
+        --note <text>              Optional context included in the verification email
+        --harness <name>           Optional harness identifier
+        --current-api-key <key>   Required to rotate/resend an existing pending signup
+        --json                     Print the full result, including the one-time API key
+  e2a signup verify                Verify the provisional inbox with its returned key
+        --api-key <key> --code <n> Six-digit code sent to the human
+        --review-outbound          Route non-human outbound through the review queue
+        --json                     Print the verified signup record
   e2a login                         Log in via browser (account-scoped key)
   e2a whoami [--json]               Show key identity: user, scope, bound agent, plan
   e2a doctor [options]              Read-only diagnostics: config, API, agent access,
@@ -219,6 +231,7 @@ function hasFlag(args: string[], flag: string): boolean {
 const BOOLEAN_FLAGS = new Set([
   "--json", "--text", "--once", "--dry-run", "--help", "--version",
   "--clear-name", "--clear-stage", "--by-agent", "--by-day",
+  "--review-outbound",
 ]);
 
 function getPositionals(args: string[], exactCount?: number, usage?: string): string[] {
@@ -382,6 +395,35 @@ async function main() {
   }
 
   switch (command) {
+    case "signup": {
+      const sub = args[0];
+      const rest = args.slice(1);
+      if (sub === "create") {
+        checkFlags(rest, ["--human-email", "--display-name", "--note", "--harness", "--current-api-key", "--json"]);
+        getPositionals(rest, 0, "usage: e2a signup create --human-email <email> --display-name <name> [options]");
+        await signupCreate({
+          humanEmail: getFlagChecked(rest, "--human-email"),
+          displayName: getFlagChecked(rest, "--display-name"),
+          noteToHuman: getFlagChecked(rest, "--note"),
+          harness: getFlagChecked(rest, "--harness"),
+          currentApiKey: getFlagChecked(rest, "--current-api-key"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else if (sub === "verify") {
+        checkFlags(rest, ["--api-key", "--code", "--review-outbound", "--json"]);
+        getPositionals(rest, 0, "usage: e2a signup verify --api-key <key> --code <six-digits> [options]");
+        await signupVerify({
+          apiKey: getFlagChecked(rest, "--api-key"),
+          code: getFlagChecked(rest, "--code"),
+          reviewOutbound: hasFlag(rest, "--review-outbound"),
+          json: hasFlag(rest, "--json"),
+        });
+      } else {
+        process.stderr.write("Usage: e2a signup [create|verify]\n");
+        process.exit(EXIT.USAGE);
+      }
+      break;
+    }
     case "login":
       checkFlags(args, []);
       getPositionals(args, 0, "usage: e2a login");

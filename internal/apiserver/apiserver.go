@@ -211,6 +211,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		SendLimit:                    p.API.SendLimitAllow,
 		PollLimit:                    p.API.PollLimitAllow,
 		RegLimit:                     p.API.RegLimitAllow,
+		SignupLimit:                  p.API.SignupLimitAllow,
 		DownloadLimit:                p.API.DownloadLimitAllow,
 		UnsubscribeLimit:             p.API.UnsubscribeLimitAllow,
 		RejectPending:                p.API.RejectPendingCore,
@@ -255,6 +256,15 @@ func BuildDeps(p Params) httpapi.Deps {
 		},
 
 		ListProtectionEventsByMessage: p.Store.ListProtectionEventsByMessage,
+		RegisterAgentSignup:           p.API.RegisterAgentSignup,
+		VerifyAgentSignup:             p.API.VerifyAgentSignup,
+		ListPendingAgentSignups:       p.Store.ListPendingAgentSignups,
+		ApproveAgentSignup:            p.API.ApproveAgentSignup,
+		CheckAgentSignupSend:          p.API.CheckAgentSignupSend,
+		RejectAgentSignup: func(ctx context.Context, signupID, humanEmail string) error {
+			return p.Store.RejectAgentSignup(ctx, signupID, humanEmail, time.Now().UTC())
+		},
+		AgentSignupConsoleURL: p.API.AgentSignupConsoleURL(),
 		GetUsage: func(ctx context.Context, userID string) httpapi.LimitsUsageView {
 			var u httpapi.LimitsUsageView
 			if n, err := p.UsageStore.CountAgentsByUser(ctx, userID); err == nil {

@@ -17,6 +17,11 @@ configuration.
 > server live on `api.e2a.dev`. Use `https://api.e2a.dev/mcp` for MCP and
 > `https://api.e2a.dev/v1/...` for REST.
 
+> **No credential or e2a account yet?** Follow
+> [agent-signup.md](https://e2a.dev/agent-signup.md). It creates one restricted
+> inbox and agent key, then verifies ownership through a human email. The
+> public MCP bootstrap flow needs neither OAuth nor curl.
+
 ## 1. Connect your client
 
 The hosted MCP endpoint is `https://api.e2a.dev/mcp`. Interactive clients use
@@ -171,6 +176,7 @@ this policy.
   [e2a plugin and skill](https://github.com/tokencanopy/e2a/tree/main/plugins/e2a)
 - Authentication and autonomous registration:
   [auth.md](https://e2a.dev/auth.md)
+- No-credential agent signup: [agent-signup.md](https://e2a.dev/agent-signup.md)
 - SDK and webhook examples: [sdk.md](https://e2a.dev/sdk.md)
 - Email templates: [templates.md](https://e2a.dev/templates.md)
 - Machine-readable documentation index: [llms.txt](https://e2a.dev/llms.txt)

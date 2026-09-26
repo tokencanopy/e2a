@@ -1,8 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -134,6 +138,13 @@ func (s *Server) rateLimit(ctx huma.Context, next func(huma.Context)) {
 			return
 		}
 		snap, key = s.deps.PollLimit, p.User.ID
+	case op.OperationID == "createAgentSignup" && s.deps.SignupLimit != nil:
+		r := RequestFromContext(ctx.Context())
+		if r == nil {
+			next(ctx)
+			return
+		}
+		snap, key = s.deps.SignupLimit, signupRateLimitKey(r)
 	case op.OperationID == "createAgent" && s.deps.RegLimit != nil:
 		r := RequestFromContext(ctx.Context())
 		if r == nil {
@@ -269,4 +280,32 @@ func clientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+// signupRateLimitKey keeps normal public REST callers in per-source buckets.
+// An internal reverse-proxy caller (the MCP sidecar) has no edge address, so
+// key those requests by a one-way digest of the target human instead. That
+// prevents all MCP users collapsing into one global bucket while deliberately
+// making every client targeting the same human share one abuse budget. The
+// durable five-mail recipient ledger remains the authoritative backstop.
+func signupRateLimitKey(r *http.Request) string {
+	ip := clientIP(r)
+	parsed := net.ParseIP(ip)
+	if parsed == nil || (!parsed.IsPrivate() && !parsed.IsLoopback()) {
+		return "source:" + ip
+	}
+	const maxSignupBody = 64*1024 + 1
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSignupBody))
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		return "source:" + ip
+	}
+	var input struct {
+		HumanEmail string `json:"human_email"`
+	}
+	if len(body) >= maxSignupBody || json.Unmarshal(body, &input) != nil || identity.NormalizeEmail(input.HumanEmail) == "" {
+		return "source:" + ip
+	}
+	digest := sha256.Sum256([]byte(identity.NormalizeEmail(input.HumanEmail)))
+	return fmt.Sprintf("recipient:%x", digest[:16])
 }

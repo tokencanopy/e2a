@@ -323,3 +323,23 @@ func TestClientIPIgnoresXForwardedFor(t *testing.T) {
 		})
 	}
 }
+
+func TestSignupRateLimitKeySeparatesInternalProxyRecipients(t *testing.T) {
+	makeRequest := func(email string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/v1/agent-signup", strings.NewReader(`{"human_email":"`+email+`"}`))
+		r.RemoteAddr = "172.30.0.10:5555"
+		return r
+	}
+	first := signupRateLimitKey(makeRequest("owner@example.test"))
+	if same := signupRateLimitKey(makeRequest("OWNER@example.test")); same != first {
+		t.Fatalf("normalized recipient keys differ: %q != %q", same, first)
+	}
+	if other := signupRateLimitKey(makeRequest("other@example.test")); other == first {
+		t.Fatalf("different MCP recipients share key %q", first)
+	}
+	public := makeRequest("owner@example.test")
+	public.RemoteAddr = "203.0.113.9:5555"
+	if got := signupRateLimitKey(public); got != "source:203.0.113.9" {
+		t.Fatalf("public key = %q", got)
+	}
+}

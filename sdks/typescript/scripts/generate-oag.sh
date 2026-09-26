@@ -95,6 +95,15 @@ perl -pi -e 's/[ \t]+$//' \
   "$OUT/models/PageAgentSuppressionView.ts" \
   "$OUT/models/UnsubscribeOptions.ts" \
   "$OUT/apis/AgentsApi.ts" \
+  "$OUT/apis/AgentSignupApi.ts" \
+  "$OUT/models/AgentSignupCreateResponse.ts" \
+  "$OUT/models/AgentSignupRequest.ts" \
+  "$OUT/models/AgentSignupRestrictionsView.ts" \
+  "$OUT/models/AgentSignupView.ts" \
+  "$OUT/models/ApproveAgentSignupInputBody.ts" \
+  "$OUT/models/PageAgentSignupView.ts" \
+  "$OUT/models/RejectAgentSignupOutputBody.ts" \
+  "$OUT/models/VerifyAgentSignupRequest.ts" \
   "$OUT/types/ObjectParamAPI.ts"
 
 perl -0pi -e 's/\n+\z/\n/' \
