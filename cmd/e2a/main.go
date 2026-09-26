@@ -123,6 +123,13 @@ func main() {
 	flag.IntVar(&spFlags.rollbackBillingContract, "rollback-billing-contract", -1, "verified rollback billing contract level")
 	flag.BoolVar(&spFlags.reconcile, "reconcile-legacy-sending-jobs", false, "stamp a sending operation reference onto every pending provider-submitting job enqueued without one (cancelling orphans whose source row is gone), print counts, then exit; nonzero unless every job was decided")
 	flag.BoolVar(&spFlags.capabilities, "print-capabilities", false, "print the machine-readable capability marker (contract level, policy source, operator commitments), then exit")
+	flag.BoolVar(&spFlags.inspectExternal, "inspect-external-sending", false, "print an account's external sending access state (requires -account-id), then exit")
+	flag.BoolVar(&spFlags.approveExternal, "approve-external-sending", false, "grant an account shared-identity external sending (requires -account-id, -expected-external-sending-revision, -reason; optional -external-sending-request-id), then exit")
+	flag.BoolVar(&spFlags.revokeExternal, "revoke-external-sending", false, "revoke an account's shared-identity external sending grant (requires -account-id, -expected-external-sending-revision, -reason), then exit")
+	flag.BoolVar(&spFlags.declineExternal, "decline-external-sending-request", false, "decline a pending external sending request without changing the grant (requires -account-id, -external-sending-request-id), then exit")
+	flag.StringVar(&spFlags.accountID, "account-id", "", "account (user) id an external sending command acts on")
+	flag.Int64Var(&spFlags.expectedExternal, "expected-external-sending-revision", -1, "external sending access revision the operator inspected (CAS)")
+	flag.StringVar(&spFlags.requestID, "external-sending-request-id", "", "pending external sending request an approve/decline decides")
 	flag.StringVar(&spFlags.reason, "reason", "", "nonblank reason recorded in the audit row of a sending-protection mutation")
 	flag.Parse()
 

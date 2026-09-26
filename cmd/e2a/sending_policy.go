@@ -26,6 +26,15 @@ type sendingProtectionFlags struct {
 	capabilities bool
 	reconcile    bool
 
+	// External sending access operator commands.
+	inspectExternal  bool
+	approveExternal  bool
+	revokeExternal   bool
+	declineExternal  bool
+	accountID        string
+	expectedExternal int64
+	requestID        string
+
 	expectedGeneration int64
 	expectedPolicySHA  string
 	grandfather        bool
@@ -41,12 +50,14 @@ type sendingProtectionFlags struct {
 }
 
 func (f *sendingProtectionFlags) commandRequested() bool {
-	return f.inspect || f.activate || f.register || f.attest || f.capabilities || f.reconcile
+	return f.inspect || f.activate || f.register || f.attest || f.capabilities || f.reconcile ||
+		f.inspectExternal || f.approveExternal || f.revokeExternal || f.declineExternal
 }
 
 func (f *sendingProtectionFlags) selectedCount() int {
 	n := 0
-	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile} {
+	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile,
+		f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal} {
 		if set {
 			n++
 		}
@@ -108,6 +119,8 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 		return runPrintCapabilities(source, secrets, stdout)
 	case f.reconcile:
 		return runReconcileLegacySendingJobs(ctx, pool, sendingpolicy.NewGate(pool, secrets, source, policy), stdout)
+	case f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal:
+		return runExternalSendingCommand(ctx, sendingpolicy.NewPolicyModule(pool, secrets, source, policy), f, stdout)
 	}
 	return errors.New("no sending-protection command selected")
 }
@@ -281,4 +294,77 @@ func runPrintCapabilities(source sendingpolicy.PolicySource, secrets sendingpoli
 	}
 	fmt.Fprintf(stdout, "%s\n", payload)
 	return nil
+}
+
+// runExternalSendingCommand runs one external-sending-access operator command.
+// These are the ONLY way to change the shared-identity grant: there is no
+// HTTP, SDK or MCP route. Mutations require the account, the revision the
+// operator inspected, and a nonblank reason; a stale revision writes nothing,
+// and the same state at the current revision is a no-op. After a lost
+// response, inspect before retrying.
+func runExternalSendingCommand(ctx context.Context, module *sendingpolicy.Module, f *sendingProtectionFlags, stdout io.Writer) error {
+	if strings.TrimSpace(f.accountID) == "" {
+		return errors.New("external sending commands require -account-id")
+	}
+	switch {
+	case f.inspectExternal:
+		rec, err := module.InspectExternalAccess(ctx, f.accountID)
+		if err != nil {
+			return err
+		}
+		printExternalAccess(stdout, rec)
+		return nil
+	case f.declineExternal:
+		if strings.TrimSpace(f.requestID) == "" {
+			return errors.New("-decline-external-sending-request requires -external-sending-request-id")
+		}
+		if err := module.DeclineExternalAccessRequest(ctx, f.accountID, f.requestID, cliActor()); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "request:                  %s declined (grant unchanged)\n", f.requestID)
+		return nil
+	}
+	if strings.TrimSpace(f.reason) == "" {
+		return errors.New("approving or revoking external sending requires a nonblank -reason")
+	}
+	if f.expectedExternal < 0 {
+		return errors.New("approving or revoking external sending requires -expected-external-sending-revision (see -inspect-external-sending)")
+	}
+	res, err := module.SetExternalAccess(ctx, sendingpolicy.ExternalAccessChange{
+		AccountID:        f.accountID,
+		Approved:         f.approveExternal,
+		ExpectedRevision: f.expectedExternal,
+		Actor:            cliActor(),
+		Reason:           f.reason,
+		RequestID:        f.requestID,
+	})
+	if err != nil {
+		return err
+	}
+	if res.NoOp {
+		fmt.Fprintf(stdout, "status:                   no-op; the grant already had this state at revision %d\n", res.Record.Revision)
+	}
+	printExternalAccess(stdout, res.Record)
+	if !res.Record.Approved && res.Record.PaidEntitled {
+		fmt.Fprintf(stdout, "warning:                  the account still holds the paid-base entitlement, which independently allows external sending; pause the account to stop all sending\n")
+	}
+	return nil
+}
+
+// printExternalAccess prints the operator readback. Account id and booleans
+// only — never an address.
+func printExternalAccess(stdout io.Writer, rec sendingpolicy.ExternalAccessRecord) {
+	fmt.Fprintf(stdout, "account_id:               %s\n", rec.AccountID)
+	fmt.Fprintf(stdout, "external_sending_approved: %v\n", rec.Approved)
+	fmt.Fprintf(stdout, "external_sending_revision: %d\n", rec.Revision)
+	if rec.ChangedAt != nil {
+		fmt.Fprintf(stdout, "external_sending_changed_at: %s\n", rec.ChangedAt.UTC().Format("2006-01-02T15:04:05Z"))
+	}
+	fmt.Fprintf(stdout, "paid_external_entitled:   %v\n", rec.PaidEntitled)
+	fmt.Fprintf(stdout, "owner_recipient_verified: %v\n", rec.OwnerVerified)
+	fmt.Fprintf(stdout, "enforcement_applies:      %v\n", rec.EnforcementApplies)
+	fmt.Fprintf(stdout, "sending_paused:           %v\n", rec.Paused)
+	if rec.PendingRequestID != "" {
+		fmt.Fprintf(stdout, "pending_request_id:       %s\n", rec.PendingRequestID)
+	}
 }
