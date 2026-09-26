@@ -99,7 +99,7 @@ describe("sendingAccessNoticeCopy", () => {
 
 describe("parseRecipientList", () => {
   it("splits, trims, and drops empty entries", () => {
-    expect(parseRecipientList(" a@x.com ,, b@y.com,")).toEqual(["a@x.com", "b@y.com"]);
+    expect(parseRecipientList(" a@x.example ,, b@y.example,")).toEqual(["a@x.example", "b@y.example"]);
   });
 
   it("returns an empty array for blank input", () => {
@@ -119,12 +119,12 @@ describe("disallowedRecipients", () => {
 
   it("flags addresses that are neither an agent nor the verified owner", () => {
     expect(
-      disallowedRecipients(["customer@bigco.com"], {
+      disallowedRecipients(["customer@bigco.example"], {
         accountAgentEmails: ["agent@acme.dev"],
         ownerEmail: "owner@acme.dev",
         ownerVerified: true,
       }),
-    ).toEqual(["customer@bigco.com"]);
+    ).toEqual(["customer@bigco.example"]);
   });
 
   it("allows the owner's email only when verified", () => {
@@ -137,20 +137,20 @@ describe("disallowedRecipients", () => {
 
   it("extracts the address out of a display-name token", () => {
     expect(
-      disallowedRecipients(["Big Co <customer@bigco.com>"], {
+      disallowedRecipients(["Big Co <customer@bigco.example>"], {
         accountAgentEmails: [],
         ownerVerified: false,
       }),
-    ).toEqual(["customer@bigco.com"]);
+    ).toEqual(["customer@bigco.example"]);
   });
 
   it("deduplicates and preserves first-seen order", () => {
     expect(
-      disallowedRecipients(["b@x.com", "a@x.com", "b@x.com"], {
+      disallowedRecipients(["b@x.example", "a@x.example", "b@x.example"], {
         accountAgentEmails: [],
         ownerVerified: false,
       }),
-    ).toEqual(["b@x.com", "a@x.com"]);
+    ).toEqual(["b@x.example", "a@x.example"]);
   });
 
   it("ignores blank tokens", () => {

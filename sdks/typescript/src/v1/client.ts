@@ -951,7 +951,7 @@ class AccountResource {
   /**
    * Beta: files a request for support to review this account's external
    * sending access — the recovery path named by an
-   * `external_sending_not_enabled` error's `details.recoveryUrl`. Idempotent
+   * `external_sending_not_enabled` error's `details.recovery_url (raw wire key)`. Idempotent
    * while a request is pending: submitting again returns the SAME pending
    * request instead of creating a second one. Capped at 3 requests per 30
    * days (`E2ARateLimitError` beyond that). Filing never grants access by

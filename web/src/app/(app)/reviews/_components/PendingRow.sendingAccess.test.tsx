@@ -14,7 +14,7 @@ const summary: PendingMessageSummary = {
   agent_email: AGENT,
   direction: "outbound",
   subject: "Re: refund",
-  to: ["customer@bigco.com"],
+  to: ["customer@bigco.example"],
   status: "pending_review",
   created_at: new Date(Date.now() - 60_000).toISOString(),
 };
@@ -22,9 +22,9 @@ const summary: PendingMessageSummary = {
 const detailWire = {
   id: "msg_1",
   from: AGENT,
-  to: ["customer@bigco.com"],
+  to: ["customer@bigco.example"],
   cc: [],
-  recipient: "customer@bigco.com",
+  recipient: "customer@bigco.example",
   subject: "Re: refund",
   conversation_id: "conv_1",
   review_status: "pending_review",
@@ -115,7 +115,7 @@ describe("PendingRow — external sending access preflight", () => {
 
     const warning = await screen.findByRole("alert");
     expect(warning).toHaveTextContent("External sending is restricted for this account");
-    expect(warning).toHaveTextContent("customer@bigco.com");
+    expect(warning).toHaveTextContent("customer@bigco.example");
     expect(screen.getByRole("link", { name: "Request approval" })).toHaveAttribute(
       "href",
       "/sending-access",
