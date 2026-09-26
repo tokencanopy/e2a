@@ -314,8 +314,14 @@ func TestExternalAccessRevocationBeforeRedemptionInvalidates(t *testing.T) {
 			user := f.user("standard")
 			agent := f.esaAgent(user, "agents.e2a.dev")
 			sibling := f.esaAgent(user, "agents.e2a.dev")
+			sentAs := "relay"
 			var to []string
 			switch name {
+			case "domain verification lost":
+				f.customDomain(user, user+".example.test", "verified")
+				agent = f.esaAgent(user, user+".example.test")
+				sentAs = "own_address"
+				to = []string{external}
 			case "grant revoked":
 				f.setApproved(user, true)
 				to = []string{external}
@@ -328,7 +334,7 @@ func TestExternalAccessRevocationBeforeRedemptionInvalidates(t *testing.T) {
 				f.proveOwner(user)
 				to = []string{f.ownerEmail(user)}
 			}
-			msg := f.esaMessage(agent, "relay", to, nil, nil)
+			msg := f.esaMessage(agent, sentAs, to, nil, nil)
 			_, ref := f.prepareMessage(g, msg)
 			early, attempt, err := g.Reserve(f.ctx, ref)
 			if err != nil || !early.Allow {
@@ -638,5 +644,74 @@ func TestExternalAccessEmptyPaidListEntitlesNobody(t *testing.T) {
 	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, policy)
 	if st, err := m.ExternalAccessStatus(f.ctx, user); err != nil || st.PaidExternalSendingEntitled {
 		t.Fatalf("status = %+v err=%v", st, err)
+	}
+}
+
+// Concurrent operator changes at one inspected revision: exactly one wins,
+// the other is stale and writes nothing.
+func TestExternalAccessConcurrentChangesSerialize(t *testing.T) {
+	f := newFixture(t)
+	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, esaPolicy(sendingpolicy.ModeEnforce))
+	user := f.user("standard")
+	results := make(chan error, 2)
+	for _, approved := range []bool{true, true} {
+		approved := approved
+		go func() {
+			_, err := m.SetExternalAccess(f.ctx, sendingpolicy.ExternalAccessChange{
+				AccountID: user, Approved: approved, ExpectedRevision: 0, Actor: "cli:test", Reason: "race",
+			})
+			results <- err
+		}()
+	}
+	var ok, stale int
+	for i := 0; i < 2; i++ {
+		switch err := <-results; {
+		case err == nil:
+			ok++
+		case errors.Is(err, sendingpolicy.ErrStaleExternalAccessRevision):
+			stale++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if ok != 1 || stale != 1 || f.accessEvents(user) != 1 {
+		t.Fatalf("ok=%d stale=%d events=%d, want exactly one winner", ok, stale, f.accessEvents(user))
+	}
+}
+
+// An operator change and an in-flight authorization for the same account take
+// their locks in the same order and must not deadlock.
+func TestExternalAccessChangeDoesNotDeadlockWithAuthorization(t *testing.T) {
+	f := newFixture(t)
+	policy := esaPolicy(sendingpolicy.ModeEnforce)
+	g := f.gate(policy)
+	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, policy)
+	user := f.user("standard")
+	f.setApproved(user, true)
+	agent := f.esaAgent(user, "agents.e2a.dev")
+	refs := make([]sendingpolicy.OperationRef, 0, 8)
+	for i := 0; i < 8; i++ {
+		_, ref := f.prepareMessage(g, f.esaMessage(agent, "relay", []string{external}, nil, nil))
+		refs = append(refs, ref)
+	}
+	done := make(chan error, len(refs)+1)
+	for _, ref := range refs {
+		ref := ref
+		go func() {
+			_, attempt, err := g.Reserve(f.ctx, ref)
+			if err == nil {
+				_, _, err = g.ConsumeAttempt(f.ctx, attempt)
+			}
+			done <- err
+		}()
+	}
+	go func() {
+		_, err := m.SetExternalAccess(f.ctx, sendingpolicy.ExternalAccessChange{AccountID: user, Approved: false, ExpectedRevision: 1, Actor: "cli:test", Reason: "race"})
+		done <- err
+	}()
+	for i := 0; i < len(refs)+1; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("concurrent authorization/change failed (deadlock?): %v", err)
+		}
 	}
 }

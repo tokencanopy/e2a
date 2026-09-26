@@ -631,6 +631,7 @@ func TestReconstructAllOutboundRetainedEventVariants(t *testing.T) {
 		{"sent loopback", "email.sent", "loopback", "", map[string]any{"method": "loopback"}, ReasonSubmissionLocalLoopbackAccepted},
 		{"failed provider", "email.failed", "smtp", "provider", map[string]any{"reason": "rejected", "reason_code": "smtp_rejected"}, ReasonSubmissionProviderRejected},
 		{"failed local", "email.failed", "smtp", "local", map[string]any{"reason": "exhausted", "reason_code": "retries_exhausted"}, ReasonSubmissionLocalRetriesExhausted},
+		{"failed external access", "email.failed", "smtp", "local", map[string]any{"reason": "external_sending_not_enabled", "reason_code": "submission.external_sending_not_enabled"}, ReasonSubmissionExternalSendingNotEnabled},
 		{"delivered", "email.delivered", "smtp", "", map[string]any{"delivered_to": "a@example.com"}, ReasonDeliveryRecipientServerAccepted},
 		{"bounce permanent", "email.bounced", "smtp", "", map[string]any{"delivered_to": "a@example.com", "bounce_type": "permanent"}, ReasonDeliveryPermanentBounce},
 		{"bounce transient", "email.bounced", "smtp", "", map[string]any{"delivered_to": "a@example.com", "bounce_type": "transient"}, ReasonDeliveryTransientBounce},
