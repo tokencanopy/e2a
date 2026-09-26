@@ -59,10 +59,10 @@
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
-    "@types/node": "^26.6.1",
+    "@types/node": "^26.6.2",
     "@types/supertest": "^7.2.0",
     "@vitest/coverage-v8": "^5.0.1",
-    "supertest": "^7.0.0",
+    "supertest": "^7.3.0",
     "typescript": "^7.0",
     "vitest": "^5.0.0"
   }
