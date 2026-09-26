@@ -36,7 +36,7 @@ import time
 
 import pytest
 
-from e2a import AsyncE2AClient, E2ANotFoundError
+from e2a import AsyncE2AClient, E2AError, E2ANotFoundError
 
 from .resource_coverage_lib.tracker import mark_covered
 
@@ -136,6 +136,35 @@ async def test_account_and_api_keys():
             assert deleted.deleted is True
             assert deleted.id == created.id
             mark_covered("account.api_keys.delete")
+
+
+async def test_sending_access_request_intake():
+    # External sending access request intake (beta). Filing never grants
+    # access; while a request is pending a resubmit returns the SAME request,
+    # so reruns converge on one pending request for this shared account and
+    # never approach the per-account cap. A deployment that does not enable
+    # the control answers 501 not_implemented: nothing is marked and the gate
+    # reports the gap, which is correct.
+    async with _client() as client:
+        try:
+            filed = await client.account.request_sending_access(
+                use_case="sdk coverage probe: verifies the request intake contract",
+                recipients="no recipients; this request exists only for automated coverage",
+                expected_daily_volume=1,
+            )
+        except E2AError as err:
+            if err.code == "not_implemented":
+                pytest.skip("external sending access is not enabled on this deployment")
+            raise
+        assert filed.id
+        assert isinstance(filed.state, str)
+        assert filed.expected_daily_volume >= 1
+        mark_covered("account.request_sending_access")
+
+        latest = await client.account.get_sending_access_request()
+        assert latest.id == filed.id
+        assert latest.state == filed.state
+        mark_covered("account.get_sending_access_request")
 
 
 # ── agents lifecycle + agent-scoped suppressions ────────────────────

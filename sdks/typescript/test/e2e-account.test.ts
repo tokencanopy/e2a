@@ -5,7 +5,8 @@
  * participates in.
  *
  * This file owns: account.get, account.export, account.suppressions.list,
- * account.apiKeys.create, account.apiKeys.list, account.apiKeys.delete.
+ * account.apiKeys.create, account.apiKeys.list, account.apiKeys.delete,
+ * account.requestSendingAccess, account.getSendingAccessRequest.
  *
  * account.delete and account.suppressions.delete are NOT exercised here — see
  * test/coverage/gate.mjs's ALLOWLIST for the justification (destructive /
@@ -14,7 +15,7 @@
  * deleteAccount).
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { E2AClient, CreateAPIKeyRequestScopeEnum } from "../src/v1/index.js";
+import { E2AClient, CreateAPIKeyRequestScopeEnum, E2AError } from "../src/v1/index.js";
 import { walkErgonomicSurface } from "./coverage/introspect.js";
 import { recordSurface, recordCovered, flushCoverage } from "./coverage/recorder.js";
 import { loadLiveEnv } from "./coverage/helpers.js";
@@ -99,5 +100,38 @@ describe.skipIf(!env)("ts sdk live e2e: account", () => {
     } finally {
       if (!deleted) await client.account.apiKeys.delete(created.id).catch(() => {});
     }
+  });
+
+  // External sending access request intake (beta). Filing never grants
+  // access; while a request is pending a resubmit returns the SAME request, so
+  // reruns converge on one pending request for this shared account and never
+  // approach the per-account cap. A deployment that does not enable the
+  // control answers 501 not_implemented — then nothing is recorded and the
+  // gate reports the gap, which is correct.
+  it("requestSendingAccess → getSendingAccessRequest returns the same pending request", async (ctx) => {
+    const input = {
+      useCase: "sdk coverage probe: verifies the request intake contract",
+      recipients: "no recipients; this request exists only for automated coverage",
+      expectedDailyVolume: 1,
+    };
+    let filed;
+    try {
+      filed = await client.account.requestSendingAccess(input);
+    } catch (err) {
+      if (err instanceof E2AError && err.code === "not_implemented") {
+        ctx.skip();
+        return;
+      }
+      throw err;
+    }
+    expect(filed.id.length).toBeGreaterThan(0);
+    expect(typeof filed.state).toBe("string");
+    expect(filed.expectedDailyVolume).toBeGreaterThan(0);
+    recordCovered("account.requestSendingAccess");
+
+    const latest = await client.account.getSendingAccessRequest();
+    expect(latest.id).toBe(filed.id);
+    expect(latest.state).toBe(filed.state);
+    recordCovered("account.getSendingAccessRequest");
   });
 });
