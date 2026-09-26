@@ -78,6 +78,7 @@ CANONICAL_LIFECYCLE_VALUES = {
         "submission.cancelled",
         "submission.policy_budget_expired",
         "submission.sending_setup_expired",
+        "submission.external_sending_not_enabled",
         "delivery.recipient_server_accepted",
         "delivery.temporary_delay",
         "delivery.permanent_bounce",

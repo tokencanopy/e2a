@@ -20,6 +20,7 @@ from e2a.v1.errors import (
     E2AError,
     E2ANotFoundError,
     E2APermissionError,
+    E2ARateLimitError,
     E2AServerError,
     E2AValidationError,
 )
@@ -1882,3 +1883,120 @@ async def test_outreach_exposes_etag_and_sends_if_match(httpx_mock):
             {"stage": "touch2"}, if_match=etag,
         )
     assert httpx_mock.get_requests()[-1].headers["If-Match"] == '"outreach-v1"'
+
+
+# ── account: sending access (beta) ────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_get_sending_access_request_reads_the_endpoint(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "id": "sar_1",
+            "state": "pending",
+            "use_case": "notify our customers",
+            "recipients": "our own customers who signed up",
+            "expected_daily_volume": 500,
+            "created_at": "2026-07-01T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        req = await c.account.get_sending_access_request()
+    assert req.id == "sar_1"
+    assert req.state == "pending"
+    assert req.expected_daily_volume == 500
+    call = httpx_mock.get_requests()[-1]
+    assert call.method == "GET"
+    assert "/v1/account/sending-access/request" in str(call.url)
+
+
+@pytest.mark.anyio
+async def test_get_sending_access_request_404_maps_to_not_found(httpx_mock):
+    httpx_mock.add_response(
+        status_code=404,
+        json={"error": {"code": "not_found", "message": "no sending access request has been filed"}},
+    )
+    async with _client() as c:
+        with pytest.raises(E2ANotFoundError) as ei:
+            await c.account.get_sending_access_request()
+    assert ei.value.code == "not_found"
+
+
+@pytest.mark.anyio
+async def test_request_sending_access_posts_body_and_returns_the_created_view(httpx_mock):
+    httpx_mock.add_response(
+        status_code=201,
+        json={
+            "id": "sar_2",
+            "state": "pending",
+            "use_case": "notify our customers",
+            "recipients": "our own customers who signed up",
+            "expected_daily_volume": 500,
+            "created_at": "2026-07-01T00:00:00Z",
+        },
+    )
+    async with _client() as c:
+        req = await c.account.request_sending_access(
+            use_case="notify our customers",
+            recipients="our own customers who signed up",
+            expected_daily_volume=500,
+        )
+    assert req.id == "sar_2"
+    assert req.state == "pending"
+    call = httpx_mock.get_requests()[-1]
+    assert call.method == "POST"
+    assert "/v1/account/sending-access/request" in str(call.url)
+    sent = json.loads(call.content)
+    assert sent == {
+        "use_case": "notify our customers",
+        "recipients": "our own customers who signed up",
+        "expected_daily_volume": 500,
+    }
+
+
+@pytest.mark.anyio
+async def test_request_sending_access_recovers_the_view_on_the_resubmit_200_gap(httpx_mock):
+    # The server answers a resubmit-while-pending with 200, but
+    # api/openapi.yaml only declares 201 for createSendingAccessRequest, so the
+    # generated base has no case for 200 and hands back no body (verified
+    # against the live generated client). The ergonomic method must recover
+    # the view with a follow-up GET rather than returning a bare None — this
+    # pins that recovery, not the underlying spec gap.
+    httpx_mock.add_response(status_code=200, json={"discarded": "the generated base can't type this"})
+    httpx_mock.add_response(
+        json={
+            "id": "sar_3",
+            "state": "pending",
+            "use_case": "a different reason",
+            "recipients": "someone else",
+            "expected_daily_volume": 99,
+            "created_at": "2026-07-01T00:00:00Z",
+        }
+    )
+    async with _client() as c:
+        req = await c.account.request_sending_access(
+            use_case="a different reason", recipients="someone else", expected_daily_volume=99,
+        )
+    assert req.id == "sar_3"
+    assert req.state == "pending"
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert requests[0].method == "POST"
+    assert requests[1].method == "GET"
+
+
+@pytest.mark.anyio
+async def test_request_sending_access_rate_limited_maps_to_rate_limit_error(httpx_mock):
+    httpx_mock.add_response(
+        status_code=429,
+        json={"error": {"code": "rate_limited", "message": "too many sending access requests"}},
+        headers={"Retry-After": "60"},
+    )
+    async with _client() as c:
+        with pytest.raises(E2ARateLimitError) as ei:
+            await c.account.request_sending_access(
+                use_case="x", recipients="y", expected_daily_volume=1,
+            )
+    assert ei.value.code == "rate_limited"
+    assert ei.value.retryable is True
+    assert ei.value.retry_after_seconds == 60

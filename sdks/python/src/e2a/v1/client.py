@@ -74,6 +74,8 @@ from .generated.models import (
     RotateSecretResponse,
     SendEmailRequest,
     SendResultView,
+    SendingAccessRequestInput,
+    SendingAccessRequestView,
     StarterTemplateDetailView,
     StarterTemplateView,
     SuppressionView,
@@ -1433,3 +1435,47 @@ class AccountResource:
         return await self._c._write_unsafe(
             lambda h: self._api.delete_account(confirm="DELETE", _headers=h)
         )
+
+    async def get_sending_access_request(self) -> SendingAccessRequestView:
+        """Beta: the account's most recent external sending access request.
+
+        Raises :class:`~e2a.v1.errors.E2ANotFoundError` (``not_found``) when
+        the account has never filed one. Account-scoped credentials only.
+        """
+        return await self._c._read(
+            lambda h: self._api.get_sending_access_request(_headers=h)
+        )
+
+    async def request_sending_access(
+        self, *, use_case: str, recipients: str, expected_daily_volume: int
+    ) -> SendingAccessRequestView:
+        """Beta: file a request for support to review external sending access.
+
+        Idempotent while a request is pending — calling this again returns the
+        existing pending request instead of creating another. After a decline,
+        a new request may be filed as an appeal (``rate_limited`` beyond 3 per
+        30 days). Filing a request never grants access by itself.
+        Account-scoped credentials only.
+
+        The server answers a first filing with 201 and a resubmit-while-pending
+        with 200 (``internal/httpapi/sending_access.go``), but
+        ``api/openapi.yaml`` documents only the 201 response for this
+        operation, so the generated base has no case for 200 and returns no
+        body on that path even though the HTTP call succeeded (the identical
+        dual-status shape on ``upsertEngagement`` avoids this with an explicit
+        ``Responses["200"]`` entry — this operation is missing that). Recover
+        with a follow-up read rather than ever handing the caller a bare
+        ``None``; drop this fallback once the spec/generated layers add the
+        200 response.
+        """
+        req = SendingAccessRequestInput(
+            use_case=use_case,
+            recipients=recipients,
+            expected_daily_volume=expected_daily_volume,
+        )
+        result = await self._c._write_unsafe(
+            lambda h: self._api.create_sending_access_request(req, _headers=h)
+        )
+        if result is None:
+            return await self.get_sending_access_request()
+        return result
