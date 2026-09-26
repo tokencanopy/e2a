@@ -524,8 +524,14 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
 - `GET /v1/account` — whoami: the authenticated principal (user + scope, plus
   `agent_email` for agent-scoped keys), plan caps, and current usage. Works for
   both scopes. (Public *deployment* discovery is the separate `GET /v1/info`.)
-- `DELETE /v1/account?confirm=DELETE` — permanently delete the account and cascade
-  all owned data; returns per-table row counts (GDPR Art. 17). Irreversible.
+- `DELETE /v1/account?confirm=DELETE` — delete the account (GDPR Art. 17). By
+  default the account moves to the trash: it is unusable at once (keys,
+  sessions and OAuth grants revoked, agents trashed, sending stopped, domains
+  unverified), restorable by signing in to the dashboard until `purge_after`,
+  then purged permanently. `permanent=true` erases immediately. The receipt
+  carries `mode` (`trash` | `permanent`), `purge_after` (trash only) and
+  per-table counts. After any deletion the sign-in identity may be held for a
+  period and cannot immediately register a new account (`registration_refused`).
 - `GET /v1/account/export` — self-service account-data export supporting
   access requests: profile, agents, domains, API key metadata, messages,
   usage events, protection events, OAuth connections, and suppressions.
