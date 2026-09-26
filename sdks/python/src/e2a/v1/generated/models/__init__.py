@@ -111,6 +111,7 @@ from e2a.v1.generated.models.page_event_view import PageEventView
 from e2a.v1.generated.models.page_message_lifecycle_transition import PageMessageLifecycleTransition
 from e2a.v1.generated.models.page_message_summary_view import PageMessageSummaryView
 from e2a.v1.generated.models.page_review_view import PageReviewView
+from e2a.v1.generated.models.page_scheduled_message_view import PageScheduledMessageView
 from e2a.v1.generated.models.page_starter_template_view import PageStarterTemplateView
 from e2a.v1.generated.models.page_suppression_view import PageSuppressionView
 from e2a.v1.generated.models.page_template_summary_view import PageTemplateSummaryView
@@ -144,6 +145,7 @@ from e2a.v1.generated.models.retry_after_details import RetryAfterDetails
 from e2a.v1.generated.models.review_view import ReviewView
 from e2a.v1.generated.models.rotate_secret_response import RotateSecretResponse
 from e2a.v1.generated.models.spf_result import SPFResult
+from e2a.v1.generated.models.scheduled_message_view import ScheduledMessageView
 from e2a.v1.generated.models.send_email_request import SendEmailRequest
 from e2a.v1.generated.models.send_result_view import SendResultView
 from e2a.v1.generated.models.sending_ramp_view import SendingRampView

@@ -96,6 +96,7 @@ export * from '../models/PageEventView.js';
 export * from '../models/PageMessageLifecycleTransition.js';
 export * from '../models/PageMessageSummaryView.js';
 export * from '../models/PageReviewView.js';
+export * from '../models/PageScheduledMessageView.js';
 export * from '../models/PageStarterTemplateView.js';
 export * from '../models/PageSuppressionView.js';
 export * from '../models/PageTemplateSummaryView.js';
@@ -129,6 +130,7 @@ export * from '../models/RetryAfterDetails.js';
 export * from '../models/ReviewView.js';
 export * from '../models/RotateSecretResponse.js';
 export * from '../models/SPFResult.js';
+export * from '../models/ScheduledMessageView.js';
 export * from '../models/SendEmailRequest.js';
 export * from '../models/SendResultView.js';
 export * from '../models/SendingRampView.js';
@@ -263,6 +265,7 @@ import { PageEventView } from '../models/PageEventView.js';
 import { PageMessageLifecycleTransition } from '../models/PageMessageLifecycleTransition.js';
 import { PageMessageSummaryView } from '../models/PageMessageSummaryView.js';
 import { PageReviewView } from '../models/PageReviewView.js';
+import { PageScheduledMessageView } from '../models/PageScheduledMessageView.js';
 import { PageStarterTemplateView } from '../models/PageStarterTemplateView.js';
 import { PageSuppressionView } from '../models/PageSuppressionView.js';
 import { PageTemplateSummaryView } from '../models/PageTemplateSummaryView.js';
@@ -296,6 +299,7 @@ import { RetryAfterDetails } from '../models/RetryAfterDetails.js';
 import { ReviewView } from '../models/ReviewView.js';
 import { RotateSecretResponse } from '../models/RotateSecretResponse.js';
 import { SPFResult } from '../models/SPFResult.js';
+import { ScheduledMessageView    , ScheduledMessageViewDirectionEnum        } from '../models/ScheduledMessageView.js';
 import { SendEmailRequest } from '../models/SendEmailRequest.js';
 import { SendResultView } from '../models/SendResultView.js';
 import { SendingRampView } from '../models/SendingRampView.js';
@@ -368,6 +372,7 @@ let enumsMap: Set<string> = new Set<string>([
     "RateLimitedErrorBodyCodeEnum",
     "ReviewViewDirectionEnum",
     "SPFResultStatusEnum",
+    "ScheduledMessageViewDirectionEnum",
     "TestWebhookRequestTypeEnum",
     "UnsubscribeOptionsModeEnum",
     "UpdateWebhookRequestEventsEnum",
@@ -471,6 +476,7 @@ let typeMap: {[index: string]: any} = {
     "PageMessageLifecycleTransition": PageMessageLifecycleTransition,
     "PageMessageSummaryView": PageMessageSummaryView,
     "PageReviewView": PageReviewView,
+    "PageScheduledMessageView": PageScheduledMessageView,
     "PageStarterTemplateView": PageStarterTemplateView,
     "PageSuppressionView": PageSuppressionView,
     "PageTemplateSummaryView": PageTemplateSummaryView,
@@ -504,6 +510,7 @@ let typeMap: {[index: string]: any} = {
     "ReviewView": ReviewView,
     "RotateSecretResponse": RotateSecretResponse,
     "SPFResult": SPFResult,
+    "ScheduledMessageView": ScheduledMessageView,
     "SendEmailRequest": SendEmailRequest,
     "SendResultView": SendResultView,
     "SendingRampView": SendingRampView,
