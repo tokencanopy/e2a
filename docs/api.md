@@ -77,6 +77,10 @@ stable field are beta, `x-experimental-values` on that field):
   `email.bounced`, `email.complained`, `domain.suppression_added`). See
   [Message lifecycle diagnostics](#message-lifecycle-diagnostic-contract-beta)
   and [events.md](events.md#lifecycle-transitions-on-events-beta).
+- **External sending access** — the `sending_access` object on
+  `GET /v1/account` and the `ExternalSendingNotEnabledDetails` shape of the
+  experimental `external_sending_not_enabled` error. The control ships
+  disabled; see the error-code table.
 - **Account export interior schemas** — `GET /v1/account/export` is a GA
   operation, but its interior record shapes are versioned by the export's
   `schema_version` envelope field rather than the v1 freeze, and are
