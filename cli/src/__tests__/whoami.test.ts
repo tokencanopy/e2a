@@ -75,4 +75,104 @@ describe("whoami command", () => {
 
     expect(mockStdout).toHaveBeenCalledWith(JSON.stringify(account) + "\n");
   });
+
+  // ── sending_access (beta, additive) ──────────────────────────────
+
+  it("shows the restricted-sending line only when enforced and neither grant applies", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: false,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("External sending: restricted");
+    expect(output).toContain("e2a sending-access request");
+  });
+
+  it("says nothing new when enforcement does not apply", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: false,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: false,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("says nothing new when the account already has a grant (shared approval)", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: true,
+          paidExternalSendingEntitled: false,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("says nothing new when the account is paid-plan entitled", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: true,
+          ownerRecipientVerified: true,
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("says nothing new when sending_access is omitted (older/self-host deployment)", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount());
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("External sending:");
+  });
+
+  it("--json includes the raw sending_access object verbatim", async () => {
+    const account = makeAccount({
+      sendingAccess: {
+        enforcementApplies: true,
+        sharedExternalApproved: false,
+        paidExternalSendingEntitled: false,
+        ownerRecipientVerified: true,
+      },
+    });
+    mockAccountGet.mockResolvedValue(account);
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({ json: true });
+
+    expect(mockStdout).toHaveBeenCalledWith(JSON.stringify(account) + "\n");
+  });
 });

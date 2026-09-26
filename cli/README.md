@@ -63,7 +63,11 @@ e2a keys create --agent bot@acme.com
 
 ### `e2a whoami`
 
-Show the key identity: user, scope, bound agent, plan.
+Show the key identity: user, scope, bound agent, plan. When the deployment
+reports `sending_access` (beta — see `e2a sending-access` below) and this
+account is currently restricted to the narrow shared-identity allowlist, an
+extra `External sending: restricted (...)` line points at how to recover.
+`--json` always includes the raw `sending_access` object when present.
 
 ```bash
 e2a whoami
@@ -233,6 +237,13 @@ submission (an in-flight submission returns `409 send_in_progress`); restoring i
 send time re-arms it, while restoring at or after that time restores the
 message but leaves the send canceled.
 
+A restricted account (see `e2a sending-access` above) gets `Error: ...
+[external_sending_not_enabled]` when any To/Cc/Bcc recipient falls outside
+the shared identity's allowed destinations — the whole send is refused,
+nothing is queued, and the output names the allowed destinations plus a
+dashboard recovery URL when the server provides one. Exit code 5
+(permanent request error): do not retry the identical invocation.
+
 ### `e2a messages`
 
 List or fetch messages for an agent.
@@ -337,6 +348,23 @@ come from bounces/complaints. `remove` without `--agent` un-suppresses
 account-wide: do that only for addresses known to be deliverable, since
 removing a genuine bouncer hurts sender reputation. `list` supports `--limit`
 and `--json` (NDJSON instead of TSV: address, source, reason, created-at).
+
+### `e2a sending-access` (beta)
+
+External sending access is a platform control on the shared sending identity:
+while an account is restricted, it may only send to its verified account
+email and to agent inboxes in the same account — any other To/Cc/Bcc refuses
+the whole send with `external_sending_not_enabled` (see `e2a send`/`e2a
+reply` below). `status` shows the current restriction and the account's
+latest access request, if any; `request` files a new one for support to
+review. Filing never grants access by itself, and is capped at 3 requests per
+30 days.
+
+```bash
+e2a sending-access status
+e2a sending-access request --use-case "billing reminders to signed-up customers" \
+  --recipients "our own customers" --volume 500
+```
 
 ### `e2a listen`
 
