@@ -480,6 +480,16 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Owner-mailbox proof for external sending access. Recorded only here —
+	// after the state/nonce check, the code exchange, the provider userinfo
+	// fetch with that token, the email_verified assertion, and the subject
+	// binding above. Best effort: a failed proof write must not fail the
+	// login; the account simply keeps no owner-mailbox exception until the
+	// next verified login.
+	if _, perr := ua.store.RecordGoogleOwnerEmailProof(ctx, user.ID, userInfo.Sub, userInfo.Email); perr != nil {
+		log.Printf("[auth] record owner email proof failed: user=%s err=%v", user.ID, perr)
+	}
+
 	sessionToken, err := ua.store.CreateUserSession(ctx, user.ID)
 	if err != nil {
 		http.Error(w, "failed to create session", http.StatusInternalServerError)

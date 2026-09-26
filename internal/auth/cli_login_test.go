@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -516,5 +519,55 @@ func TestHandleCallback_InvalidState_Rejected(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// TestHandleCallback_RecordsOwnerEmailProof: a verified Google login records
+// owner-mailbox proof bound to the exact verified address; bootstrap and
+// provisioned subjects never get it through the store helper.
+func TestHandleCallback_RecordsOwnerEmailProof(t *testing.T) {
+	ua, store, srv := setupUserAuthWithFakeOAuth(t)
+	_ = srv
+	nonce := "test-nonce-proof"
+	state := auth.EncodeOAuthState(&auth.OAuthState{Nonce: nonce})
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/auth/callback?code=fake-code&state=%s", url.QueryEscape(state)), nil)
+	req.AddCookie(&http.Cookie{Name: "e2a_oauth_state", Value: nonce})
+	w := httptest.NewRecorder()
+	ua.HandleCallback(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d; body: %s", w.Code, w.Body.String())
+	}
+
+	pool, err := pgxpool.New(context.Background(), testutil.TestDBURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var address, source string
+	var at *time.Time
+	if err := pool.QueryRow(context.Background(), `
+		SELECT owner_email_verified_address, owner_email_verified_source, owner_email_verified_at
+		  FROM users WHERE google_subject = 'google-sub-cli-test'`).Scan(&address, &source, &at); err != nil {
+		t.Fatalf("read proof: %v", err)
+	}
+	if address != "cliuser@test.com" || source != "google_oauth" || at == nil {
+		t.Fatalf("proof = %q/%q/%v", address, source, at)
+	}
+
+	boot, err := store.BootstrapUser(context.Background(), "boot@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.RecordGoogleOwnerEmailProof(context.Background(), boot.ID, boot.GoogleSubject, boot.Email); err != nil || ok {
+		t.Fatalf("a bootstrap subject must never receive proof: ok=%v err=%v", ok, err)
+	}
+	// A subject/email mismatch writes nothing either.
+	var userID string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM users WHERE google_subject = 'google-sub-cli-test'`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.RecordGoogleOwnerEmailProof(context.Background(), userID, "google-sub-cli-test", "someone-else@example.test"); err != nil || ok {
+		t.Fatalf("a mismatched address must not be recorded: ok=%v err=%v", ok, err)
 	}
 }

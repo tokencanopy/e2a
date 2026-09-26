@@ -5935,6 +5935,38 @@ func (s *Store) CreateOrGetUser(ctx context.Context, email, name, googleSub stri
 	return u, nil
 }
 
+// RecordGoogleOwnerEmailProof records that a trusted Google login just
+// verified the account's owner mailbox (external sending access: the verified
+// owner-mailbox exception).
+//
+// It is called only after the OAuth state was validated, the provider response
+// was fetched with the exchanged token, email_verified was asserted, and
+// CreateOrGetUser bound the Google subject to this account. The write is
+// guarded on all three facts again in SQL: the row must still carry that
+// Google subject (never a synthetic bootstrap:/provisioned one) and its
+// current email must be exactly the verified address. Bootstrap, provisioning,
+// profile edits and generic OIDC claims never call this, and nothing ever
+// backfills it from users.email. Returns whether proof was recorded.
+func (s *Store) RecordGoogleOwnerEmailProof(ctx context.Context, userID, googleSub, verifiedEmail string) (bool, error) {
+	normalized := strings.ToLower(strings.TrimSpace(verifiedEmail))
+	if userID == "" || googleSub == "" || normalized == "" || strings.HasPrefix(googleSub, "bootstrap:") {
+		return false, nil
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE users
+		   SET owner_email_verified_at = now(),
+		       owner_email_verified_address = $3,
+		       owner_email_verified_source = 'google_oauth'
+		 WHERE id = $1 AND google_subject = $2
+		   AND google_subject NOT LIKE 'bootstrap:%'
+		   AND lower(btrim(email)) = $3`,
+		userID, googleSub, normalized)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // SetAccountClass sets a user's account_class (standard|internal|system|demo).
 // Used by the prober's seed to mark the synthetic probe account as system so its
 // traffic is never metered (see usage.PolicyFor). The CHECK constraint in
