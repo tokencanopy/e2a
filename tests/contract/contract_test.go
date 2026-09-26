@@ -145,6 +145,10 @@ type testEnv struct {
 	// restrictedAPIKey authenticates the contract server's fourth account,
 	// the only one inside the external-sending-access cohort.
 	restrictedAPIKey string
+	// disposableTrashAPIKey / disposableEraseAPIKey authenticate the two
+	// throwaway accounts the account-deletion scenarios delete.
+	disposableTrashAPIKey string
+	disposableEraseAPIKey string
 }
 
 func setupEnv(t *testing.T) *testEnv {
@@ -173,6 +177,9 @@ func setupEnv(t *testing.T) *testEnv {
 		overCapAPIKey: cs.OverCapAPIKey,
 
 		restrictedAPIKey: cs.RestrictedAPIKey,
+
+		disposableTrashAPIKey: cs.DisposableTrashAPIKey,
+		disposableEraseAPIKey: cs.DisposableEraseAPIKey,
 	}
 }
 
@@ -369,6 +376,8 @@ func (r *runner) resolve(s string) string {
 	s = strings.ReplaceAll(s, "{capped_api_key}", r.env.cappedAPIKey)
 	s = strings.ReplaceAll(s, "{overcap_api_key}", r.env.overCapAPIKey)
 	s = strings.ReplaceAll(s, restrictedKeyPlaceholder, r.env.restrictedAPIKey)
+	s = strings.ReplaceAll(s, "{disposable_trash_api_key}", r.env.disposableTrashAPIKey)
+	s = strings.ReplaceAll(s, "{disposable_erase_api_key}", r.env.disposableEraseAPIKey)
 	for k, v := range r.vars {
 		s = strings.ReplaceAll(s, "{"+k+"}", v)
 	}

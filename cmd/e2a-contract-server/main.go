@@ -36,9 +36,12 @@ func main() {
 	// file with `set -a`, so the runners pick both up with no workflow change.
 	// E2A_TEST_RESTRICTED_API_KEY authenticates the only account inside the
 	// external-sending-access cohort (see testutil.ContractExternalAccessCutoff).
+	// E2A_TEST_DISPOSABLE_{TRASH,ERASE}_API_KEY authenticate the two throwaway
+	// accounts the account-deletion scenarios delete (once each per server).
 	envContent := fmt.Sprintf(
-		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\nE2A_TEST_RESTRICTED_API_KEY=%s\n",
+		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\nE2A_TEST_RESTRICTED_API_KEY=%s\nE2A_TEST_DISPOSABLE_TRASH_API_KEY=%s\nE2A_TEST_DISPOSABLE_ERASE_API_KEY=%s\n",
 		srv.BaseURL, srv.APIKey, srv.CappedAPIKey, srv.OverCapAPIKey, srv.RestrictedAPIKey,
+		srv.DisposableTrashAPIKey, srv.DisposableEraseAPIKey,
 	)
 	if envFile != "" {
 		if err := os.WriteFile(envFile, []byte(envContent), 0o600); err != nil {

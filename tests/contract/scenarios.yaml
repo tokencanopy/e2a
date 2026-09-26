@@ -3477,3 +3477,66 @@ scenarios:
           status: 200
           body_match:
             "sending_access.shared_external_approved": false
+
+  # ── Account deletion (docs/design/account-soft-deletion.md §4.8) ──
+  # Each scenario runs as a throwaway account the contract server seeds only
+  # to be deleted ({disposable_trash_api_key} / {disposable_erase_api_key});
+  # no other scenario may use them, and each is deleted exactly once per run.
+  - name: account_delete_trash_receipt
+    description: >
+      DELETE /v1/account defaults to the trash: the receipt says mode=trash with
+      a purge_after, reports zero messages deleted and user_deleted=false, and
+      the key it was called with stops authenticating at once (trash revokes
+      every API key). The trashed row is restorable only through the
+      dashboard, so there is nothing for the API to clean up.
+    auth_override: "Bearer {disposable_trash_api_key}"
+    steps:
+      - id: trash_account
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE
+        expect:
+          status: 200
+          body_contains: [purge_after]
+          body_match:
+            deleted: true
+            mode: trash
+            user_deleted: false
+            messages_deleted: 0
+
+      - id: revoked_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
+
+  - name: account_delete_permanent_receipt
+    description: >
+      DELETE /v1/account?permanent=true erases the account immediately: the
+      receipt says mode=permanent with user_deleted=true and carries no
+      purge_after, and the key is gone.
+    auth_override: "Bearer {disposable_erase_api_key}"
+    steps:
+      - id: erase_account
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_excludes: [purge_after]
+          body_match:
+            deleted: true
+            mode: permanent
+            user_deleted: true
+
+      - id: erased_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized

@@ -27,6 +27,12 @@ Run this harness only against the intended production-compatible deployment. Con
   low-cap account for the limit/rate-limit enforcement suite. Without these the
   enforcement suite is skipped, since the main conformance account is
   internal-class and exempt by construction.
+- `E2A_DISPOSABLE_API_KEY`: **required for a complete run** — the account-scoped
+  key of a throwaway account minted for THIS run (e.g. `-bootstrap-email` in the
+  target's container with a unique synthetic address). `suites/19-account`
+  erases it with `DELETE /v1/account?permanent=true` and fails if the key is
+  missing or resolves to the conformance account. Mint a fresh one per run: the
+  erased identity may be held by an identity tombstone afterwards.
 
 - `E2E_ALLOW_PROD`: set to `1` to permit a run against a hosted production origin. Required there, ignored elsewhere.
 

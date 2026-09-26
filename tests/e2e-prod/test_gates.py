@@ -43,7 +43,7 @@ CONTACTS_OPS = {
 # synthetic target shard below is staging). The gates fail loudly if these
 # drift out of sync with the real constants — which is the point: the tests
 # pin the documented tiers, they don't weaken them.
-COVERAGE_GATE_ALWAYS_ALLOWLIST = {"deleteAccount"}
+COVERAGE_GATE_ALWAYS_ALLOWLIST: set[str] = set()
 COVERAGE_GATE_STAGING_ONLY_ALLOWLIST = {"deleteSuppression"}
 
 EVENT_GATE_ALWAYS_ALLOWLIST = {"domain.sending_failed"}

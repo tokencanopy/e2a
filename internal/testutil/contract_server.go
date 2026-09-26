@@ -89,13 +89,20 @@ type ContractServer struct {
 	// owner-mailbox proof for its sign-in address.
 	RestrictedAPIKey string
 	RestrictedUserID string
-	DBPool           *pgxpool.Pool
-	Store            *identity.Store
-	WSHub            *ws.Hub
-	SMTPAddr         string
-	httpServer       *http.Server
-	httpLn           net.Listener
-	smtpServer       *relay.Server
+	// DisposableTrashAPIKey and DisposableEraseAPIKey authenticate two
+	// throwaway accounts that exist only to be deleted: the account-deletion
+	// scenarios trash one (DELETE /v1/account) and permanently erase the
+	// other (?permanent=true). Each can be deleted exactly once per server,
+	// which is one contract run; no other scenario may use them.
+	DisposableTrashAPIKey string
+	DisposableEraseAPIKey string
+	DBPool                *pgxpool.Pool
+	Store                 *identity.Store
+	WSHub                 *ws.Hub
+	SMTPAddr              string
+	httpServer            *http.Server
+	httpLn                net.Listener
+	smtpServer            *relay.Server
 }
 
 func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, error) {
@@ -364,23 +371,45 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		return nil, err
 	}
 
+	disposable := make([]string, 0, 2)
+	for _, label := range []string{"trash", "erase"} {
+		u, err := store.CreateOrGetUser(ctx, "disposable-"+label+"@test.dev", "Contract Disposable", "google-contract-disposable-"+label)
+		if err == nil {
+			var k *identity.APIKey
+			k, err = store.CreateAPIKey(ctx, u.ID, "contract-disposable-"+label+"-key", nil)
+			if err == nil {
+				disposable = append(disposable, k.PlaintextKey)
+			}
+		}
+		if err != nil {
+			_ = smtpServer.Close()
+			_ = httpServer.Shutdown(context.Background())
+			_ = httpLn.Close()
+			wsHub.Close()
+			pool.Close()
+			return nil, err
+		}
+	}
+
 	return &ContractServer{
-		RestrictedAPIKey: restrictedKey,
-		RestrictedUserID: restrictedUser,
-		BaseURL:          "http://" + httpLn.Addr().String(),
-		APIKey:           key.PlaintextKey,
-		UserID:           user.ID,
-		CappedAPIKey:     cappedKey.PlaintextKey,
-		CappedUserID:     cappedUser.ID,
-		OverCapAPIKey:    overCapKey.PlaintextKey,
-		OverCapUserID:    overCapUser.ID,
-		DBPool:           pool,
-		Store:            store,
-		WSHub:            wsHub,
-		SMTPAddr:         smtpAddr,
-		httpServer:       httpServer,
-		httpLn:           httpLn,
-		smtpServer:       smtpServer,
+		DisposableTrashAPIKey: disposable[0],
+		DisposableEraseAPIKey: disposable[1],
+		RestrictedAPIKey:      restrictedKey,
+		RestrictedUserID:      restrictedUser,
+		BaseURL:               "http://" + httpLn.Addr().String(),
+		APIKey:                key.PlaintextKey,
+		UserID:                user.ID,
+		CappedAPIKey:          cappedKey.PlaintextKey,
+		CappedUserID:          cappedUser.ID,
+		OverCapAPIKey:         overCapKey.PlaintextKey,
+		OverCapUserID:         overCapUser.ID,
+		DBPool:                pool,
+		Store:                 store,
+		WSHub:                 wsHub,
+		SMTPAddr:              smtpAddr,
+		httpServer:            httpServer,
+		httpLn:                httpLn,
+		smtpServer:            smtpServer,
 	}, nil
 }
 

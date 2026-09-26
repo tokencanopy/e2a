@@ -42,8 +42,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Operations the black-box conformance suite intentionally does NOT exercise, with
 # the reason. Keep this list SHORT and justified — every entry is coverage we're
 # knowingly forgoing. Allowlisted no matter what the run targeted.
-ALWAYS_ALLOWLIST = {
-    "deleteAccount": "destructive — the suite must never delete its own account",
+ALWAYS_ALLOWLIST: dict[str, str] = {
+    # deleteAccount is no longer allowlisted: suites/19-account.test.ts erases
+    # a pipeline-minted disposable account (E2A_DISPOSABLE_API_KEY) with
+    # permanent=true on every run.
 }
 
 # Allowlisted ONLY on a non-production run (see target_env.py for the
