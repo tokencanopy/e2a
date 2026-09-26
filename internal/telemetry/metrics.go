@@ -309,40 +309,40 @@ func (NoOp) ContactDueFailed(int)           {}
 func (NoOp) NotifyMissed()                  {}
 func (NoOp) SetPublisherLag(float64)        {}
 
-func (NoOp) HTTPRequest(string, string, string, float64)  {}
-func (NoOp) SMTPInbound(string, float64)                  {}
-func (NoOp) ThreadHeaderParseFailure(string)              {}
-func (NoOp) OutboundQueueWait(float64)                    {}
-func (NoOp) OutboundTerminal(string)                      {}
-func (NoOp) OutboundTerminalLatency(float64)              {}
-func (NoOp) OutboundAttempt(string, float64)              {}
-func (NoOp) OutboundRateDeferred()                        {}
+func (NoOp) HTTPRequest(string, string, string, float64)   {}
+func (NoOp) SMTPInbound(string, float64)                   {}
+func (NoOp) ThreadHeaderParseFailure(string)               {}
+func (NoOp) OutboundQueueWait(float64)                     {}
+func (NoOp) OutboundTerminal(string)                       {}
+func (NoOp) OutboundTerminalLatency(float64)               {}
+func (NoOp) OutboundAttempt(string, float64)               {}
+func (NoOp) OutboundRateDeferred()                         {}
 func (NoOp) ExternalAccessDecision(string, string, string) {}
-func (NoOp) WebhookAttempt(string, string, float64)       {}
-func (NoOp) WebhookTerminal(string, string, int)          {}
-func (NoOp) WebhookNotify(string, string)                 {}
-func (NoOp) WebhookExpiredPending(int)                    {}
-func (NoOp) WebhookFanOutRescued(int)                     {}
-func (NoOp) WebhookDeliveryRescued(int)                   {}
-func (NoOp) WebhookFirstAttemptLatency(float64)           {}
-func (NoOp) WSConnected()                                 {}
-func (NoOp) WSDisconnected(string)                        {}
-func (NoOp) WSHandshakeRejected(string)                   {}
-func (NoOp) DelegatedAuthFailure(string)                  {}
-func (NoOp) DelegatedJWKSRefresh(string)                  {}
-func (NoOp) OIDCDiscovery(string, string)                 {}
-func (NoOp) OIDCCallback(string, string, string)          {}
-func (NoOp) Provisioning(string, string, string)          {}
-func (NoOp) WSDrained(int)                                {}
-func (NoOp) WSSendFailure()                               {}
-func (NoOp) SetWSActive(int)                              {}
-func (NoOp) InboundProcess(string, float64)               {}
-func (NoOp) SetQueueDepth(string, string, int)            {}
-func (NoOp) SetQueueOldestAge(string, float64)            {}
-func (NoOp) ThreadResolution(string, int)                 {}
-func (NoOp) SetThreadNullMessages(string, int)            {}
-func (NoOp) SetThreadInvariantViolations(string, int)     {}
-func (NoOp) SetThreadRelationshipPercent(string, float64) {}
+func (NoOp) WebhookAttempt(string, string, float64)        {}
+func (NoOp) WebhookTerminal(string, string, int)           {}
+func (NoOp) WebhookNotify(string, string)                  {}
+func (NoOp) WebhookExpiredPending(int)                     {}
+func (NoOp) WebhookFanOutRescued(int)                      {}
+func (NoOp) WebhookDeliveryRescued(int)                    {}
+func (NoOp) WebhookFirstAttemptLatency(float64)            {}
+func (NoOp) WSConnected()                                  {}
+func (NoOp) WSDisconnected(string)                         {}
+func (NoOp) WSHandshakeRejected(string)                    {}
+func (NoOp) DelegatedAuthFailure(string)                   {}
+func (NoOp) DelegatedJWKSRefresh(string)                   {}
+func (NoOp) OIDCDiscovery(string, string)                  {}
+func (NoOp) OIDCCallback(string, string, string)           {}
+func (NoOp) Provisioning(string, string, string)           {}
+func (NoOp) WSDrained(int)                                 {}
+func (NoOp) WSSendFailure()                                {}
+func (NoOp) SetWSActive(int)                               {}
+func (NoOp) InboundProcess(string, float64)                {}
+func (NoOp) SetQueueDepth(string, string, int)             {}
+func (NoOp) SetQueueOldestAge(string, float64)             {}
+func (NoOp) ThreadResolution(string, int)                  {}
+func (NoOp) SetThreadNullMessages(string, int)             {}
+func (NoOp) SetThreadInvariantViolations(string, int)      {}
+func (NoOp) SetThreadRelationshipPercent(string, float64)  {}
 
 // Log emits a structured log line for every metric call. Cheap and
 // portable; production aggregators (Loki, CloudWatch, Datadog) can

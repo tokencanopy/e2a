@@ -103,7 +103,7 @@ var (
 	externalAccessRouteSet = set("not_applicable", "custom_identity", "operator_approval",
 		"paid_entitlement", "restricted_recipients", "denied")
 	externalAccessModeSet = set("shadow", "enforce")
-	whSet         = set("delivered", "retryable_failure", "exhausted",
+	whSet                 = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
 	whTerminalSet = set("delivered", "e2a_failure", "endpoint_failure", "excluded")
 	whScopeSet    = set("initial", "replay", "test", "unknown")
