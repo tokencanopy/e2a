@@ -768,3 +768,71 @@ func TestAccountSoftDeletionMigrationIsIdempotentAndConservative(t *testing.T) {
 		}
 	}
 }
+
+// TestTrashLeavesADomainOtherAccountsDependOn: a domain another account's
+// agents live on (the shared domain an operator's probe account adopted) is
+// infrastructure; trashing its owner must not unverify it.
+func TestTrashLeavesADomainOtherAccountsDependOn(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	const shared = "shared.agents.localhost"
+	if err := store.EnsureSharedDomain(ctx, shared); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := store.CreateOrGetUser(ctx, "probe@example.test", "Probe", "sub-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdoptSharedDomain(ctx, shared, probe.ID); err != nil {
+		t.Fatal(err)
+	}
+	customer, err := store.CreateOrGetUser(ctx, "customer@example.test", "C", "sub-customer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAgentWithLimit(ctx, "cust@"+shared, shared, "Cust", customer.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	var hooked []string
+	if _, err := store.TrashAccount(ctx, probe.ID, func(_ context.Context, _ pgx.Tx, d string) error {
+		hooked = append(hooked, d)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var verified bool
+	if err := pool.QueryRow(ctx, `SELECT verified FROM domains WHERE domain = $1`, shared).Scan(&verified); err != nil {
+		t.Fatal(err)
+	}
+	if !verified || len(hooked) != 0 {
+		t.Fatalf("shared domain verified=%v teardown=%v; another account's inboxes depend on it", verified, hooked)
+	}
+}
+
+func TestRestoreExtendsTheUpgradedSession(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "ttl@example.test", "T", "sub-ttl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := store.CreateRestrictedUserSession(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RestoreAccount(ctx, user.ID, tok); err != nil {
+		t.Fatal(err)
+	}
+	var expires time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM user_sessions WHERE token = $1`, tok).Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	if time.Until(expires) < identity.SessionTTL-time.Minute {
+		t.Fatalf("upgraded session expires in %v, want the ordinary %v", time.Until(expires), identity.SessionTTL)
+	}
+}

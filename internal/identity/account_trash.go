@@ -192,6 +192,20 @@ func (s *Store) TrashAccount(ctx context.Context, userID string, perDomainInTx f
 			return fmt.Errorf("trash: load domains: %w", err)
 		}
 		for _, d := range domains {
+			// A domain another account's agents live on (the shared domain an
+			// operator's probe account adopted) is infrastructure, not this
+			// account's identity: unverifying it would take every other
+			// account's inboxes offline. Leave it exactly as it is.
+			var shared bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM agent_identities WHERE registered_domain = $1 AND user_id <> $2)`,
+				d.Domain, userID).Scan(&shared); err != nil {
+				return fmt.Errorf("trash: check domain %s: %w", d.Domain, err)
+			}
+			if shared {
+				log.Printf("[account-trash] left domain %s verified: other accounts' agents depend on it (user=%s)", d.Domain, userID)
+				continue
+			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE domains
 				   SET verified = false,
@@ -325,8 +339,9 @@ func (s *Store) RestoreAccount(ctx context.Context, userID, sessionToken string)
 		}
 		if sessionToken != "" {
 			if _, err := tx.Exec(ctx,
-				`UPDATE user_sessions SET restricted = false WHERE token = $1 AND user_id = $2`,
-				sessionToken, userID); err != nil {
+				`UPDATE user_sessions SET restricted = false, expires_at = now() + make_interval(secs => $3)
+				  WHERE token = $1 AND user_id = $2`,
+				sessionToken, userID, SessionTTL.Seconds()); err != nil {
 				return fmt.Errorf("restore: session: %w", err)
 			}
 		}
@@ -432,6 +447,9 @@ func (s *Store) PurgeDeletedUsers(ctx context.Context, perDomainInTx func(ctx co
 		}
 		attempted = append(attempted, userID)
 		ok, err := s.purgeAccount(ctx, userID, false, perDomainInTx)
+		if errors.Is(err, ErrNotInTrash) {
+			continue // restored (or re-dated) between selection and claim
+		}
 		if err != nil {
 			if errors.Is(err, ErrTombstoneKeyUnavailable) {
 				log.Printf("[janitor] account purge skipped: user=%s err=%v (content stays trashed; configure E2A_TOMBSTONE_KEY)", userID, err)
@@ -465,10 +483,16 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		var (
 			deletedAt  *time.Time
 			purgeToken *string
+			expired    bool
 		)
+		// The retention check is evaluated by the database clock, the same
+		// clock PurgeDeletedUsers selected with, so app/DB skew cannot make
+		// a selected account refuse its own claim.
 		err := tx.QueryRow(ctx,
-			`SELECT deleted_at, purge_token FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID,
-		).Scan(&deletedAt, &purgeToken)
+			`SELECT deleted_at, purge_token,
+			        COALESCE(deleted_at <= now() - make_interval(secs => $2), false)
+			   FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID, AccountTrashRetention.Seconds(),
+		).Scan(&deletedAt, &purgeToken, &expired)
 		if errors.Is(err, pgx.ErrNoRows) {
 			gone = true
 			return nil
@@ -479,7 +503,7 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		if deletedAt == nil {
 			return ErrNotInTrash // a restore won the race
 		}
-		if purgeToken == nil && !force && time.Since(*deletedAt) < AccountTrashRetention {
+		if purgeToken == nil && !force && !expired {
 			return ErrNotInTrash
 		}
 		if purgeToken != nil {

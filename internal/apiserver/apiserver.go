@@ -231,7 +231,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		DeleteUserData:               p.API.DeleteUserDataCore,
 		RestrictedSession:            p.API.RestrictedSession,
 		RestoreAccount:               p.API.RestoreAccountCore,
-		ClearSessionCookie:           p.API.ClearSessionCookie,
+		WriteSessionCookie:           p.API.WriteSessionCookie,
 		ListSuppressions:             p.Store.ListSuppressions,
 		RemoveSuppression:            p.Store.RemoveSuppression,
 		AddAgentSuppression:          p.Store.AddAgentSuppression,

@@ -83,6 +83,11 @@ func (s *Server) handleAccountRestore(w http.ResponseWriter, r *http.Request) {
 	restored, err := s.deps.RestoreAccount(r.Context(), u.ID, token)
 	switch {
 	case err == nil:
+		// The restricted cookie was short-lived; the upgraded session now
+		// carries the ordinary lifetime, so re-issue the cookie to match.
+		if s.deps.WriteSessionCookie != nil {
+			s.deps.WriteSessionCookie(w, token, identity.SessionTTL)
+		}
 		writeAccountJSON(w, http.StatusOK, AccountRestoreView{Restored: true, RestoredAt: restored.RestoredAt})
 	case errors.Is(err, identity.ErrNotInTrash):
 		WriteError(w, r, http.StatusConflict, "not_in_trash", "the account is not in the trash")
@@ -115,8 +120,8 @@ func (s *Server) handleAccountErase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.Deleted = true
-	if s.deps.ClearSessionCookie != nil {
-		s.deps.ClearSessionCookie(w)
+	if s.deps.WriteSessionCookie != nil {
+		s.deps.WriteSessionCookie(w, "", -1)
 	}
 	writeAccountJSON(w, http.StatusOK, res)
 }

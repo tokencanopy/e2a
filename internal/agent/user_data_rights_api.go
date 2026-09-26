@@ -198,16 +198,21 @@ func (a *API) RestrictedSession(r *http.Request) (*identity.User, string, error)
 	return u, c.Value, nil
 }
 
-// ClearSessionCookie expires the dashboard session cookie (after an erase
-// through the restricted session, whose row the purge already removed).
-func (a *API) ClearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+// WriteSessionCookie sets (maxAge > 0) or expires (maxAge <= 0) the
+// dashboard session cookie with the same attributes the login doors use.
+func (a *API) WriteSessionCookie(w http.ResponseWriter, token string, maxAge time.Duration) {
+	c := &http.Cookie{
 		Name:     auth.SessionCookieName,
-		Value:    "",
+		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   a.production,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	})
+		MaxAge:   int(maxAge.Seconds()),
+	}
+	if maxAge <= 0 {
+		c.Value = ""
+		c.MaxAge = -1
+	}
+	http.SetCookie(w, c)
 }

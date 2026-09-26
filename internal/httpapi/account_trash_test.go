@@ -118,8 +118,12 @@ func restoreServer(t *testing.T, restoreErr error, eraseErr error) (*http.Client
 			}
 			return &identity.DeleteUserDataResult{Mode: identity.AccountDeleteModePermanent, UserDeleted: true}, nil
 		}
-		d.ClearSessionCookie = func(w http.ResponseWriter) {
-			http.SetCookie(w, &http.Cookie{Name: "e2a_session", Value: "", MaxAge: -1})
+		d.WriteSessionCookie = func(w http.ResponseWriter, token string, maxAge time.Duration) {
+			if maxAge <= 0 {
+				http.SetCookie(w, &http.Cookie{Name: "e2a_session", Value: "", MaxAge: -1})
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: "e2a_session", Value: token, MaxAge: int(maxAge.Seconds())})
 		}
 	})
 	return srv.Client(), srv.URL, calls
@@ -155,9 +159,19 @@ func TestAccountRestoreInterstitial(t *testing.T) {
 	if code != 200 || body["email"] != "gone@example.test" || body["deleted_at"] != "2026-09-20T00:00:00Z" || body["purge_after"] == nil {
 		t.Fatalf("deletion state = %d %v", code, body)
 	}
-	code, body, _ = doCookie(t, c, "POST", base+"/api/account/restore", "sess_restricted")
+	code, body, resp := doCookie(t, c, "POST", base+"/api/account/restore", "sess_restricted")
 	if code != 200 || body["restored"] != true {
 		t.Fatalf("restore = %d %v", code, body)
+	}
+	// The upgraded session is re-issued with the ordinary lifetime.
+	var reissued *http.Cookie
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "e2a_session" {
+			reissued = ck
+		}
+	}
+	if reissued == nil || reissued.Value != "sess_restricted" || reissued.MaxAge != int(identity.SessionTTL.Seconds()) {
+		t.Fatalf("restore did not re-issue the session cookie with the full lifetime: %+v", reissued)
 	}
 	if len(*calls) != 1 || (*calls)[0] != "restore:u_trashed:sess_restricted" {
 		t.Fatalf("restore calls = %v", *calls)

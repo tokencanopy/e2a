@@ -393,9 +393,10 @@ type Deps struct {
 	RestrictedSession func(r *http.Request) (*identity.User, string, error)
 	// RestoreAccount restores the trashed account and upgrades the session.
 	RestoreAccount func(ctx context.Context, userID, sessionToken string) (*identity.User, error)
-	// ClearSessionCookie expires the dashboard session cookie on the response
-	// (after an erase through the restricted session).
-	ClearSessionCookie func(w http.ResponseWriter)
+	// WriteSessionCookie sets the dashboard session cookie on the response:
+	// a restore re-issues the upgraded session with its full lifetime (the
+	// restricted cookie was short-lived), and an erase expires it (maxAge < 0).
+	WriteSessionCookie func(w http.ResponseWriter, token string, maxAge time.Duration)
 
 	// events (delivery log). EventQuery carries the filters + cursor
 	// position; the closures bind the events pool in main.
