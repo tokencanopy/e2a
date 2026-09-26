@@ -37,7 +37,7 @@ type AccountView struct {
 	// SendingAccess is the additive external-sending-access eligibility
 	// object (booleans only). Omitted when the deployment does not wire it or
 	// its state could not be read.
-	SendingAccess *SendingAccessView `json:"sending_access,omitempty" doc:"External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when unavailable."`
+	SendingAccess *SendingAccessView `json:"sending_access,omitempty" doc:"External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable."`
 }
 
 type LimitsCapsView struct {

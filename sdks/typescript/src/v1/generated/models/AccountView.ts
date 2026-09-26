@@ -25,7 +25,7 @@ export class AccountView {
     */
     'scope': string;
     /**
-    * External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when unavailable.
+    * External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable.
     */
     'sendingAccess'?: SendingAccessView;
     'upgradeUrl': string;

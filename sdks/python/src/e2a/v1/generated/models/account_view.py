@@ -34,7 +34,7 @@ class AccountView(BaseModel):
     limits: LimitsCapsView
     plan_code: StrictStr
     scope: StrictStr = Field(description="Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.")
-    sending_access: Optional[SendingAccessView] = Field(default=None, description="External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when unavailable.")
+    sending_access: Optional[SendingAccessView] = Field(default=None, description="External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable.")
     upgrade_url: StrictStr
     usage: LimitsUsageView
     user: AccountUserView

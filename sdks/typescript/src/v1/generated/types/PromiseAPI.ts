@@ -207,7 +207,7 @@ export class PromiseAccountApi {
     }
 
     /**
-     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
      * Request external sending access (beta)
      * @param sendingAccessRequestInput
      */
@@ -218,7 +218,7 @@ export class PromiseAccountApi {
     }
 
     /**
-     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * Files a request for support to review this account\'s external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
      * Request external sending access (beta)
      * @param sendingAccessRequestInput
      */
@@ -367,7 +367,7 @@ export class PromiseAccountApi {
     }
 
     /**
-     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
      * Get your latest external sending access request (beta)
      */
     public getSendingAccessRequestWithHttpInfo(_options?: PromiseConfigurationOptions): Promise<HttpInfo<SendingAccessRequestView>> {
@@ -377,7 +377,7 @@ export class PromiseAccountApi {
     }
 
     /**
-     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
+     * The account\'s most recent request for external sending access, with its review state. 404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve.
      * Get your latest external sending access request (beta)
      */
     public getSendingAccessRequest(_options?: PromiseConfigurationOptions): Promise<SendingAccessRequestView> {

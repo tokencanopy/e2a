@@ -46,6 +46,9 @@ func (s *Server) accountSendingAccess(ctx context.Context, userID string) *Sendi
 		return nil
 	}
 	st, err := s.deps.SendingAccessStatus(ctx, userID)
+	if errors.Is(err, sendingpolicy.ErrExternalAccessDisabled) {
+		return nil
+	}
 	if err != nil {
 		log.Printf("[httpapi] sending access status unavailable: user=%s err=%v", userID, err)
 		return nil
@@ -102,7 +105,7 @@ func (s *Server) registerSendingAccess() {
 		OperationID: "getSendingAccessRequest", Method: http.MethodGet, Path: "/v1/account/sending-access/request",
 		Summary: "Get your latest external sending access request (beta)", Tags: []string{"account"},
 		Description: "The account's most recent request for external sending access, with its review state. " +
-			"404 not_found when the account has never filed one. Account-scoped credentials only. " + sendingAccessBetaDoc,
+			"404 not_found when the account has never filed one; 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. " + sendingAccessBetaDoc,
 		Security:   []map[string][]string{{"bearer": {}}},
 		Extensions: beta(),
 	}, s.handleGetSendingAccessRequest)
@@ -113,7 +116,7 @@ func (s *Server) registerSendingAccess() {
 		Description: "Files a request for support to review this account's external sending access. " +
 			"Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). " +
 			"After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). " +
-			"Filing a request never grants access by itself. Account-scoped credentials only. " + sendingAccessBetaDoc,
+			"Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. " + sendingAccessBetaDoc,
 		Security:      []map[string][]string{{"bearer": {}}},
 		DefaultStatus: http.StatusCreated,
 		// Two success statuses (201 created, 200 existing pending request),
@@ -139,6 +142,9 @@ func (s *Server) handleGetSendingAccessRequest(ctx context.Context, _ *struct{})
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "sending access requests are not available on this deployment")
 	}
 	req, err := s.deps.LatestSendingAccessRequest(ctx, user.ID)
+	if errors.Is(err, sendingpolicy.ErrExternalAccessDisabled) {
+		return nil, NewError(http.StatusNotImplemented, "not_implemented", "external sending access is not enabled on this deployment")
+	}
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to read sending access request")
 	}
@@ -162,6 +168,8 @@ func (s *Server) handleCreateSendingAccessRequest(ctx context.Context, in *creat
 		ExpectedDailyVolume: in.Body.ExpectedDailyVolume,
 	})
 	switch {
+	case errors.Is(err, sendingpolicy.ErrExternalAccessDisabled):
+		return nil, NewError(http.StatusNotImplemented, "not_implemented", "external sending access is not enabled on this deployment")
 	case errors.Is(err, sendingpolicy.ErrInvalidAccessRequest):
 		return nil, NewError(http.StatusBadRequest, "invalid_request", err.Error())
 	case errors.Is(err, sendingpolicy.ErrAccessRequestRateLimited):

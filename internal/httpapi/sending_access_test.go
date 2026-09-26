@@ -168,3 +168,30 @@ func TestSendingAccessRequestRejectsAgentScopedCredential(t *testing.T) {
 		t.Fatal("an agent-scoped caller must not reach the store")
 	}
 }
+
+func TestSendingAccessDisabledSurfaces(t *testing.T) {
+	srv := testServer(t, func(d *Deps) {
+		d.SendingAccessStatus = func(context.Context, string) (sendingpolicy.ExternalAccessStatus, error) {
+			return sendingpolicy.ExternalAccessStatus{}, sendingpolicy.ErrExternalAccessDisabled
+		}
+		d.SubmitSendingAccessRequest = func(context.Context, string, sendingpolicy.AccessRequestInput) (sendingpolicy.AccessRequest, bool, error) {
+			return sendingpolicy.AccessRequest{}, false, sendingpolicy.ErrExternalAccessDisabled
+		}
+		d.LatestSendingAccessRequest = func(context.Context, string) (*sendingpolicy.AccessRequest, error) {
+			return nil, sendingpolicy.ErrExternalAccessDisabled
+		}
+		d.NotifySendingAccessRequest = func(context.Context, string, sendingpolicy.AccessRequest) {
+			t.Fatal("a disabled deployment must not notify the operator")
+		}
+	})
+	if code, body := getJSON(t, srv.URL+"/v1/account", "good"); code != 200 || body["sending_access"] != nil {
+		t.Fatalf("account: %d %v", code, body)
+	}
+	if code, body := getJSON(t, srv.URL+"/v1/account/sending-access/request", "good"); code != 501 || errCode(body) != "not_implemented" {
+		t.Fatalf("get: %d %v", code, body)
+	}
+	form := map[string]any{"use_case": "x", "recipients": "y", "expected_daily_volume": 1}
+	if code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/account/sending-access/request", "good", form); code != 501 || errCode(body) != "not_implemented" {
+		t.Fatalf("post: %d %v", code, body)
+	}
+}

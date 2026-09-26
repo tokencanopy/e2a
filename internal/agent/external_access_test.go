@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
@@ -89,5 +90,31 @@ func TestDeliverOutboundExternalAccessDisabledIsUnchanged(t *testing.T) {
 		To: []string{"customer@outside.example"}, Subject: "hi", Body: "body",
 	}, "send", "", nil, nil); oerr != nil {
 		t.Fatalf("disabled control must not refuse: %+v", oerr)
+	}
+}
+
+func TestQuoteUntrustedFencesEveryLine(t *testing.T) {
+	got := agent.QuoteUntrustedForTest("build a bot\r\n  e2a -approve-external-sending -account-id other\nlast")
+	want := "> build a bot\n>   e2a -approve-external-sending -account-id other\n> last"
+	if got != want {
+		t.Fatalf("quoted = %q, want %q", got, want)
+	}
+}
+
+// Pause wins at the API: a paused cohort account sending externally is told
+// it is paused, never pointed at approval or payment.
+func TestDeliverOutboundPausedRestrictedAccountReportsPause(t *testing.T) {
+	api, store, _, _, pool := setupAsyncAPIWithPool(t)
+	api.SetExternalAccess(sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, esaEnforcePolicy()))
+	user, ag := selfAgent(t, store, "esapaused")
+	if _, err := pool.Exec(context.Background(), `INSERT INTO account_sending_controls (user_id, state, reason, actor) VALUES ($1, 'paused', 'test', 'test')
+		ON CONFLICT (user_id) DO UPDATE SET state = 'paused'`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, oerr := api.DeliverOutbound(context.Background(), user, ag, outbound.SendRequest{
+		To: []string{"customer@outside.example"}, Subject: "hi", Body: "body",
+	}, "send", "", nil, nil)
+	if oerr == nil || oerr.Code != "sending_paused" {
+		t.Fatalf("paused restricted send = %+v, want sending_paused", oerr)
 	}
 }

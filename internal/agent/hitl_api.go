@@ -110,7 +110,14 @@ func (a *API) ApprovePendingCore(ctx context.Context, userID, messageID, expecte
 	// approve-override path can't bypass it. Applied on a copy so preview is
 	// untouched (both async and sync dispatch below re-derive from it).
 	merged := *preview
-	edits.Apply(&merged)
+	edited := edits.Apply(&merged)
+	// A held platform test is platform-originated mail (From: the platform
+	// noreply identity, no footer) to the agent's own address. Reviewer
+	// edits would turn it into arbitrary platform-branded mail to arbitrary
+	// recipients, so a test is approved exactly as held or rejected.
+	if preview.Type == "test" && edited {
+		return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "a held platform test email cannot be edited; approve it unchanged or reject it"}
+	}
 	mergedReq, err := buildSendRequestFromMessage(&merged)
 	if err != nil {
 		return nil, &OutboundError{Status: http.StatusBadRequest, Code: "invalid_request", Msg: "invalid attachments"}

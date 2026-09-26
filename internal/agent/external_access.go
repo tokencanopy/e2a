@@ -55,6 +55,11 @@ func (a *API) preflightExternalAccess(ctx context.Context, userID, agentID strin
 		log.Printf("[api] external access preflight failed: agent=%s err=%v", agentID, err)
 		return &OutboundError{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "could not verify sending access; retry shortly"}
 	}
+	if verdict.Paused {
+		// Pause wins: report it, never a restriction that approval or a
+		// payment would appear to lift.
+		return &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
+	}
 	if verdict.Denied() {
 		return a.externalSendingNotEnabledError(ctx, userID)
 	}
@@ -111,14 +116,29 @@ func (a *API) NotifySendingAccessRequest(ctx context.Context, userID string, req
 		log.Printf("[api] sending access request %s filed (no operator notification channel configured)", req.ID)
 		return
 	}
-	body := fmt.Sprintf("Account: %s\nRequest: %s\nExpected daily volume: %d\n\nWhat they are building:\n%s\n\nWho they will email:\n%s\n\n"+
+	// Operator-authored content first, customer text last and fenced: the
+	// free-text fields are customer-supplied and must never read as part of
+	// the command block (an injected "run this instead" line).
+	body := fmt.Sprintf("Account: %s\nRequest: %s\nExpected daily volume: %d\n\n"+
 		"Review, then decide with the audited local command:\n"+
 		"  e2a -inspect-external-sending -account-id %s\n"+
 		"  e2a -approve-external-sending -account-id %s -expected-external-sending-revision <rev> -external-sending-request-id %s -reason \"...\"\n"+
-		"  e2a -decline-external-sending-request -account-id %s -external-sending-request-id %s\n",
-		userID, req.ID, req.ExpectedDailyVolume, req.UseCase, req.Recipients,
-		userID, userID, req.ID, userID, req.ID)
+		"  e2a -decline-external-sending-request -account-id %s -external-sending-request-id %s\n\n"+
+		"--- customer-supplied (untrusted) ---\nWhat they are building:\n%s\n\nWho they will email:\n%s\n",
+		userID, req.ID, req.ExpectedDailyVolume,
+		userID, userID, req.ID, userID, req.ID,
+		quoteUntrusted(req.UseCase), quoteUntrusted(req.Recipients))
 	if err := a.sendFeedbackEmail(ctx, "External sending access request "+req.ID, "sending-access", body, "", "", to, cc); err != nil {
 		log.Printf("[api] sending access request %s: operator notification failed: %v", req.ID, err)
 	}
+}
+
+// quoteUntrusted prefixes every line of customer-supplied text with "> " so
+// it is visibly fenced off from operator content in the notification.
+func quoteUntrusted(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
 }
