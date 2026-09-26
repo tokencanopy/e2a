@@ -18,8 +18,20 @@ import { HttpFile } from '../http/http.js';
 
 export class AccountView {
     'agentEmail'?: string;
+    /**
+    * When the account was moved to the trash. Absent for a live account.
+    */
+    'deletedAt'?: Date;
     'limits': LimitsCapsView;
     'planCode': string;
+    /**
+    * When a trashed account becomes eligible for permanent purge. Absent for a live account.
+    */
+    'purgeAfter'?: Date;
+    /**
+    * When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore.
+    */
+    'restoredAt'?: Date;
     /**
     * Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent.
     */
@@ -44,6 +56,12 @@ export class AccountView {
             "format": ""
         },
         {
+            "name": "deletedAt",
+            "baseName": "deleted_at",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
             "name": "limits",
             "baseName": "limits",
             "type": "LimitsCapsView",
@@ -54,6 +72,18 @@ export class AccountView {
             "baseName": "plan_code",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "purgeAfter",
+            "baseName": "purge_after",
+            "type": "Date",
+            "format": "date-time"
+        },
+        {
+            "name": "restoredAt",
+            "baseName": "restored_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
             "name": "scope",

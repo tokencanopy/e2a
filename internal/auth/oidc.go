@@ -180,7 +180,9 @@ func NewOIDCAuth(ctx context.Context, cfg config.OIDCConfig, store *identity.Sto
 		metrics:             telemetry.NoOp{},
 	}
 	if store != nil {
-		oa.userLookup = store.GetUserByID
+		// Any-state: a sign-in that resolves to a TRASHED account must reach
+		// the restore interstitial (restricted session), not "user not found".
+		oa.userLookup = store.GetUserByIDAnyState
 	}
 	for _, opt := range opts {
 		opt(oa)
@@ -590,6 +592,14 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		// Never expose or log the raw database error or provider-derived user ID.
 		oa.recordCallback("user_lookup_failed", "trusted", http.StatusServiceUnavailable, true)
 		http.Error(w, "login temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if user.DeletedAt != nil {
+		if issueRestrictedSession(r.Context(), w, r, oa.store, user, oa.baseURL, oa.secure) {
+			oa.recordCallback("account_trashed", "trusted", http.StatusFound, false)
+		} else {
+			oa.recordCallback("session_failed", "trusted", http.StatusInternalServerError, true)
+		}
 		return
 	}
 	sessionToken, err := oa.store.CreateUserSession(r.Context(), user.ID)

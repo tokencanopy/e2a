@@ -381,7 +381,21 @@ type Deps struct {
 	// Shared transaction hook for both authenticated manual creation and the
 	// public recipient flow; the store invokes it only for a newly inserted row.
 	AgentSuppressionAddedHook identity.AgentSuppressionTxHook
-	DeleteUserData            func(ctx context.Context, user *identity.User) (*identity.DeleteUserDataResult, error)
+	// DeleteUserData trashes the account (permanent=false) or erases it now
+	// (permanent=true). Returns identity.ErrSendInProgress,
+	// identity.ErrTombstoneKeyUnavailable, identity.ErrPurgeInProgress.
+	DeleteUserData func(ctx context.Context, user *identity.User, permanent bool) (*identity.DeleteUserDataResult, error)
+
+	// Account restore interstitial (dashboard-only, not /v1). All optional;
+	// the /api/account/* routes are registered only when all three are set.
+	// RestrictedSession resolves the request's restricted session cookie to
+	// its trashed user and the session token (pgx.ErrNoRows when absent).
+	RestrictedSession func(r *http.Request) (*identity.User, string, error)
+	// RestoreAccount restores the trashed account and upgrades the session.
+	RestoreAccount func(ctx context.Context, userID, sessionToken string) (*identity.User, error)
+	// ClearSessionCookie expires the dashboard session cookie on the response
+	// (after an erase through the restricted session).
+	ClearSessionCookie func(w http.ResponseWriter)
 
 	// events (delivery log). EventQuery carries the filters + cursor
 	// position; the closures bind the events pool in main.
@@ -654,6 +668,9 @@ func New(deps Deps) *Server {
 	// Managed unsubscribe is a bearer-capability route, not an authenticated
 	// /v1 management operation. GET is deliberately read-only for link scanners.
 	root.Handle("/u/{token}", http.HandlerFunc(s.handlePublicUnsubscribe))
+
+	// Account-restore interstitial (restricted dashboard session only).
+	s.registerAccountRestoreRoutes()
 
 	// HITL magic-link pages (approve/reject confirmation + execution). Raw
 	// token-gated HTML handlers owned by internal/agent — NOT Huma

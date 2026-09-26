@@ -85,7 +85,7 @@ func TestDeleteUser_FiresBillingHook(t *testing.T) {
 		t.Fatalf("CreateOrGetUser: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); err != nil {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
 		t.Fatalf("DeleteUserDataCore: %v", err)
 	}
 
@@ -96,6 +96,7 @@ func TestDeleteUser_FiresBillingHook(t *testing.T) {
 	}
 	var hookBody struct {
 		UserID string `json:"user_id"`
+		Mode   string `json:"mode"`
 	}
 	if err := json.Unmarshal(rec.body, &hookBody); err != nil {
 		t.Fatalf("hook body not JSON: %v (body=%q)", err, string(rec.body))
@@ -103,11 +104,55 @@ func TestDeleteUser_FiresBillingHook(t *testing.T) {
 	if hookBody.UserID != user.ID {
 		t.Errorf("hook user_id = %q, want %q", hookBody.UserID, user.ID)
 	}
+	// The default delete is a trash: billing is asked to cancel at period
+	// end (revertible by a restore), not to cancel now.
+	if hookBody.Mode != "trash" {
+		t.Errorf("hook mode = %q, want trash", hookBody.Mode)
+	}
 	if got, want := rec.signature, expectedHMAC(secret, rec.body); got != want {
 		t.Errorf("signature mismatch:\n  got      %s\n  expected %s", got, want)
 	}
 	if _, err := store.GetUserByID(ctx, user.ID); err == nil {
-		t.Errorf("user still exists after delete; cascade should have removed them")
+		t.Errorf("trashed user still resolves through GetUserByID")
+	}
+	trashed, err := store.GetUserByIDAnyState(ctx, user.ID)
+	if err != nil || trashed.DeletedAt == nil {
+		t.Errorf("user should remain as a trashed row: %+v err=%v", trashed, err)
+	}
+}
+
+// TestDeleteUserPermanent_FiresPurgeHook: permanent=true erases the row and
+// notifies billing with mode purge — the call shape an older sidecar already
+// treats as "cancel".
+func TestDeleteUserPermanent_FiresPurgeHook(t *testing.T) {
+	secret := "test-internal-secret"
+	api, store, rec := setupCoreAPIWithBillingHook(t, secret, http.StatusNoContent)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "hook-purge@test.com", "Test", "google-hook-purge@test.com")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	res, err := api.DeleteUserDataCore(ctx, user, true)
+	if err != nil {
+		t.Fatalf("DeleteUserDataCore(permanent): %v", err)
+	}
+	if res.Mode != "permanent" || !res.UserDeleted {
+		t.Fatalf("receipt = %+v, want mode permanent + user_deleted", res)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var hookBody struct {
+		UserID string `json:"user_id"`
+		Mode   string `json:"mode"`
+	}
+	if err := json.Unmarshal(rec.body, &hookBody); err != nil {
+		t.Fatalf("hook body not JSON: %v", err)
+	}
+	if hookBody.UserID != user.ID || hookBody.Mode != "purge" {
+		t.Fatalf("hook body = %+v, want user %s mode purge", hookBody, user.ID)
+	}
+	if _, err := store.GetUserByIDAnyState(ctx, user.ID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("user row survived a permanent delete: err=%v", err)
 	}
 }
 
@@ -122,7 +167,7 @@ func TestDeleteUser_HookFailureDoesNotBlockDeletion(t *testing.T) {
 		t.Fatalf("CreateOrGetUser: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); err != nil {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
 		t.Fatalf("DeleteUserDataCore should not error on hook failure: %v", err)
 	}
 
@@ -159,7 +204,7 @@ func TestDeleteUser_SendInProgressDoesNotNotifyBilling(t *testing.T) {
 		t.Fatalf("mark sending: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); !errors.Is(err, identity.ErrSendInProgress) {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); !errors.Is(err, identity.ErrSendInProgress) {
 		t.Fatalf("DeleteUserDataCore = %v, want ErrSendInProgress", err)
 	}
 	rec.mu.Lock()
@@ -183,7 +228,7 @@ func TestDeleteUser_NoHookConfigured(t *testing.T) {
 		t.Fatalf("CreateOrGetUser: %v", err)
 	}
 
-	if _, err := api.DeleteUserDataCore(ctx, user); err != nil {
+	if _, err := api.DeleteUserDataCore(ctx, user, false); err != nil {
 		t.Fatalf("DeleteUserDataCore: %v", err)
 	}
 	if _, err := store.GetUserByID(ctx, user.ID); err == nil {

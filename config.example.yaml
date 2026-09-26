@@ -423,8 +423,28 @@ rate_limits:
 # knob. Minimum 1; live message data is otherwise retained indefinitely.
 # Override with
 # E2A_TRASH_RETENTION_DAYS.
+#
+# Deleting an ACCOUNT (DELETE /v1/account) also moves it to the trash: the
+# account is inert at once (keys, sessions and OAuth grants revoked, agents
+# trashed, sending stopped, domains unverified) and restorable by signing in
+# to the dashboard until it is purged. account_retention_days sets that
+# window; unset reuses retention_days, and 0 opts out (every account delete
+# erases immediately). E2A_TRASH_ACCOUNT_RETENTION_DAYS overrides it.
+#
+# identity_tombstones (hosted policy, default false): every account purge
+# holds the account's sign-in identity (login subject + email, as keyed
+# digests) for at least 30 days — two years, plus its verified domains, when
+# the account was paused for abuse — so a deleted identity cannot immediately
+# re-register, and keeps a compact deleted-account summary for the same
+# period. Requires the E2A_TOMBSTONE_KEY secret (env only):
+#   E2A_TOMBSTONE_KEY=v1:<base64 of >=32 random bytes>
+# Rotation: prepend a higher version (v2:...,v1:...); keep the old version
+# until -inspect-tombstone-keys shows no live tombstone still uses it.
+# E2A_TRASH_IDENTITY_TOMBSTONES=true overrides the flag.
 trash:
   retention_days: 30
+  # account_retention_days: 30
+  identity_tombstones: false
 
 # — Metrics (Prometheus) ——————————————————————————————————————————————————————
 # Off by default. When enabled, the server swaps its telemetry backend from

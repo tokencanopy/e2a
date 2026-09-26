@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/riverqueue/river"
@@ -42,6 +43,16 @@ type MessagePruner interface {
 	DeleteExpiredUserSessions(ctx context.Context) (int64, error)
 	PurgeDeletedAgents(ctx context.Context) (int64, error)
 	AuditThreadIdentity(ctx context.Context, afterID string) (identity.ThreadIdentityAuditResult, error)
+}
+
+// AccountPurger purges trashed accounts past their retention window and sweeps
+// the identity tombstones and deleted-account summaries past their hold
+// (docs/design/account-soft-deletion.md §4.5, §4.6). Optional: a nil purger
+// skips the pass. PurgeDeletedAccounts must run BEFORE PurgeDeletedAgents.
+type AccountPurger interface {
+	PurgeDeletedAccounts(ctx context.Context) (int64, error)
+	DeleteExpiredTombstones(ctx context.Context) (int64, error)
+	DeleteExpiredDeletedAccountSummaries(ctx context.Context) (int64, error)
 }
 
 // DeliveryPruner prunes expired webhook delivery records (*webhook.DeliveryStore).
@@ -103,6 +114,7 @@ type Janitor struct {
 	oauth        OAuthPruner // optional; nil when OAuth is not configured
 	idempotency  IdempotencyPruner
 	metrics      Metrics
+	accounts     AccountPurger // optional; nil skips the account pass
 
 	// River can overlap hourly sweeps after an exceptional >1h run. Serialize
 	// only the bounded topology audit so its rotating cursor cannot regress or
@@ -134,6 +146,13 @@ func New(
 	}
 }
 
+// WithAccountPurger installs the account purge pass. A nil purger (interface,
+// not a typed nil) leaves it disabled.
+func (j *Janitor) WithAccountPurger(p AccountPurger) *Janitor {
+	j.accounts = p
+	return j
+}
+
 // Sweep runs every prune once, sequentially, continuing past any individual
 // error. It preserves the exact per-prune logging and metrics emission of the
 // old hand-rolled ticker. Errors are accumulated and returned joined; the
@@ -148,6 +167,33 @@ func (j *Janitor) Sweep(ctx context.Context) error {
 	} else if deleted > 0 {
 		log.Printf("Purged %d message(s) past trash retention", deleted)
 		j.metrics.JanitorRowsDeleted("messages", int(deleted))
+	}
+
+	// Trashed accounts past their retention window, BEFORE the agent purge:
+	// the agent purge skips agents trashed by an account trash, so the
+	// account purge owns them and tombstones are always written first.
+	if j.accounts != nil {
+		purgedUsers, err := j.accounts.PurgeDeletedAccounts(ctx)
+		if purgedUsers > 0 {
+			log.Printf("Purged %d trashed account(s) past retention", purgedUsers)
+			j.metrics.JanitorRowsDeleted("users", int(purgedUsers))
+		}
+		if err != nil {
+			log.Printf("Failed to purge trashed accounts: %v", err)
+			errs = append(errs, err)
+		}
+		if deleted, err := j.accounts.DeleteExpiredTombstones(ctx); err != nil {
+			log.Printf("Failed to sweep expired identity tombstones: %v", err)
+			errs = append(errs, err)
+		} else if deleted > 0 {
+			j.metrics.JanitorRowsDeleted("identity_tombstones", int(deleted))
+		}
+		if deleted, err := j.accounts.DeleteExpiredDeletedAccountSummaries(ctx); err != nil {
+			log.Printf("Failed to sweep expired deleted-account summaries: %v", err)
+			errs = append(errs, err)
+		} else if deleted > 0 {
+			j.metrics.JanitorRowsDeleted("deleted_account_summaries", int(deleted))
+		}
 	}
 
 	// Trashed agents past TrashRetention: hard delete, messages included
@@ -369,4 +415,43 @@ func (m *MaintenanceJobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 // constructor unexported, so this is the only way to verify it directly.
 func janitorPeriodicConstructor() (river.JobArgs, *river.InsertOpts) {
 	return JanitorArgs{}, &river.InsertOpts{Queue: jobs.QueueMaintenance}
+}
+
+// LateAccountPurger is an AccountPurger bound after the janitor is built: the
+// account purge needs the agent API (its SES-teardown and billing hooks),
+// which cmd/e2a constructs after the River client — and so the janitor — has
+// started. Until Bind, every pass is a no-op.
+type LateAccountPurger struct {
+	p atomic.Pointer[AccountPurger]
+}
+
+// Bind installs the real purger.
+func (l *LateAccountPurger) Bind(p AccountPurger) { l.p.Store(&p) }
+
+func (l *LateAccountPurger) get() AccountPurger {
+	if p := l.p.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func (l *LateAccountPurger) PurgeDeletedAccounts(ctx context.Context) (int64, error) {
+	if p := l.get(); p != nil {
+		return p.PurgeDeletedAccounts(ctx)
+	}
+	return 0, nil
+}
+
+func (l *LateAccountPurger) DeleteExpiredTombstones(ctx context.Context) (int64, error) {
+	if p := l.get(); p != nil {
+		return p.DeleteExpiredTombstones(ctx)
+	}
+	return 0, nil
+}
+
+func (l *LateAccountPurger) DeleteExpiredDeletedAccountSummaries(ctx context.Context) (int64, error) {
+	if p := l.get(); p != nil {
+		return p.DeleteExpiredDeletedAccountSummaries(ctx)
+	}
+	return 0, nil
 }

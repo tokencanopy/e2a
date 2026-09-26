@@ -45,7 +45,7 @@ var errNoOwnerEmail = errors.New("owner has no email on record")
 // NotifierStore is the read surface the notifier needs beyond the webhook
 // row itself (which the worker passes in). *identity.Store satisfies it.
 type NotifierStore interface {
-	GetUserByID(ctx context.Context, id string) (*identity.User, error)
+	GetUserByIDAnyState(ctx context.Context, id string) (*identity.User, error)
 	RecentWebhookFailureStats(ctx context.Context, webhookID string, window time.Duration) (identity.WebhookFailureStats, error)
 }
 
@@ -180,7 +180,7 @@ func (n *Notifier) compose(ctx context.Context, wh *identity.Webhook, kind strin
 		return outbound.Envelope{}, fmt.Errorf("webhook notify: webhook is nil")
 	}
 
-	owner, err := n.store.GetUserByID(ctx, wh.UserID)
+	owner, err := n.store.GetUserByIDAnyState(ctx, wh.UserID)
 	if err != nil {
 		return outbound.Envelope{}, fmt.Errorf("webhook notify: lookup owner: %w", err)
 	}

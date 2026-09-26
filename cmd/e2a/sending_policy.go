@@ -35,6 +35,13 @@ type sendingProtectionFlags struct {
 	expectedExternal int64
 	requestID        string
 
+	// Account pause operator commands (pause classes, migration 122).
+	pauseAccount  bool
+	resumeAccount bool
+	inspectPause  bool
+	pauseClass    string
+	evidenceRef   string
+
 	expectedGeneration int64
 	expectedPolicySHA  string
 	grandfather        bool
@@ -51,13 +58,15 @@ type sendingProtectionFlags struct {
 
 func (f *sendingProtectionFlags) commandRequested() bool {
 	return f.inspect || f.activate || f.register || f.attest || f.capabilities || f.reconcile ||
-		f.inspectExternal || f.approveExternal || f.revokeExternal || f.declineExternal
+		f.inspectExternal || f.approveExternal || f.revokeExternal || f.declineExternal ||
+		f.pauseAccount || f.resumeAccount || f.inspectPause
 }
 
 func (f *sendingProtectionFlags) selectedCount() int {
 	n := 0
 	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile,
-		f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal} {
+		f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal,
+		f.pauseAccount, f.resumeAccount, f.inspectPause} {
 		if set {
 			n++
 		}
@@ -121,6 +130,8 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 		return runReconcileLegacySendingJobs(ctx, pool, sendingpolicy.NewGate(pool, secrets, source, policy), stdout)
 	case f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal:
 		return runExternalSendingCommand(ctx, sendingpolicy.NewPolicyModule(pool, secrets, source, policy), f, stdout)
+	case f.pauseAccount, f.resumeAccount, f.inspectPause:
+		return runAccountPauseCommand(ctx, sendingpolicy.NewPolicyModule(pool, secrets, source, policy), f, stdout)
 	}
 	return errors.New("no sending-protection command selected")
 }
@@ -366,5 +377,57 @@ func printExternalAccess(stdout io.Writer, rec sendingpolicy.ExternalAccessRecor
 	fmt.Fprintf(stdout, "sending_paused:           %v\n", rec.Paused)
 	if rec.PendingRequestID != "" {
 		fmt.Fprintf(stdout, "pending_request_id:       %s\n", rec.PendingRequestID)
+	}
+}
+
+// runAccountPauseCommand pauses, resumes or inspects an account's sending.
+// Like the external-sending commands, this is operator-only: there is no
+// HTTP, SDK or MCP route. A pause requires -pause-class and -reason, and may
+// carry a private -evidence-ref (e.g. an incident id) that the account's
+// deleted-account summary retains after purge. It works on trashed accounts
+// too: pausing a trashed account with -pause-class abuse makes its purge
+// write abuse tombstones.
+func runAccountPauseCommand(ctx context.Context, module *sendingpolicy.Module, f *sendingProtectionFlags, stdout io.Writer) error {
+	if strings.TrimSpace(f.accountID) == "" {
+		return errors.New("account pause commands require -account-id")
+	}
+	if f.inspectPause {
+		rec, err := module.InspectAccountPause(ctx, f.accountID)
+		if err != nil {
+			return err
+		}
+		printAccountPause(stdout, rec)
+		return nil
+	}
+	if f.pauseAccount && strings.TrimSpace(f.pauseClass) == "" {
+		return errors.New("-pause-account-sending requires -pause-class (operator, abuse, billing or system)")
+	}
+	rec, err := module.SetAccountPause(ctx, sendingpolicy.AccountPauseChange{
+		AccountID:   f.accountID,
+		Paused:      f.pauseAccount,
+		Class:       f.pauseClass,
+		EvidenceRef: f.evidenceRef,
+		Actor:       cliActor(),
+		Reason:      f.reason,
+	})
+	if err != nil {
+		return err
+	}
+	printAccountPause(stdout, rec)
+	return nil
+}
+
+// printAccountPause prints the operator readback. Account id and state only —
+// never an address.
+func printAccountPause(stdout io.Writer, rec sendingpolicy.AccountPauseRecord) {
+	fmt.Fprintf(stdout, "account_id:     %s\n", rec.AccountID)
+	fmt.Fprintf(stdout, "account_status: %s\n", rec.AccountStatus)
+	fmt.Fprintf(stdout, "sending_state:  %s\n", rec.State)
+	fmt.Fprintf(stdout, "pause_class:    %s\n", rec.PauseClass)
+	if rec.Reason != "" {
+		fmt.Fprintf(stdout, "reason:         %s\n", rec.Reason)
+	}
+	if rec.EvidenceRef != "" {
+		fmt.Fprintf(stdout, "evidence_ref:   %s\n", rec.EvidenceRef)
 	}
 }

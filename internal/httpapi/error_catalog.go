@@ -23,6 +23,9 @@ var errorCodeCatalog = []errorCodeContract{
 	{Code: "blocked_by_policy", Status: "403", Family: "auth"},
 	{Code: "sending_paused", Status: "403", Family: "auth"},
 	{Code: "external_sending_not_enabled", Status: "403", Family: "auth", DetailsSchema: "ExternalSendingNotEnabledDetails"},
+	// An identity held by a live identity tombstone (a recently deleted or
+	// abuse-closed account) cannot register or be restored.
+	{Code: "registration_refused", Status: "403", Family: "auth"},
 	{Code: "invalid_request", Status: "400 / 422", Family: "validation", DetailsSchema: "ValidationErrorDetails"},
 	{Code: "invalid_cursor", Status: "400", Family: "validation"},
 	{Code: "invalid_filter", Status: "400", Family: "validation"},

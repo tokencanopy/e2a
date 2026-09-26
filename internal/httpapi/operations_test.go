@@ -404,7 +404,7 @@ func testServer(t *testing.T, opts ...func(*Deps)) *httptest.Server {
 		ExportUserData: func(ctx context.Context, userID string) (*identity.UserExport, error) {
 			return &identity.UserExport{}, nil
 		},
-		DeleteUserData: func(ctx context.Context, user *identity.User) (*identity.DeleteUserDataResult, error) {
+		DeleteUserData: func(ctx context.Context, user *identity.User, permanent bool) (*identity.DeleteUserDataResult, error) {
 			return &identity.DeleteUserDataResult{}, nil
 		},
 		EventsEnabled: true,

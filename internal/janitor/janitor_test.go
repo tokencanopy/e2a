@@ -421,3 +421,73 @@ func TestMaintenanceJobs_RegistersOnePeriodic(t *testing.T) {
 		t.Fatalf("RegisterJobs returned %d periodic jobs, want 1", len(periodics))
 	}
 }
+
+// orderedAccountPurger records when the account pass ran relative to the
+// agent purge.
+type orderedAccountPurger struct {
+	f     *fakePruner
+	order *[]string
+	err   error
+}
+
+func (o *orderedAccountPurger) PurgeDeletedAccounts(context.Context) (int64, error) {
+	*o.order = append(*o.order, "accounts")
+	if o.f.agentsCalled != 0 {
+		*o.order = append(*o.order, "agents-ran-first")
+	}
+	return 4, o.err
+}
+
+func (o *orderedAccountPurger) DeleteExpiredTombstones(context.Context) (int64, error) {
+	*o.order = append(*o.order, "tombstones")
+	return 6, nil
+}
+
+func (o *orderedAccountPurger) DeleteExpiredDeletedAccountSummaries(context.Context) (int64, error) {
+	*o.order = append(*o.order, "summaries")
+	return 8, nil
+}
+
+// TestSweep_PurgesAccountsBeforeAgents: the account purge owns an account's
+// agents (the agent purge skips trashed_by_account), so it must run first; its
+// progress is counted under "users" and the residue sweeps under their tables.
+func TestSweep_PurgesAccountsBeforeAgents(t *testing.T) {
+	f := &fakePruner{}
+	var order []string
+	m := &fakeMetrics{}
+	j := janitor.New(f, f, f, f, f, f, m).WithAccountPurger(&orderedAccountPurger{f: f, order: &order, err: errors.New("one poison account")})
+	if err := j.Sweep(context.Background()); err == nil {
+		t.Fatal("Sweep swallowed the account purge error")
+	}
+	if len(order) != 3 || order[0] != "accounts" {
+		t.Fatalf("account pass order = %v, want accounts (before agents), tombstones, summaries", order)
+	}
+	if f.agentsCalled != 1 {
+		t.Fatalf("the agent purge did not run after an account purge error")
+	}
+	want := map[string]int{"users": 4, "identity_tombstones": 6, "deleted_account_summaries": 8}
+	for _, c := range m.calls {
+		if n, ok := want[c.table]; ok {
+			if c.count != n {
+				t.Errorf("metric %s = %d, want %d", c.table, c.count, n)
+			}
+			delete(want, c.table)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing metrics %v in %+v", want, m.calls)
+	}
+}
+
+// TestLateAccountPurgerIsANoOpUntilBound.
+func TestLateAccountPurgerIsANoOpUntilBound(t *testing.T) {
+	late := &janitor.LateAccountPurger{}
+	if n, err := late.PurgeDeletedAccounts(context.Background()); n != 0 || err != nil {
+		t.Fatalf("unbound purger = %d, %v", n, err)
+	}
+	var order []string
+	late.Bind(&orderedAccountPurger{f: &fakePruner{}, order: &order})
+	if n, _ := late.PurgeDeletedAccounts(context.Background()); n != 4 {
+		t.Fatalf("bound purger = %d, want the real pass", n)
+	}
+}

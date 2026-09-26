@@ -631,6 +631,30 @@ type TrashConfig struct {
 	// stable API documents); the server refuses to start on a lower value.
 	// Override with E2A_TRASH_RETENTION_DAYS.
 	RetentionDays int `yaml:"retention_days"`
+	// AccountRetentionDays is how many days a deleted ACCOUNT stays in the
+	// trash (restorable by signing in) before the janitor purges it. Unset
+	// (nil) reuses RetentionDays. An explicit 0 opts the deployment out of
+	// account trash: DELETE /v1/account then erases immediately, as before
+	// account soft deletion existed. Override with
+	// E2A_TRASH_ACCOUNT_RETENTION_DAYS.
+	AccountRetentionDays *int `yaml:"account_retention_days"`
+	// IdentityTombstones enables identity tombstones: every account purge
+	// holds the account's login subject(s) and email (and, for an
+	// abuse-paused account, its verified domains) as keyed digests so the
+	// same identity cannot immediately register a new account, and writes a
+	// deleted-account summary. Hosted policy, off by default. Requires the
+	// E2A_TOMBSTONE_KEY secret; without it signup fails closed (503) and
+	// purges are skipped. Override with E2A_TRASH_IDENTITY_TOMBSTONES.
+	IdentityTombstones bool `yaml:"identity_tombstones"`
+}
+
+// AccountRetention returns the effective account trash window in days
+// (0 = account trash disabled).
+func (t TrashConfig) AccountRetention() int {
+	if t.AccountRetentionDays == nil {
+		return t.RetentionDays
+	}
+	return *t.AccountRetentionDays
 }
 
 func Load(path string) (*Config, error) {
@@ -916,6 +940,14 @@ func Load(path string) (*Config, error) {
 			cfg.Trash.RetentionDays = d
 		}
 	}
+	if v := os.Getenv("E2A_TRASH_ACCOUNT_RETENTION_DAYS"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil {
+			cfg.Trash.AccountRetentionDays = &d
+		}
+	}
+	if v := os.Getenv("E2A_TRASH_IDENTITY_TOMBSTONES"); v != "" {
+		cfg.Trash.IdentityTombstones = v == "true" || v == "1"
+	}
 	if v := os.Getenv("E2A_DELIVERY_SES_CONFIGURATION_SET"); v != "" {
 		cfg.DeliveryFeedback.SESConfigurationSet = v
 	}
@@ -976,6 +1008,9 @@ func (c *Config) Validate() error {
 		if err != nil || apiURL.RawQuery != "" || apiURL.Fragment != "" {
 			return errors.New("config: http.api_url must be an absolute http(s) URL without userinfo, query, or fragment")
 		}
+	}
+	if c.Trash.AccountRetentionDays != nil && *c.Trash.AccountRetentionDays < 0 {
+		return fmt.Errorf("config: trash.account_retention_days must be 0 (erase immediately) or a positive number of days (got %d)", *c.Trash.AccountRetentionDays)
 	}
 	if c.Trash.RetentionDays < 1 {
 		return fmt.Errorf("config: trash.retention_days must be at least 1 (got %d) — the stable API promises soft-deleted resources stay restorable", c.Trash.RetentionDays)

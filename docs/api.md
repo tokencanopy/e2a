@@ -321,6 +321,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `blocked_by_policy` | 403 | **Experimental.** The outbound message was blocked by the agent's outbound policy gate. |
 | `sending_paused` | 403 | **Experimental.** Outbound sending is paused for the account by the platform abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
 | `external_sending_not_enabled` | 403 | **Experimental.** The account may not send to one or more of the To/Cc/Bcc recipients through its sending identity. Nothing was queued. `error.details` (`ExternalSendingNotEnabledDetails`) lists the allowed destinations and the dashboard recovery URL; retrying the same request will not succeed. |
+| `registration_refused` | 403 | The sign-in identity (login subject or email) belongs to a recently deleted or abuse-closed account and cannot register a new account or restore the old one. Retrying will not succeed; see the privacy policy for the hold periods. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |

@@ -125,6 +125,27 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		writeProvisionError(w, http.StatusConflict, "external_principal_conflict")
 		return
 	}
+	if errors.Is(err, identity.ErrAccountTrashed) {
+		// The ref resolves to an account in the trash. Nothing was written and
+		// nothing is restored: restore is interactive only (the dashboard
+		// interstitial). Terminal for this principal until the user acts — a
+		// control plane must surface it, never retry.
+		a.recordProvisioning("rejected", "authenticated", http.StatusConflict)
+		writeProvisionError(w, http.StatusConflict, "account_trashed")
+		return
+	}
+	if errors.Is(err, identity.ErrRegistrationRefused) {
+		// The subject or email is held by a live identity tombstone (a
+		// recently deleted or abuse-closed account). Nothing was written.
+		a.recordProvisioning("rejected", "authenticated", http.StatusForbidden)
+		writeProvisionError(w, http.StatusForbidden, "registration_refused")
+		return
+	}
+	if errors.Is(err, identity.ErrTombstoneKeyUnavailable) {
+		a.recordProvisioning("internal_error", "authenticated", http.StatusServiceUnavailable)
+		writeProvisionError(w, http.StatusServiceUnavailable, "registration_unavailable")
+		return
+	}
 	if err != nil {
 		log.Printf("[api] provision user failed: %v", err)
 		a.recordProvisioning("internal_error", "authenticated", http.StatusInternalServerError)
@@ -235,6 +256,15 @@ func (a *API) handleAttachExternalPrincipal(w http.ResponseWriter, r *http.Reque
 		return
 	case errors.Is(err, identity.ErrExternalPrincipalUserNotFound):
 		writeProvisionError(w, http.StatusNotFound, "user_not_found")
+		return
+	case errors.Is(err, identity.ErrAccountTrashed):
+		writeProvisionError(w, http.StatusConflict, "account_trashed")
+		return
+	case errors.Is(err, identity.ErrRegistrationRefused):
+		writeProvisionError(w, http.StatusForbidden, "registration_refused")
+		return
+	case errors.Is(err, identity.ErrTombstoneKeyUnavailable):
+		writeProvisionError(w, http.StatusServiceUnavailable, "registration_unavailable")
 		return
 	case err != nil:
 		log.Printf("[api] attach external principal failed: %v", err)

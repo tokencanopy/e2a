@@ -258,14 +258,15 @@ export class ObservableAccountApi {
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
-     * Delete your account + all data (irreversible)
-     * @param confirm Must be the literal DELETE — this action is irreversible.
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead. On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Delete your account (trash by default; permanent=true erases now)
+     * @param confirm Must be the literal DELETE. The default action moves the account to the trash; permanent&#x3D;true is irreversible.
+     * @param [permanent] Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
      */
-    public deleteAccountWithHttpInfo(confirm: 'DELETE', _options?: ConfigurationOptions): Observable<HttpInfo<DeleteUserDataResult>> {
+    public deleteAccountWithHttpInfo(confirm: 'DELETE', permanent?: boolean, _options?: ConfigurationOptions): Observable<HttpInfo<DeleteUserDataResult>> {
         const _config = mergeConfiguration(this.configuration, _options);
 
-        const requestContextPromise = this.requestFactory.deleteAccount(confirm, _config);
+        const requestContextPromise = this.requestFactory.deleteAccount(confirm, permanent, _config);
         // build promise chain
         let middlewarePreObservable = from<RequestContext>(requestContextPromise);
         for (const middleware of _config.middleware) {
@@ -283,12 +284,13 @@ export class ObservableAccountApi {
     }
 
     /**
-     * Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
-     * Delete your account + all data (irreversible)
-     * @param confirm Must be the literal DELETE — this action is irreversible.
+     * Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead. On deployments that disable account trash, every deletion is permanent. Either way the account\'s sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+     * Delete your account (trash by default; permanent=true erases now)
+     * @param confirm Must be the literal DELETE. The default action moves the account to the trash; permanent&#x3D;true is irreversible.
+     * @param [permanent] Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
      */
-    public deleteAccount(confirm: 'DELETE', _options?: ConfigurationOptions): Observable<DeleteUserDataResult> {
-        return this.deleteAccountWithHttpInfo(confirm, _options).pipe(map((apiResponse: HttpInfo<DeleteUserDataResult>) => apiResponse.data));
+    public deleteAccount(confirm: 'DELETE', permanent?: boolean, _options?: ConfigurationOptions): Observable<DeleteUserDataResult> {
+        return this.deleteAccountWithHttpInfo(confirm, permanent, _options).pipe(map((apiResponse: HttpInfo<DeleteUserDataResult>) => apiResponse.data));
     }
 
     /**

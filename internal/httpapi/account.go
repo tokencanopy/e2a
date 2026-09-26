@@ -38,6 +38,13 @@ type AccountView struct {
 	// object (booleans only). Omitted when the deployment does not wire it or
 	// its state could not be read.
 	SendingAccess *SendingAccessView `json:"sending_access,omitempty" doc:"External sending access eligibility (beta). Booleans only; describes what the account may do, not a promise that a given send passes pause, quota, content or domain checks. Omitted when the deployment does not enable external sending access, or when its state is unavailable."`
+	// Account-trash lifecycle (additive). A trashed account cannot
+	// authenticate to /v1, so deleted_at/purge_after are present only on
+	// surfaces that can see a trashed account; restored_at marks the last
+	// restore so a client can show a one-time notice.
+	DeletedAt  *time.Time `json:"deleted_at,omitempty" doc:"When the account was moved to the trash. Absent for a live account."`
+	PurgeAfter *time.Time `json:"purge_after,omitempty" doc:"When a trashed account becomes eligible for permanent purge. Absent for a live account."`
+	RestoredAt *time.Time `json:"restored_at,omitempty" doc:"When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore."`
 }
 
 type LimitsCapsView struct {
@@ -97,8 +104,8 @@ func (s *Server) registerAccount() {
 
 	registerOp(s.API, huma.Operation{
 		OperationID: "deleteAccount", Method: http.MethodDelete, Path: "/v1/account",
-		Summary: "Delete your account + all data (irreversible)", Tags: []string{"account"},
-		Description: "Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.",
+		Summary: "Delete your account (trash by default; permanent=true erases now)", Tags: []string{"account"},
+		Description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.",
 		Security:    []map[string][]string{{"bearer": {}}},
 		Responses: map[string]*huma.Response{
 			"409": s.jsonResponse(reflect.TypeOf(ErrorEnvelope{}), "ErrorEnvelope",
@@ -266,7 +273,8 @@ func (s *Server) handleExportUserData(ctx context.Context, _ *struct{}) (*export
 }
 
 type deleteAccountInput struct {
-	DeleteConfirm
+	Confirm   string `query:"confirm" enum:"DELETE" required:"true" doc:"Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible."`
+	Permanent bool   `query:"permanent" doc:"Erase the account and all its data immediately instead of moving it to the trash. Irreversible."`
 }
 
 type deleteAccountOutput struct {
@@ -283,19 +291,34 @@ func (s *Server) handleDeleteAccount(ctx context.Context, in *deleteAccountInput
 	if s.deps.DeleteUserData == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "delete unavailable")
 	}
-	res, err := s.deps.DeleteUserData(ctx, user)
+	res, err := s.deps.DeleteUserData(ctx, user, in.Permanent)
 	if err != nil {
-		if errors.Is(err, identity.ErrSendInProgress) {
-			return nil, NewError(http.StatusConflict, "send_in_progress",
-				"an outbound provider call is still in progress; retry after it finishes")
-		}
-		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete user data")
+		return nil, accountDeleteError(err)
 	}
 	// Conform to the uniform delete-object shape: every delete op returns
 	// {deleted:true, ...}; the account receipt keeps its per-table cascade
 	// counts on top of that base.
 	res.Deleted = true
 	return &deleteAccountOutput{Body: res}, nil
+}
+
+// accountDeleteError maps a DeleteUserData failure to the envelope.
+func accountDeleteError(err error) error {
+	switch {
+	case errors.Is(err, identity.ErrSendInProgress):
+		return NewError(http.StatusConflict, "send_in_progress",
+			"an outbound provider call is still in progress; retry after it finishes")
+	case errors.Is(err, identity.ErrPurgeInProgress):
+		return NewError(http.StatusConflict, "purge_in_progress",
+			"permanent erasure of this account is already in progress")
+	case errors.Is(err, identity.ErrTombstoneKeyUnavailable):
+		// A dependency, not the caller: the account is left in the trash and
+		// the erase can be retried.
+		return NewError(http.StatusServiceUnavailable, "internal_error",
+			"account erasure is temporarily unavailable; the account remains in the trash — retry later")
+	default:
+		return NewError(http.StatusInternalServerError, "internal_error", "failed to delete user data")
+	}
 }
 
 func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOutput, error) {
@@ -340,5 +363,8 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 		Usage:         usage,
 		UpgradeURL:    caps.UpgradeURL,
 		SendingAccess: s.accountSendingAccess(ctx, user.ID),
+		DeletedAt:     user.DeletedAt,
+		PurgeAfter:    user.PurgeAfter(),
+		RestoredAt:    user.RestoredAt,
 	}}, nil
 }

@@ -174,9 +174,21 @@ components:
       properties:
         agent_email:
           type: string
+        deleted_at:
+          description: When the account was moved to the trash. Absent for a live account.
+          format: date-time
+          type: string
         limits:
           $ref: "#/components/schemas/LimitsCapsView"
         plan_code:
+          type: string
+        purge_after:
+          description: When a trashed account becomes eligible for permanent purge. Absent for a live account.
+          format: date-time
+          type: string
+        restored_at:
+          description: "When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore."
+          format: date-time
           type: string
         scope:
           description: "Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent."
@@ -1442,7 +1454,7 @@ components:
           format: int64
           type: integer
         deleted:
-          description: Always true — the account no longer exists. A failed delete is an error envelope, never deleted:false.
+          description: Always true — the account is no longer usable. A failed delete is an error envelope, never deleted:false.
           type: boolean
         domains_deleted:
           format: int64
@@ -1450,6 +1462,9 @@ components:
         messages_deleted:
           format: int64
           type: integer
+        mode:
+          description: "How the account was deleted. trash: the account is inert and restorable by signing in to the dashboard until purge_after, after which it is purged; messages_deleted is 0 and the other counts describe rows trashed, revoked or unverified. permanent: the content was erased now (?permanent=true, or a deployment with account trash disabled) and the counts are the rows removed. Open set: tolerate unknown values."
+          type: string
         oauth_access_tokens_deleted:
           format: int64
           type: integer
@@ -1459,6 +1474,10 @@ components:
         oauth_refresh_tokens_deleted:
           format: int64
           type: integer
+        purge_after:
+          description: When the trashed account becomes eligible for permanent purge. Present only when mode is trash.
+          format: date-time
+          type: string
         sessions_deleted:
           format: int64
           type: integer
@@ -1469,6 +1488,7 @@ components:
           format: int64
           type: integer
         user_deleted:
+          description: True only when the account row itself was erased (mode permanent).
           type: boolean
       required:
         - deleted
@@ -1988,7 +2008,7 @@ components:
       additionalProperties: true
       properties:
         code:
-          description: "Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, sending_paused, external_sending_not_enabled, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found, gone, conflict, precondition_failed, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, purge_in_progress, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, contact_limit_reached, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, auth_unavailable, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental), sending_paused (403, outbound sending is paused for the account by the platform abuse controls; queued mail is held, new sends are refused until an operator resumes; experimental), external_sending_not_enabled (403, the account may not send to one or more of the recipients through its sending identity — see ExternalSendingNotEnabledDetails for the allowed destinations and the dashboard recovery URL; nothing was queued and retrying the same request will not succeed; experimental). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), precondition_failed (412, optimistic-concurrency validator is stale), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), purge_in_progress (409, permanent delete already claimed), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), contact_limit_reached, template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503), auth_unavailable (503, an auth backend — e.g. a delegated-token verifier or the identity store — could not judge the credential; retry). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."
+          description: "Machine-branchable error code — the stable discriminator clients switch on. Open set: treat it as a string and tolerate unknown values, since new codes may be added over time (branch on the ones you handle, fall back to the HTTP status otherwise). Exact current vocabulary (machine-checked): unauthorized, forbidden, blocked_by_policy, sending_paused, external_sending_not_enabled, registration_refused, invalid_request, invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope, reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty, recipient_suppressed, not_found, attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found, gone, conflict, precondition_failed, agent_taken, domain_taken, alias_taken, address_in_trash, message_held, message_not_pending, message_not_yet_delivered, not_in_trash, purge_in_progress, send_in_progress, webhook_disabled, webhook_cooldown, domain_not_registered, domain_has_agents, domain_not_verified, inbound_mx_missing, limit_exceeded, rate_limited, contact_limit_reached, template_limit_reached, webhook_limit_reached, idempotency_in_flight, idempotency_key_reuse, payload_too_large, attachment_too_large, not_implemented, events_log_disabled, limits_unavailable, inbound_mx_check_failed, auth_unavailable, internal_error, method_not_allowed, unsupported_media_type, error. Grouped semantics: auth: unauthorized (401), forbidden (403), blocked_by_policy (403, outbound policy gate; experimental), sending_paused (403, outbound sending is paused for the account by the platform abuse controls; queued mail is held, new sends are refused until an operator resumes; experimental), external_sending_not_enabled (403, the account may not send to one or more of the recipients through its sending identity — see ExternalSendingNotEnabledDetails for the allowed destinations and the dashboard recovery URL; nothing was queued and retrying the same request will not succeed; experimental), registration_refused (403, the sign-in identity belongs to a recently deleted or closed account and cannot register or be restored; retrying will not succeed). Validation: invalid_request is the single canonical code for input-validation failures whether they arrive as 400 (malformed) or 422 (semantically invalid); field/resource-specific invalid_* refinements (invalid_cursor, invalid_filter, invalid_domain, invalid_slug, invalid_recipient, invalid_attachment, invalid_template, invalid_event_type, invalid_webhook_url, invalid_expires_at, invalid_scope), reserved_domain, too_many_recipients, template_render_failed, template_rendered_empty (all 400); recipient_suppressed (422). Not found: not_found (404) plus the *_not_found family (attachment_not_found, contact_not_found, engagement_not_found, import_batch_not_found, template_not_found, starter_template_not_found); gone (410, past retention). Conflict/state: conflict (409, generic), precondition_failed (412, optimistic-concurrency validator is stale), the *_taken family — the requested identifier is already claimed — (agent_taken, domain_taken, alias_taken, all 409), address_in_trash (409), message_held (409), message_not_pending (409), message_not_yet_delivered (409, retry after the source outbound message is sent), not_in_trash (409), purge_in_progress (409, permanent delete already claimed), send_in_progress (409), webhook_disabled (409), webhook_cooldown (409), domain_not_registered (400), domain_has_agents (400), domain_not_verified (400 on create-agent, 403 on send), inbound_mx_missing (400). Capacity: limit_exceeded (402, plan quota — see LimitExceededDetails), rate_limited (429, request rate — see RateLimitedDetails), contact_limit_reached, template_limit_reached and webhook_limit_reached (400, fixed per-account caps). Idempotency: idempotency_in_flight (409, wait then retry the byte-identical request), idempotency_key_reuse (422, caller bug — do not retry as-is). Size: payload_too_large (413, request body), attachment_too_large (413, inline fetch over the cap — use download_url). Availability: not_implemented (501, feature not available on this deployment), events_log_disabled (501), limits_unavailable (503), inbound_mx_check_failed (503), auth_unavailable (503, an auth backend — e.g. a delegated-token verifier or the identity store — could not judge the credential; retry). Server/fallback: internal_error (5xx), method_not_allowed (405), unsupported_media_type (415), and the generic code error for any otherwise-unmapped status."
           type: string
           x-e2a-error-contracts:
             address_in_trash:
@@ -2259,6 +2279,11 @@ components:
               retryable: false
               statuses:
                 - 422
+            registration_refused:
+              family: auth
+              retryable: false
+              statuses:
+                - 403
             reserved_domain:
               family: validation
               retryable: false
@@ -5318,19 +5343,26 @@ openapi: 3.1.0
 paths:
   /v1/account:
     delete:
-      description: Permanently deletes the account and cascades all owned data. Requires ?confirm=DELETE. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true plus per-table cascade counts) — like every delete op, which all return 200 + a deletion object.
+      description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object."
       operationId: deleteAccount
       parameters:
-        - description: Must be the literal DELETE — this action is irreversible.
+        - description: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.
           explode: false
           in: query
           name: confirm
           required: true
           schema:
-            description: Must be the literal DELETE — this action is irreversible.
+            description: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.
             enum:
               - DELETE
             type: string
+        - description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+          explode: false
+          in: query
+          name: permanent
+          schema:
+            description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+            type: boolean
       responses:
         "200":
           content:
@@ -5361,7 +5393,7 @@ paths:
               $ref: "#/components/headers/XRequestID"
       security:
         - bearer: []
-      summary: Delete your account + all data (irreversible)
+      summary: Delete your account (trash by default; permanent=true erases now)
       tags:
         - account
     get:

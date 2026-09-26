@@ -20,7 +20,7 @@ type stubStore struct {
 	statsErr error
 }
 
-func (s *stubStore) GetUserByID(_ context.Context, _ string) (*identity.User, error) {
+func (s *stubStore) GetUserByIDAnyState(_ context.Context, _ string) (*identity.User, error) {
 	return s.owner, s.ownerErr
 }
 
