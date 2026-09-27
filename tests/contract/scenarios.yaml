@@ -3277,7 +3277,8 @@ scenarios:
   - name: external_sending_access_restricted_account
     description: >
       External sending access over the wire. The contract server enforces the
-      control with a far-future cohort cutoff, so ONLY the restricted account
+      control with a far-future cohort cutoff and the default unlock set (all
+      three, reported as available_unlocks), so ONLY the restricted account
       ({restricted_api_key}) is in the cohort. It may send to its verified
       owner email and its own live agents; any external To, Cc or Bcc refuses
       the WHOLE send with 403 external_sending_not_enabled and nothing is
@@ -3297,6 +3298,12 @@ scenarios:
             "sending_access.shared_external_approved": false
             "sending_access.paid_external_sending_entitled": false
             "sending_access.owner_recipient_verified": true
+            # The contract server leaves `unlocks` unset: the default is
+            # every unlock, reported in canonical order.
+            "sending_access.available_unlocks.length": 3
+            "sending_access.available_unlocks[0]": operator_approval
+            "sending_access.available_unlocks[1]": verified_domain
+            "sending_access.available_unlocks[2]": paid_entitlement
 
       - id: primary_account_is_outside_the_cohort
         action: request
