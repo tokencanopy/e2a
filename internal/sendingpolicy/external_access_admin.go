@@ -334,7 +334,7 @@ func normalizeRequestText(s string) string {
 }
 
 // hasForbiddenRequestRune reports a control character other than LF and TAB,
-// or a Unicode line/paragraph separator. Either could break out of the
+// a Unicode line/paragraph separator, or a bidi override/isolate control. Either could break out of the
 // "> " fence that marks customer text as untrusted in the operator email.
 func hasForbiddenRequestRune(s string) bool {
 	for _, r := range s {
@@ -344,6 +344,10 @@ func hasForbiddenRequestRune(s string) bool {
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
 			return true
 		case r == '\u2028' || r == '\u2029':
+			return true
+		case (r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069'):
+			// Bidi embedding/override/isolate controls can visually reorder
+			// the operator email so customer text reads as operator text.
 			return true
 		}
 	}
@@ -512,32 +516,46 @@ type AccessRequestListing struct {
 // worklist, not an export.
 const maxAccessRequestListing = 500
 
-// ListAccessRequests returns pending requests (or, with all, every request)
-// oldest first, each with the account's current grant. It is the operator's
-// queue: the new-request email is a notification, not the system of record.
-func (m *Module) ListAccessRequests(ctx context.Context, all bool) ([]AccessRequestListing, error) {
+// MaxAccessRequestListing exposes the listing bound for callers that report
+// truncation.
+const MaxAccessRequestListing = maxAccessRequestListing
+
+// ListAccessRequests returns the operator's queue, each row with the
+// account's current grant: pending requests oldest first (review order), or
+// with all every request NEWEST first, so the bound drops the oldest history
+// rather than the latest activity. truncated reports that more rows exist
+// than the bound returned. The new-request email is a notification, not the
+// system of record.
+func (m *Module) ListAccessRequests(ctx context.Context, all bool) (reqs []AccessRequestListing, truncated bool, err error) {
+	order := "r.created_at, r.id"
+	if all {
+		order = "r.created_at DESC, r.id DESC"
+	}
 	rows, err := m.pool.Query(ctx, `
 		SELECT r.id, r.user_id, r.state, r.created_at, r.decided_at, r.expected_daily_volume,
 		       COALESCE(c.external_sending_approved, false)
 		  FROM external_sending_access_requests AS r
 		  LEFT JOIN account_sending_controls AS c ON c.user_id = r.user_id
 		 WHERE $1 OR r.state = 'pending'
-		 ORDER BY r.created_at, r.id
-		 LIMIT $2`, all, maxAccessRequestListing)
+		 ORDER BY `+order+`
+		 LIMIT $2`, all, maxAccessRequestListing+1)
 	if err != nil {
-		return nil, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
+		return nil, false, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
 	}
 	defer rows.Close()
 	var out []AccessRequestListing
 	for rows.Next() {
 		var l AccessRequestListing
 		if err := rows.Scan(&l.ID, &l.AccountID, &l.State, &l.CreatedAt, &l.DecidedAt, &l.ExpectedDailyVolume, &l.Approved); err != nil {
-			return nil, fmt.Errorf("sendingpolicy: scan sending access request: %w", err)
+			return nil, false, fmt.Errorf("sendingpolicy: scan sending access request: %w", err)
 		}
 		out = append(out, l)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
+		return nil, false, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
 	}
-	return out, nil
+	if len(out) > maxAccessRequestListing {
+		return out[:maxAccessRequestListing], true, nil
+	}
+	return out, false, nil
 }

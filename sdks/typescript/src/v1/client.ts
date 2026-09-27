@@ -974,8 +974,11 @@ class AccountResource {
    * File ONE request; the decision is emailed to the account owner. Idempotent
    * while a request is pending: submitting again returns the SAME pending
    * request instead of creating a second one. Capped at 3 requests per 30
-   * days (`E2ARateLimitError` beyond that). Filing never grants access by
-   * itself. Account-scoped credentials only.
+   * days (`E2ARateLimitError` beyond that). Throws `E2AError` with code
+   * `conflict` (409) when the account is not currently restricted (already
+   * approved, outside the rollout, or lifted by an available unlock) —
+   * nothing is filed; do not retry. Filing never grants access by itself.
+   * Account-scoped credentials only.
    */
   requestSendingAccess(body: SendingAccessRequestInput): Promise<SendingAccessRequestView> {
     return call(() => this.api.createSendingAccessRequest(body));

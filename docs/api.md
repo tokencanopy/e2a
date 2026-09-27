@@ -629,8 +629,9 @@ request (`200`); after a decline a new request may be filed, up to 3 per 30
 days (`429 rate_limited` beyond that — do not retry). An account that is not
 currently restricted (already approved, outside the cohort, shadow mode, or
 lifted by an available unlock) gets `409 conflict` and nothing is filed.
-Request text may contain line breaks and tabs but no other control characters
-or Unicode line separators (`400 invalid_request`). The decision is emailed
+Request text may contain line breaks and tabs but no other control characters,
+Unicode line separators, or bidi override/isolate controls
+(`400 invalid_request`). The decision is emailed
 to the account owner; `GET /v1/account/sending-access/request` shows its
 `state` (`pending`, `approved`, `declined`; open set). The self-host default
 accepts all three unlocks; the hosted e2a service accepts only

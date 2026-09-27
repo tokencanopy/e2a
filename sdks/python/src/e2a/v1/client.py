@@ -1486,7 +1486,11 @@ class AccountResource:
         Idempotent while a request is pending — calling this again returns the
         existing pending request instead of creating another. After a decline,
         a new request may be filed as an appeal (``rate_limited`` beyond 3 per
-        30 days). Filing a request never grants access by itself.
+        30 days). Raises :class:`~e2a.v1.errors.E2AError` with code
+        ``conflict`` (409) when the account is not currently restricted
+        (already approved, outside the rollout, or lifted by an available
+        unlock) — nothing is filed; do not retry. Filing a request never
+        grants access by itself.
         Account-scoped credentials only.
 
         A first filing answers 201 and a resubmit-while-pending answers 200

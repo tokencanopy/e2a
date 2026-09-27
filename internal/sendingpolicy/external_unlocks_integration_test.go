@@ -286,6 +286,15 @@ func TestSubmitAccessRequestRejectsFenceBreakingCharacters(t *testing.T) {
 		"NUL":                 "line one\x00",
 		"ESC":                 "line one\x1b[31m",
 		"DEL":                 "line one\x7f",
+		"LRE":                 "line one\u202a",
+		"RLE":                 "line one\u202b",
+		"PDF":                 "line one\u202c",
+		"LRO":                 "line one\u202d",
+		"RLO":                 "line one\u202eesrever",
+		"LRI":                 "line one\u2066",
+		"RLI":                 "line one\u2067",
+		"FSI":                 "line one\u2068",
+		"PDI":                 "line one\u2069",
 	} {
 		for _, field := range []string{"use_case", "recipients"} {
 			in := sendingpolicy.AccessRequestInput{UseCase: "ok", Recipients: "ok", ExpectedDailyVolume: 1}

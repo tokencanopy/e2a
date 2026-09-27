@@ -69,6 +69,16 @@ func (f *sendingProtectionFlags) commandRequested() bool {
 		f.pauseAccount || f.resumeAccount || f.inspectPause
 }
 
+// validateStandalone rejects modifier flags given without the command they
+// modify, before anything starts: `-all` alone would otherwise be ignored
+// and the server would boot as if nothing had been asked.
+func (f *sendingProtectionFlags) validateStandalone() error {
+	if f.listAll && !f.listExternal {
+		return errors.New("-all is only valid with -list-external-sending-requests")
+	}
+	return nil
+}
+
 func (f *sendingProtectionFlags) selectedCount() int {
 	n := 0
 	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile,
@@ -110,6 +120,9 @@ func normalizeSHA256(raw string) (string, error) {
 func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, secrets sendingpolicy.Secrets, f *sendingProtectionFlags, stdout io.Writer) error {
 	if f.selectedCount() != 1 {
 		return errors.New("exactly one sending-protection command may be given per invocation")
+	}
+	if err := f.validateStandalone(); err != nil {
+		return err
 	}
 
 	source, err := sendingpolicy.SourceFromConfig(cfg)
@@ -523,15 +536,18 @@ func sendDecisionNotice(ctx context.Context, notifier decisionNotifier, requestI
 // requests by default, every request with -all. Ids, states, times and
 // numbers only — never customer free text or an address.
 func runListExternalRequests(ctx context.Context, module *sendingpolicy.Module, all bool, stdout io.Writer) error {
-	reqs, err := module.ListAccessRequests(ctx, all)
+	reqs, truncated, err := module.ListAccessRequests(ctx, all)
 	if err != nil {
 		return err
 	}
-	scope := "pending"
+	scope := "pending, oldest first"
 	if all {
-		scope = "all"
+		scope = "all, newest first"
 	}
 	fmt.Fprintf(stdout, "requests (%s):           %d\n", scope, len(reqs))
+	if truncated {
+		fmt.Fprintf(stdout, "truncated:                listing stopped at %d requests\n", sendingpolicy.MaxAccessRequestListing)
+	}
 	for _, r := range reqs {
 		fmt.Fprintf(stdout, "\n")
 		fmt.Fprintf(stdout, "request_id:               %s\n", r.ID)

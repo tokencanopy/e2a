@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -535,7 +536,7 @@ func TestListExternalSendingRequestsAndPendingWarning(t *testing.T) {
 	}
 
 	out := run(&sendingProtectionFlags{listExternal: true})
-	for _, want := range []string{"requests (pending):           1", "request_id:               " + reqA, "account_id:               usr_list_a",
+	for _, want := range []string{"requests (pending, oldest first):           1", "request_id:               " + reqA, "account_id:               usr_list_a",
 		"state:                    pending", "expected_daily_volume:    42", "external_sending_approved: false", "created_at:"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("pending listing missing %q:\n%s", want, out)
@@ -548,7 +549,7 @@ func TestListExternalSendingRequestsAndPendingWarning(t *testing.T) {
 		t.Fatalf("the listing must not print customer text or addresses:\n%s", out)
 	}
 	all := run(&sendingProtectionFlags{listExternal: true, listAll: true})
-	if !strings.Contains(all, "requests (all):           2") || !strings.Contains(all, reqB) || !strings.Contains(all, "state:                    declined") || !strings.Contains(all, "decided_at:") {
+	if !strings.Contains(all, "requests (all, newest first):           2") || strings.Index(all, reqB) > strings.Index(all, reqA) || strings.Contains(all, "truncated:") || !strings.Contains(all, "state:                    declined") || !strings.Contains(all, "decided_at:") {
 		t.Fatalf("-all listing:\n%s", all)
 	}
 
@@ -562,5 +563,47 @@ func TestListExternalSendingRequestsAndPendingWarning(t *testing.T) {
 	}
 	if latest, _ := module.LatestAccessRequest(ctx, "usr_list_a"); latest == nil || latest.State != "pending" {
 		t.Fatalf("a direct grant must not auto-decide the request: %+v", latest)
+	}
+}
+
+func TestAllFlagRequiresListCommand(t *testing.T) {
+	f := &sendingProtectionFlags{listAll: true}
+	if err := f.validateStandalone(); err == nil {
+		t.Fatal("-all without -list-external-sending-requests must be rejected before the server starts")
+	}
+	if err := (&sendingProtectionFlags{listAll: true, listExternal: true}).validateStandalone(); err != nil {
+		t.Fatalf("-all with the list command is valid: %v", err)
+	}
+	if err := (&sendingProtectionFlags{}).validateStandalone(); err != nil {
+		t.Fatalf("no flags is valid: %v", err)
+	}
+}
+
+func TestListExternalSendingRequestsReportsTruncation(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	module := sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id, email, google_subject)
+		SELECT 'usr_trunc_' || g, 'usr_trunc_' || g || '@trunc.example.test', 'sub_trunc_' || g FROM generate_series(1, $1) AS g`,
+		sendingpolicy.MaxAccessRequestListing+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO external_sending_access_requests (id, user_id, use_case, recipients, expected_daily_volume, created_at)
+		SELECT 'esar_trunc_' || g, 'usr_trunc_' || g, 'synthetic', 'synthetic', 1, now() - make_interval(secs => g)
+		  FROM generate_series(1, $1) AS g`, sendingpolicy.MaxAccessRequestListing+1); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runListExternalRequests(ctx, module, true, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), fmt.Sprintf("truncated:                listing stopped at %d requests", sendingpolicy.MaxAccessRequestListing)) {
+		t.Fatal("a listing that hit the bound must say so")
+	}
+	// Newest first: the most recent request (g=1) is shown, the oldest dropped.
+	if !strings.Contains(out.String(), "esar_trunc_1\n") || strings.Contains(out.String(), fmt.Sprintf("esar_trunc_%d\n", sendingpolicy.MaxAccessRequestListing+1)) {
+		t.Fatal("-all must keep the newest requests when truncating")
 	}
 }

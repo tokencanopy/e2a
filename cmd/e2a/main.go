@@ -149,6 +149,9 @@ func main() {
 	flag.BoolVar(&acctFlags.escalateAbuse, "escalate-deleted-account-to-abuse", false, "after purge: write abuse-class tombstones for every identifier digest in a purged account's summary and extend the summary to the abuse hold (requires -deleted-account-id, -reason), then exit")
 	flag.IntVar(&acctFlags.holdDays, "tombstone-hold-days", 0, "hold length in days for -extend-identity-tombstones")
 	flag.Parse()
+	if err := spFlags.validateStandalone(); err != nil {
+		log.Fatalf("%v", err)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
