@@ -121,8 +121,11 @@ func TestTrashAccountSetsTrashStateAndLeavesControlsUntouched(t *testing.T) {
 	if res.AgentsDeleted != 1 || res.APIKeysDeleted != 2 || res.SessionsDeleted != 1 || res.DomainsDeleted != 1 {
 		t.Fatalf("receipt counts = %+v, want 1 agent trashed, 2 keys revoked, 1 session, 1 domain", res)
 	}
-	if len(hooked) != 1 || hooked[0] != "trasher.example.com" {
-		t.Fatalf("SES teardown hook ran for %v, want the one owned domain", hooked)
+	// The account is abuse-paused, so it is read-only: the trash keeps its
+	// SES sender identities as evidence (the teardown for an account that is
+	// not read-only is pinned by TestTrashAccountKeepsSenderIdentitiesWhileReadOnly).
+	if len(hooked) != 0 {
+		t.Fatalf("SES teardown hook ran for %v on a read-only account, want none", hooked)
 	}
 
 	var deletedAt *time.Time
