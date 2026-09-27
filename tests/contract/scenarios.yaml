@@ -3540,3 +3540,213 @@ scenarios:
           status: 401
           body_match:
             "error.code": unauthorized
+
+  # ── Read-only accounts (docs/design/account-read-only.md) ──
+  # Runs as the contract server's abuse-paused account ({readonly_api_key}),
+  # which it seeds read-only. The scenario ends by moving that account to the
+  # trash, so it runs once per server and no other scenario may use it.
+  - name: account_read_only_refuses_writes
+    description: >
+      An account whose sending is paused with pause class abuse is read-only.
+      GET /v1/account reports read_only:true and every read keeps working; one
+      representative write per resource family is refused with 403
+      account_read_only (reason text never shown); the permanent erase stays
+      409 erase_held; and moving the account to the trash still works (mode
+      trash), after which the key stops authenticating.
+    auth_override: "Bearer {readonly_api_key}"
+    steps:
+      - id: account_reports_read_only
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 200
+          body_match:
+            read_only: true
+
+      - id: agents_list_is_readable
+        action: request
+        method: GET
+        path: /v1/agents
+        expect:
+          status: 200
+          body_contains: [items]
+
+      - id: agent_is_readable
+        action: request
+        method: GET
+        path: /v1/agents/readonly-bot@agents.localhost
+        expect:
+          status: 200
+          body_match:
+            email: readonly-bot@agents.localhost
+
+      - id: messages_are_readable
+        action: request
+        method: GET
+        path: /v1/agents/readonly-bot@agents.localhost/messages
+        expect:
+          status: 200
+
+      - id: export_is_readable
+        action: request
+        method: GET
+        path: /v1/account/export
+        expect:
+          status: 200
+
+      - id: agent_create_is_refused
+        action: request
+        method: POST
+        path: /v1/agents
+        body:
+          email: ro-{scenario_token}@agents.localhost
+        expect:
+          status: 403
+          response_excludes: [contract read-only fixture]
+          body_match:
+            "error.code": account_read_only
+
+      - id: agent_rename_is_refused
+        action: request
+        method: PATCH
+        path: /v1/agents/readonly-bot@agents.localhost
+        body:
+          name: Brand Support
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: agent_trash_is_refused
+        action: request
+        method: DELETE
+        path: /v1/agents/readonly-bot@agents.localhost?confirm=DELETE
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: send_is_refused
+        action: request
+        method: POST
+        path: /v1/agents/readonly-bot@agents.localhost/messages
+        headers:
+          Idempotency-Key: ro-send-{scenario_token}
+        body:
+          to: ["customer-{scenario_token}@example.net"]
+          subject: probe
+          text: probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: domain_register_is_refused
+        action: request
+        method: POST
+        path: /v1/domains
+        body:
+          domain: ro-{scenario_token}.example.test
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: api_key_create_is_refused
+        action: request
+        method: POST
+        path: /v1/account/api-keys
+        body:
+          name: ro-{scenario_token}
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: webhook_create_is_refused
+        action: request
+        method: POST
+        path: /v1/webhooks
+        body:
+          url: https://hooks.example.test/{scenario_token}
+          events: [email.received]
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: contact_create_is_refused
+        action: request
+        method: POST
+        path: /v1/contacts
+        body:
+          address: ro-{scenario_token}@example.net
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: template_create_is_refused
+        action: request
+        method: POST
+        path: /v1/templates
+        body:
+          name: ro-{scenario_token}
+          subject: s
+          body: b
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: suppression_create_is_refused
+        action: request
+        method: POST
+        path: /v1/agents/readonly-bot@agents.localhost/suppressions
+        body:
+          address: ro-{scenario_token}@example.net
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: sending_access_request_is_refused
+        action: request
+        method: POST
+        path: /v1/account/sending-access/request
+        body:
+          use_case: contract probe
+        expect:
+          status: 403
+          body_match:
+            "error.code": account_read_only
+
+      - id: permanent_erase_stays_held
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE&permanent=true
+        expect:
+          status: 409
+          body_match:
+            "error.code": erase_held
+
+      - id: account_trash_still_works
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE
+        expect:
+          status: 200
+          body_contains: [purge_after]
+          body_match:
+            deleted: true
+            mode: trash
+
+      - id: trashed_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
