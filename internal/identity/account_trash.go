@@ -473,6 +473,40 @@ func (s *Store) AccountSendingPaused(ctx context.Context, userID string) (bool, 
 	return paused, err
 }
 
+// AccountReadOnly reports whether the account is read-only: its sending is
+// paused with pause class 'abuse' (docs/design/account-read-only.md). Every
+// write on every customer surface is refused for such an account; reads, sign
+// in/out and the account trash stay available. Other pause classes (operator,
+// billing, system) refuse only sending. A missing control row is not
+// read-only. The read is a single primary-key lookup with no cache, so an
+// operator pause or resume takes effect on the very next request.
+func (s *Store) AccountReadOnly(ctx context.Context, userID string) (bool, error) {
+	var readOnly bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM account_sending_controls
+		                 WHERE user_id = $1 AND state = 'paused' AND pause_class = 'abuse')`, userID,
+	).Scan(&readOnly)
+	return readOnly, err
+}
+
+// AccountReadOnlyCode is the machine-checked error code every surface emits
+// when it refuses a write for a read-only account.
+const AccountReadOnlyCode = "account_read_only"
+
+// AccountReadOnlyMessage is the customer-facing message of the
+// account_read_only error, shared by every surface that emits it (/v1, the
+// legacy dashboard routes, OAuth consent, the HITL magic links, the internal
+// principal attach). It names the state and the way out, never the operator's
+// reason. supportContact is optional.
+func AccountReadOnlyMessage(supportContact string) string {
+	contact := "Contact support to appeal."
+	if supportContact != "" {
+		contact = "Contact support (" + supportContact + ") to appeal."
+	}
+	return "sending is paused for this account pending an abuse review, and the account is read-only: " +
+		"reads still work, but no changes can be made until the review is complete. " + contact
+}
+
 // userPurgeBatch bounds one janitor pass of PurgeDeletedUsers.
 var userPurgeBatch = 20
 

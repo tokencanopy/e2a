@@ -372,6 +372,22 @@ type NotificationsConfig struct {
 	// default when from_address is itself a real mailbox. Override with
 	// E2A_NOTIFICATIONS_REPLY_TO.
 	ReplyTo string `yaml:"reply_to"`
+	// SupportEmail is the support address customers are told to contact
+	// when their account is read-only (sending paused for an abuse review —
+	// the account_read_only error and the dashboard banner). Optional: when
+	// empty the message falls back to reply_to, and with neither set it says
+	// "contact support" without an address. Override with
+	// E2A_NOTIFICATIONS_SUPPORT_EMAIL.
+	SupportEmail string `yaml:"support_email"`
+}
+
+// SupportContact is the support address named in customer-facing account
+// state messages: support_email, else reply_to, else empty.
+func (n NotificationsConfig) SupportContact() string {
+	if n.SupportEmail != "" {
+		return n.SupportEmail
+	}
+	return n.ReplyTo
 }
 
 // InboundConfig selects the inbound processing model (inbound-message-pipeline-
@@ -865,6 +881,9 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_NOTIFICATIONS_REPLY_TO"); v != "" {
 		cfg.Notifications.ReplyTo = v
 	}
+	if v := os.Getenv("E2A_NOTIFICATIONS_SUPPORT_EMAIL"); v != "" {
+		cfg.Notifications.SupportEmail = v
+	}
 	if v := os.Getenv("E2A_METRICS_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Metrics.Enabled = b
@@ -1134,6 +1153,12 @@ func (c *Config) Validate() error {
 		addr, err := mail.ParseAddress(v)
 		if err != nil || addr.Address != v {
 			return fmt.Errorf("config: notifications.reply_to must be a bare email address (got %q)", v)
+		}
+	}
+	if v := c.Notifications.SupportEmail; v != "" {
+		addr, err := mail.ParseAddress(v)
+		if err != nil || addr.Address != v {
+			return fmt.Errorf("config: notifications.support_email must be a bare email address (got %q)", v)
 		}
 	}
 	return nil

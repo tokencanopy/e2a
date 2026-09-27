@@ -208,6 +208,12 @@ notifications:
   # (webhook mail emits no Reply-To; approval mail emits one pointing at
   # its own sender, preserving its long-standing behaviour).
   # reply_to: "support@your-company.example"
+  #
+  # Optional support address customers are told to contact when their
+  # account is read-only (sending paused for an abuse review): it appears in
+  # the account_read_only API error. Falls back to reply_to; with neither
+  # set the error says "contact support" without an address.
+  # support_email: "support@your-company.example"
 
 # Outbound delivery is always asynchronous and at-least-once. The send API
 # durably persists the message and enqueues a River job in one transaction,

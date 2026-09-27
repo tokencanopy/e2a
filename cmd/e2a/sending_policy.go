@@ -424,6 +424,10 @@ func printAccountPause(stdout io.Writer, rec sendingpolicy.AccountPauseRecord) {
 	fmt.Fprintf(stdout, "account_status: %s\n", rec.AccountStatus)
 	fmt.Fprintf(stdout, "sending_state:  %s\n", rec.State)
 	fmt.Fprintf(stdout, "pause_class:    %s\n", rec.PauseClass)
+	// An abuse pause also freezes every customer write
+	// (docs/design/account-read-only.md); say so, so the operator is never
+	// surprised by it.
+	fmt.Fprintf(stdout, "read_only:      %v\n", rec.ReadOnly())
 	if rec.Reason != "" {
 		fmt.Fprintf(stdout, "reason:         %s\n", rec.Reason)
 	}

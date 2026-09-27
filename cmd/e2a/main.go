@@ -1032,6 +1032,7 @@ func main() {
 		SenderIdentity:            senderEnqueuer,
 		ManagedUnsubscribeIssuer:  managedUnsubscribeIssuer,
 		AgentSuppressionAddedHook: agent.AgentSuppressionAddedHook(webhookOutbox),
+		SupportContact:            cfg.Notifications.SupportContact(),
 		// River is the sole webhook delivery engine: the /test + redelivery
 		// endpoints insert a delivery row directly (bypassing the outbox drain),
 		// so they must enqueue the River job themselves or the row never delivers.
