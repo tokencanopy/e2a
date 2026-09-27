@@ -102,7 +102,9 @@ func accountRowCounts(ctx context.Context, tx pgx.Tx, userID string, res *Delete
 // counts describe rows trashed, revoked or unverified). perDomainInTx, when
 // non-nil, runs for every owned domain inside the transaction — it is how the
 // SES sender-identity teardown is enqueued; with the domain now unverified the
-// deprovision worker deletes the provider identity.
+// deprovision worker deletes the provider identity. It is skipped while the
+// account is read-only (abuse pause), so the provider identities survive as
+// evidence.
 //
 // Refuses with ErrSendInProgress while an outbound provider call holds a
 // fresh lease, ErrAccountTrashed when the account is already in the trash,
@@ -198,6 +200,20 @@ func (s *Store) TrashAccount(ctx context.Context, userID string, perDomainInTx f
 		if err != nil {
 			return fmt.Errorf("trash: load domains: %w", err)
 		}
+		// A read-only account (abuse pause) keeps its SES sender identities
+		// through the trash: they are provider-side evidence for the abuse
+		// review. The domains are still unverified below, so nothing is sent
+		// from them. The purge at the end of the trash window (the janitor's
+		// purge is not held by a pause) tears them down with the rest.
+		keepSenderIdentities := false
+		if perDomainInTx != nil {
+			if err := tx.QueryRow(ctx, accountReadOnlySQL, userID).Scan(&keepSenderIdentities); err != nil {
+				return fmt.Errorf("trash: read-only check: %w", err)
+			}
+			if keepSenderIdentities {
+				log.Printf("[account-trash] kept sender identities of read-only account user=%s (abuse review evidence)", userID)
+			}
+		}
 		for _, d := range domains {
 			// A domain another account's agents live on (the shared domain an
 			// operator's probe account adopted) is infrastructure, not this
@@ -228,7 +244,7 @@ func (s *Store) TrashAccount(ctx context.Context, userID string, perDomainInTx f
 				d.Domain, "e2a-verify="+generateID(), userID); err != nil {
 				return fmt.Errorf("trash: unverify domain %s: %w", d.Domain, err)
 			}
-			if perDomainInTx != nil {
+			if perDomainInTx != nil && !keepSenderIdentities {
 				if err := perDomainInTx(ctx, tx, d.Domain); err != nil {
 					return fmt.Errorf("trash: enqueue sender teardown for %s: %w", d.Domain, err)
 				}
@@ -482,12 +498,13 @@ func (s *Store) AccountSendingPaused(ctx context.Context, userID string) (bool, 
 // operator pause or resume takes effect on the very next request.
 func (s *Store) AccountReadOnly(ctx context.Context, userID string) (bool, error) {
 	var readOnly bool
-	err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM account_sending_controls
-		                 WHERE user_id = $1 AND state = 'paused' AND pause_class = 'abuse')`, userID,
-	).Scan(&readOnly)
+	err := s.pool.QueryRow(ctx, accountReadOnlySQL, userID).Scan(&readOnly)
 	return readOnly, err
 }
+
+// accountReadOnlySQL is the read-only predicate for one account ($1 = user id).
+const accountReadOnlySQL = `SELECT EXISTS (SELECT 1 FROM account_sending_controls
+		                 WHERE user_id = $1 AND state = 'paused' AND pause_class = 'abuse')`
 
 // readOnlyApproveHoldExclusion is the predicate the HITL expiry sweeps
 // (ListExpiredPending, ListExpiredReviews) add over agent_identities a: an
