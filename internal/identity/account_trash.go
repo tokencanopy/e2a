@@ -520,6 +520,10 @@ const readOnlyApproveHoldExclusion = `NOT (a.hitl_expiration_action = 'approve' 
 		SELECT 1 FROM account_sending_controls asc_ro
 		 WHERE asc_ro.user_id = a.user_id AND asc_ro.state = 'paused' AND asc_ro.pause_class = 'abuse'))`
 
+// ErrAccountReadOnly refuses a write to a read-only account (abuse pause)
+// that a store method checks itself.
+var ErrAccountReadOnly = errors.New("identity: account is read-only")
+
 // AccountReadOnlyCode is the machine-checked error code every surface emits
 // when it refuses a write for a read-only account.
 const AccountReadOnlyCode = "account_read_only"

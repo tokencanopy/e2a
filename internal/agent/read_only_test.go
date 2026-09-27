@@ -288,13 +288,30 @@ func TestAttachExternalPrincipalRefusesAReadOnlyAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A principal attached before the pause replays idempotently (200): the
+	// reconciler re-sends attaches it has already made, and a replay changes
+	// nothing.
+	resp := attachRequest(t, server, attachTestSecret, attachBody(t, attachTestIssuer, "principal-before", user.ID))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("attach before the pause = %d, want 201", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 	setPause(t, store, user.ID, "paused", "abuse")
-	resp := attachRequest(t, server, attachTestSecret, attachBody(t, attachTestIssuer, "principal-ro", user.ID))
+	resp = attachRequest(t, server, attachTestSecret, attachBody(t, attachTestIssuer, "principal-before", user.ID))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("idempotent re-attach to a read-only account = %d, want 200", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	// A NEW principal for a read-only account is refused.
+	resp = attachRequest(t, server, attachTestSecret, attachBody(t, attachTestIssuer, "principal-ro", user.ID))
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("attach to a read-only account = %d, want 403", resp.StatusCode)
+		t.Fatalf("attach of a new principal to a read-only account = %d, want 403", resp.StatusCode)
 	}
 	if got := decodeAttachJSON(t, resp)["error"]; got != "account_read_only" {
 		t.Fatalf("attach error = %q, want account_read_only", got)
+	}
+	if u, err := store.GetUserByExternalPrincipal(ctx, attachTestIssuer, "principal-ro"); err == nil && u != nil {
+		t.Fatalf("a refused attach created a mapping to %s", u.ID)
 	}
 	// An operator pause does not block it.
 	setPause(t, store, user.ID, "paused", "operator")

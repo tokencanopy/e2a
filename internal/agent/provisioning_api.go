@@ -249,18 +249,6 @@ func (a *API) handleAttachExternalPrincipal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Read-only accounts (sending paused for abuse) take no new sign-in
-	// principals. The account is named in the signed body, so this surface
-	// checks here rather than in the legacy route middleware.
-	if ro, err := a.store.AccountReadOnly(r.Context(), req.UserID); err != nil {
-		log.Printf("[api] attach external principal read-only check failed: %v", err)
-		writeProvisionError(w, http.StatusServiceUnavailable, "internal_error")
-		return
-	} else if ro {
-		writeProvisionError(w, http.StatusForbidden, identity.AccountReadOnlyCode)
-		return
-	}
-
 	created, err := a.store.AttachExternalPrincipal(r.Context(), req.Issuer, req.ExternalRef, req.UserID)
 	switch {
 	case errors.Is(err, identity.ErrExternalPrincipalConflict):
@@ -271,6 +259,12 @@ func (a *API) handleAttachExternalPrincipal(w http.ResponseWriter, r *http.Reque
 		return
 	case errors.Is(err, identity.ErrAccountTrashed):
 		writeProvisionError(w, http.StatusConflict, "account_trashed")
+		return
+	case errors.Is(err, identity.ErrAccountReadOnly):
+		// Read-only accounts (sending paused for abuse) take no NEW sign-in
+		// principal; replaying an existing mapping stays 200. Checked in the
+		// store's attach transaction.
+		writeProvisionError(w, http.StatusForbidden, identity.AccountReadOnlyCode)
 		return
 	case errors.Is(err, identity.ErrRegistrationRefused):
 		writeProvisionError(w, http.StatusForbidden, "registration_refused")
