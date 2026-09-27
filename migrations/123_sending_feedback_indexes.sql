@@ -1,4 +1,4 @@
--- 121_sending_feedback_indexes.sql
+-- 123_sending_feedback_indexes.sql
 --
 -- Access paths for the B8 feedback provenance tables. Migration 114 created
 -- sending_feedback_events with only its primary key and no expiry index, and

@@ -663,6 +663,32 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		if _, err := tx.Exec(ctx, `DELETE FROM usage_events WHERE user_id = $1`, userID); err != nil {
 			return fmt.Errorf("purge: usage_events: %w", err)
 		}
+
+		// Deletion-resistant feedback provenance (B8): the account is
+		// genuinely gone at this seal step — either an immediate permanent
+		// erase, or a trashed account's retention window expiring — so this
+		// is where the post-deletion horizon is stamped on its retained
+		// correlations/events (which carry no FK and no plaintext recipient,
+		// so a controlled recipient cannot erase a complaint by deleting the
+		// account first). TrashAccount deliberately does NOT stamp this: a
+		// restore must not resurrect rows whose retention countdown already
+		// started, and the trash window itself is not the deletion event.
+		if _, err := tx.Exec(ctx, `
+			UPDATE sending_feedback_correlations
+			   SET expires_at = $2
+			 WHERE source_account_ref = $1 AND expires_at IS NULL`,
+			userID, time.Now().UTC().Add(s.feedbackRetention())); err != nil {
+			return fmt.Errorf("purge: stamp feedback retention: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE sending_feedback_events e
+			   SET expires_at = c.expires_at
+			  FROM sending_feedback_correlations c
+			 WHERE c.correlation_id = e.correlation_id AND c.source_account_ref = $1 AND e.expires_at IS NULL`,
+			userID); err != nil {
+			return fmt.Errorf("purge: stamp feedback event retention: %w", err)
+		}
+
 		// A domain other accounts' agents live on (the shared domain a probe
 		// account adopted) cannot cascade away with this user — the agents'
 		// FK is ON DELETE NO ACTION and the purge would wedge forever. Hand it
