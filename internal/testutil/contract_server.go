@@ -103,13 +103,13 @@ type ContractServer struct {
 	// contract run and no other scenario may use it.
 	ReadOnlyAPIKey string
 	ReadOnlyUserID string
-	DBPool                *pgxpool.Pool
-	Store                 *identity.Store
-	WSHub                 *ws.Hub
-	SMTPAddr              string
-	httpServer            *http.Server
-	httpLn                net.Listener
-	smtpServer            *relay.Server
+	DBPool         *pgxpool.Pool
+	Store          *identity.Store
+	WSHub          *ws.Hub
+	SMTPAddr       string
+	httpServer     *http.Server
+	httpLn         net.Listener
+	smtpServer     *relay.Server
 }
 
 func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, error) {
