@@ -124,7 +124,15 @@ const SOCIAL_LINKS: { label: string; href: string; aria: string; path: string }[
   },
 ];
 
-const FOOTER_LINKS: { label: string; href: string; external?: boolean }[] = [
+const FOOTER_LINKS: {
+  label: string;
+  href: string;
+  external?: boolean;
+  // Set only by the spread of legalFooterLinks() below — see its comment in
+  // lib/site.ts. Marks an entry as always rendered with a bare <a>, never
+  // next/link's <Link>, because the href may resolve outside this Next app.
+  plain?: boolean;
+}[] = [
   { label: "GitHub", href: "https://github.com/tokencanopy/e2a", external: true },
   { label: "Transactional Email", href: "/transactional-email-api" },
   { label: "API Docs", href: "/api-docs" },
@@ -1172,7 +1180,17 @@ export default function Home() {
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[12px]">
             {FOOTER_LINKS.map((l) =>
-              l.external ? (
+              l.plain ? (
+                <a
+                  key={l.label}
+                  href={l.href}
+                  target={l.external ? "_blank" : undefined}
+                  rel={l.external ? "noopener noreferrer" : undefined}
+                  style={{ color: "var(--fg-muted)" }}
+                >
+                  {l.label}
+                </a>
+              ) : l.external ? (
                 <a
                   key={l.label}
                   href={l.href}

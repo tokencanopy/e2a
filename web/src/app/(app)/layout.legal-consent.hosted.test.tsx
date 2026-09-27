@@ -12,6 +12,12 @@ process.env.NEXT_PUBLIC_TERMS_URL = "/terms";
 import { render, screen, within } from "@testing-library/react";
 import AppLayout from "./AppLayoutClient";
 
+// Legal links must never render through next/link's <Link> — see the
+// comment on LegalAnchor in SignInConsent.tsx for why (same-origin legal
+// paths can resolve outside this Next app, and <Link> prefetches the
+// route's RSC payload regardless). This mock tags anything that DOES go
+// through <Link> with a marker attribute so a Link-rendered legal link is
+// distinguishable from a plain <a> even though both render as <a> tags.
 jest.mock("next/link", () => {
   return function MockLink({
     href,
@@ -23,7 +29,7 @@ jest.mock("next/link", () => {
     [k: string]: unknown;
   }) {
     return (
-      <a href={href} {...rest}>
+      <a href={href} {...rest} data-next-link="true">
         {children}
       </a>
     );
@@ -57,12 +63,18 @@ describe("(app) layout — sign-in consent (hosted build)", () => {
     expect(consent).toHaveTextContent(
       "By signing in you agree to the Terms and Privacy policy.",
     );
-    expect(within(consent).getByRole("link", { name: "Terms" })).toHaveAttribute(
-      "href",
-      "/terms",
-    );
-    expect(
-      within(consent).getByRole("link", { name: "Privacy policy" }),
-    ).toHaveAttribute("href", "/privacy");
+    const termsLink = within(consent).getByRole("link", { name: "Terms" });
+    expect(termsLink).toHaveAttribute("href", "/terms");
+    const privacyLink = within(consent).getByRole("link", {
+      name: "Privacy policy",
+    });
+    expect(privacyLink).toHaveAttribute("href", "/privacy");
+
+    // Same-origin on paper ("/terms", "/privacy"), but on the hosted
+    // deployment these resolve to static Caddy routes, not Next pages.
+    // <Link> would prefetch that route's RSC payload and 404 — regression
+    // coverage for the #1051 follow-up bug.
+    expect(termsLink).not.toHaveAttribute("data-next-link");
+    expect(privacyLink).not.toHaveAttribute("data-next-link");
   });
 });
