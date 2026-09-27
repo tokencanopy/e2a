@@ -1002,6 +1002,12 @@ func (a *API) handleOAuthConsent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "action must be 'allow' or 'deny'", http.StatusBadRequest)
 		return
 	}
+	// Read-only accounts (abuse pause) grant nothing new. Checked here, for
+	// the session user this handler authenticated, after deny (which must
+	// still reach the client) — see legacyWriteRoutes in read_only.go.
+	if a.refuseIfReadOnly(w, r, user.ID) {
+		return
+	}
 
 	// Scope the user consented to. The consent screen is e2a's scope
 	// authority: "agent" binds the grant to one inbox; "account" is full

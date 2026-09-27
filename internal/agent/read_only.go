@@ -43,8 +43,12 @@ var legacyWriteRoutes = map[string]legacyRouteAccess{
 	"POST /api/keys":                       legacyAccountWrite,
 	"DELETE /api/keys/{id}":                legacyAccountWrite,
 	// Consent mints a new OAuth grant (agent or account scope) for the
-	// signed-in account.
-	"POST /oauth2/consent": legacyAccountWrite,
+	// signed-in account, so a read-only account's "allow" is refused — in
+	// handleOAuthConsent, after the provider/authorize-request handling and
+	// the session check (same cookie lookup), so unauthenticated callers keep
+	// consent's own 404/503/authorize errors and "deny" still returns
+	// fosite's access_denied redirect to the client.
+	"POST /oauth2/consent": legacyExempt,
 
 	// Sign-out only ends the caller's own session.
 	"POST /api/auth/logout": legacyExempt,

@@ -3,8 +3,10 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -124,7 +126,6 @@ func TestLegacyAccountWritesRefusedForAnAbusePausedAccount(t *testing.T) {
 		{http.MethodDelete, "/api/dashboard/agents/" + ag.EmailAddress(), ``},
 		{http.MethodPost, "/api/keys", `{"name":"new"}`},
 		{http.MethodDelete, "/api/keys/" + key.ID, ``},
-		{http.MethodPost, "/oauth2/consent", ``},
 	}
 	for _, w := range writes {
 		status, code, msg := legacyDo(t, w.method, server.URL+w.path, session, w.body)
@@ -165,6 +166,15 @@ func TestLegacyAccountWritesRefusedForAnAbusePausedAccount(t *testing.T) {
 		status, code, _ := legacyDoAuth(t, w.method, server.URL+w.path, "", "Bearer "+key.PlaintextKey, w.body)
 		if status != http.StatusBadRequest || code != "ambiguous_credentials" {
 			t.Errorf("bare bearer: %s %s = %d %q, want 400 ambiguous_credentials", w.method, w.path, status, code)
+		}
+	}
+	// OAuth consent enforces read-only in its handler, after its own
+	// provider/authorize handling (TestConsentRefusesAllowButNotDenyWhileReadOnly):
+	// on this deployment, which has no OAuth provider, it is a plain 404 for
+	// any caller.
+	for _, sess := range []string{session, ""} {
+		if status, code, _ := legacyDoAuth(t, http.MethodPost, server.URL+"/oauth2/consent", sess, "", ""); status != http.StatusNotFound {
+			t.Errorf("consent without an OAuth provider (session=%v) = %d %q, want 404", sess != "", status, code)
 		}
 	}
 	// No credential at all: refused by the guard with 401, never passed on.
@@ -339,5 +349,73 @@ func TestMagicLinksRefuseAReadOnlyAccount(t *testing.T) {
 	got, _ := store.GetOutboundMessageForUser(context.Background(), msg.ID, userID)
 	if got.Status != identity.MessageStatusPendingReview {
 		t.Fatalf("held message status = %q after refused magic links, want still pending", got.Status)
+	}
+}
+
+// OAuth consent while read-only: allow (which mints a grant) is refused with
+// account_read_only and creates nothing; deny still reaches the client as
+// fosite's access_denied redirect. An unauthenticated caller still sees
+// consent's own authorize-request handling before any session or read-only
+// check.
+func TestConsentRefusesAllowButNotDenyWhileReadOnly(t *testing.T) {
+	f := newConsentFixture(t)
+	setPause(t, f.store, f.userID, "paused", "abuse")
+	_, challenge := newPKCE(t)
+
+	allow := authorizeParams(challenge, f.clientID, "s1s1s1s1s1s1s1s1")
+	allow.Set("action", "allow")
+	allow.Set("agent_choice", "create_new")
+	allow.Set("new_agent_slug", "roconsentbot")
+	resp := f.consentPOST(t, allow)
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&env)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || env.Error.Code != "account_read_only" {
+		t.Fatalf("allow while read-only = %d %q, want 403 account_read_only", resp.StatusCode, env.Error.Code)
+	}
+	var agents, codes int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM agent_identities WHERE user_id = $1`, f.userID).Scan(&agents); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM oauth_auth_codes WHERE user_id = $1`, f.userID).Scan(&codes); err != nil {
+		t.Fatal(err)
+	}
+	if agents != 0 || codes != 0 {
+		t.Fatalf("refused consent created %d agents and %d auth codes, want none", agents, codes)
+	}
+
+	deny := authorizeParams(challenge, f.clientID, "s2s2s2s2s2s2s2s2")
+	deny.Set("action", "deny")
+	resp = f.consentPOST(t, deny)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("deny while read-only = %d, want the 302/303 access_denied redirect", resp.StatusCode)
+	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loc.Query().Get("error"); got != "access_denied" || !strings.HasPrefix(loc.String(), "http://localhost:8765/callback") {
+		t.Fatalf("deny while read-only redirected to %q, want the client callback with error=access_denied", loc.String())
+	}
+
+	// Unauthenticated, with an authorize request the provider rejects (an
+	// unregistered redirect_uri): consent's own authorize error, not a
+	// session 401 from any guard.
+	bad := authorizeParams(challenge, f.clientID, "s3s3s3s3s3s3s3s3")
+	bad.Set("redirect_uri", "http://localhost:9999/not-registered")
+	bad.Set("action", "allow")
+	anon, err := http.Post(f.server.URL+"/oauth2/consent", "application/x-www-form-urlencoded", strings.NewReader(bad.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(anon.Body)
+	_ = anon.Body.Close()
+	if anon.StatusCode == http.StatusUnauthorized || anon.StatusCode == http.StatusForbidden || !strings.Contains(string(body), "invalid_request") {
+		t.Fatalf("unauthenticated consent with a bad authorize request = %d %s, want consent's own invalid_request", anon.StatusCode, body)
 	}
 }
