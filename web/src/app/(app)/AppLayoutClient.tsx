@@ -7,6 +7,7 @@ import { useAuth } from "../components/AuthProvider";
 import { SWRProvider } from "../components/swr/SWRProvider";
 import { PendingPollingOwner } from "../components/swr/PendingPollingOwner";
 import { SignInLinks } from "../components/SignInLinks";
+import { SignInConsent } from "../components/SignInConsent";
 import { RestoredNotice } from "../components/RestoredNotice";
 import { ReadOnlyBanner } from "../components/ReadOnlyBanner";
 import { Sidebar } from "../components/loft/Sidebar";
@@ -140,6 +141,10 @@ export default function AppLayout({
               }}
               secondaryClassName="text-[13px] underline underline-offset-2"
               secondaryStyle={{ color: "var(--fg-muted)" }}
+            />
+            <SignInConsent
+              className="text-[12px]"
+              style={{ color: "var(--fg-subtle)" }}
             />
           </div>
         </div>

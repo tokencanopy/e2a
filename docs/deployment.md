@@ -150,6 +150,8 @@ The Next.js dashboard ships as a static export, so its config is inlined at buil
 | `NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION` | Google Search Console token. Only emitted into `<head>` when set, so forks don't inherit upstream's property. |
 | `NEXT_PUBLIC_PRICING_PATH` | Site-relative path of the pricing page, when the deployment serves one (the hosted deployment sets `/pricing`). Only used to add the page to the sitemap. Leave empty if there is no pricing route — a sitemap entry that 404s is a crawl-quality problem. |
 | `NEXT_PUBLIC_E2A_SIGN_IN_URL` | Sign-in door for the dashboard's "Sign in" links. Default: `/api/auth/login` (legacy Google OAuth). Set to `/api/auth/oidc/login` to make the generic OIDC door the default — only when the server runs with `E2A_OIDC_ENABLED=true`, otherwise the link 404s. OIDC copy remains provider-neutral for self-hosters; the upstream `e2a.dev` and `staging.e2a.dev` site builds identify their door as TokenCanopy. When OIDC is primary, signed-out app and OAuth-consent screens also show the legacy Google door as a fallback. |
+| `NEXT_PUBLIC_PRIVACY_URL` | Site-relative path or absolute URL of the deployment's Privacy Policy, when it has one (the hosted deployment's `legal/` pages live in the private ops repo). Adds a "Privacy" link to public-page footers and, together with `NEXT_PUBLIC_TERMS_URL`, a consent line under the sign-in call to action. Leave empty if there's no privacy page. |
+| `NEXT_PUBLIC_TERMS_URL` | Same as `NEXT_PUBLIC_PRIVACY_URL`, for the Terms of Service page. The sign-in consent line ("By signing in you agree to the Terms and Privacy policy.") only renders when **both** URLs are set — one without the other would either link nowhere or assert a policy that doesn't exist. |
 
 ## MCP HTTP server
 

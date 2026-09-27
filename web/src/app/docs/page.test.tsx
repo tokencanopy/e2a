@@ -106,4 +106,13 @@ describe("Docs page", () => {
     expect(names).not.toContain("How do I give my AI agent an email address?");
     expect(names).not.toContain("Which MCP clients does e2a work with?");
   });
+
+  // No legal URLs configured in jest (self-host/staging default) — the
+  // shared LegalFooterLinks helper (see lib/site.ts) must render nothing.
+  // Its "both configured" branch is covered by its own component tests.
+  it("renders no Privacy or Terms links when no legal URLs are configured", () => {
+    render(<DocsPage />);
+    expect(screen.queryByRole("link", { name: "Privacy" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Terms" })).toBeNull();
+  });
 });

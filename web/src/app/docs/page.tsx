@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { JsonLd } from "../components/JsonLd";
+import { LegalFooterLinks } from "../components/LegalFooterLinks";
 import { breadcrumbs, faqPage, type FaqEntry } from "../../lib/jsonld";
 
 // Deliberately a server component with no "use client". This route used to be
@@ -249,6 +250,10 @@ export default function DocsPage() {
         >
           e2a
         </span>
+        <LegalFooterLinks
+          className="flex gap-3 text-[12px]"
+          linkStyle={{ color: "var(--fg-muted)" }}
+        />
         <span className="font-mono text-[12px]" style={{ color: "var(--fg-subtle)" }}>
           Apache 2.0
         </span>

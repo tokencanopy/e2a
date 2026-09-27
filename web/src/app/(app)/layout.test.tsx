@@ -84,6 +84,9 @@ describe("(app) layout — auth gates", () => {
     expect(screen.getByRole("link", { name: "Sign in with Google" }))
       .toHaveAttribute("href", "/api/auth/login");
     expect(screen.queryByText("page content")).not.toBeInTheDocument();
+    // No legal URLs configured in jest (self-host/staging default) — the
+    // hosted branch is covered in layout.legal-consent.hosted.test.tsx.
+    expect(screen.queryByTestId("sign-in-consent")).not.toBeInTheDocument();
   });
 
   it("preserves a review deep link through sign-in", async () => {
