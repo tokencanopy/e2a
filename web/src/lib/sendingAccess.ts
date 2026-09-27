@@ -7,29 +7,54 @@
 // module owns the logic, callers own the fetch + render.
 
 /** Mirrors SendingAccessView (GET /v1/account → sending_access, beta).
- *  Booleans only — describes what the account may do, never a promise that
- *  a given send also passes pause/quota/content/domain checks. The field is
- *  entirely omitted by the server when unavailable; callers must treat
- *  `undefined` as "no restriction info" (render nothing), never as
- *  "restricted". */
+ *  Describes what the account may do, never a promise that a given send
+ *  also passes pause/quota/content/domain checks. The field is entirely
+ *  omitted by the server when unavailable; callers must treat `undefined`
+ *  as "no restriction info" (render nothing), never as "restricted". */
 export type SendingAccessStatus = {
   enforcement_applies: boolean;
   shared_external_approved: boolean;
   paid_external_sending_entitled: boolean;
   owner_recipient_verified: boolean;
+  /** The routes this deployment accepts for lifting the restriction. Open
+   *  set; absent only from servers that predate the field, which accept all
+   *  three. Hosted e2a lists only "operator_approval". */
+  available_unlocks?: string[];
 };
 
+export type SendingAccessUnlock = "operator_approval" | "verified_domain" | "paid_entitlement";
+
+const ALL_UNLOCKS: SendingAccessUnlock[] = ["operator_approval", "verified_domain", "paid_entitlement"];
+
+/** True when the deployment accepts `unlock`. A missing list (older server)
+ *  means every unlock, exactly as the server behaved before the field. */
+export function unlockAvailable(
+  status: SendingAccessStatus | null | undefined,
+  unlock: SendingAccessUnlock,
+): boolean {
+  const list = status?.available_unlocks ?? ALL_UNLOCKS;
+  return list.includes(unlock);
+}
+
+/** True when the paid entitlement actually lifts the restriction on this
+ *  deployment — holding it is only a signal where paid_entitlement is not
+ *  an available unlock. */
+function paidUnlocks(status: SendingAccessStatus): boolean {
+  return status.paid_external_sending_entitled && unlockAvailable(status, "paid_entitlement");
+}
+
 /** True only when the deployment enforces the control for this account AND
- *  neither grant (operator approval or a paid base plan) already lifts it.
- *  A missing/undefined status — disabled, shadow mode, or an account
- *  outside the rollout cohort — is never "restricted". */
+ *  no account-level grant lifts it (operator approval, or a paid base plan
+ *  where the deployment accepts one). A missing/undefined status —
+ *  disabled, shadow mode, or an account outside the rollout cohort — is
+ *  never "restricted". */
 export function isSendingRestricted(
   status: SendingAccessStatus | null | undefined,
 ): boolean {
   return Boolean(
     status?.enforcement_applies &&
       !status.shared_external_approved &&
-      !status.paid_external_sending_entitled,
+      !paidUnlocks(status),
   );
 }
 
@@ -43,7 +68,7 @@ export function sendingAccessEligibilityLabel(
   status: SendingAccessStatus | null | undefined,
 ): string | null {
   if (!status?.enforcement_applies) return null;
-  if (status.paid_external_sending_entitled) {
+  if (paidUnlocks(status)) {
     return "Paid plan: external sending enabled";
   }
   if (status.shared_external_approved) {
@@ -52,21 +77,62 @@ export function sendingAccessEligibilityLabel(
   return null;
 }
 
+/** The body for the single "External sending is enabled" card: which route
+ *  lifted the restriction. Null while still restricted. */
+export function sendingAccessEnabledRoute(
+  status: SendingAccessStatus | null | undefined,
+): string | null {
+  if (!status?.enforcement_applies || isSendingRestricted(status)) return null;
+  if (status.shared_external_approved) {
+    return "An operator approved external sending for this account.";
+  }
+  return "Your paid base plan includes external sending for this account.";
+}
+
+/** Which recovery routes to offer a restricted account: approval always;
+ *  a verified domain only where the deployment accepts it; a paid plan only
+ *  where the deployment accepts it AND billing is enabled (hosted-only UI). */
+export function offeredUnlocks(
+  status: SendingAccessStatus,
+  opts: { billingEnabled: boolean },
+): { domain: boolean; approval: true; paid: boolean } {
+  return {
+    domain: unlockAvailable(status, "verified_domain"),
+    approval: true,
+    paid: opts.billingEnabled && unlockAvailable(status, "paid_entitlement"),
+  };
+}
+
 export type SendingAccessNoticeCopy = { headline: string; body: string };
 
-/** Disclosure copy for the restriction banner (dashboard + onboarding).
- *  Callers must already have confirmed `isSendingRestricted(status)` —
- *  this always returns the "restricted" copy, never the eligible one. */
+/** Disclosure copy for the restriction banner (dashboard + onboarding +
+ *  /sending-access). Callers must already have confirmed
+ *  `isSendingRestricted(status)` — this always returns the "restricted"
+ *  copy. The headline says nothing about inboxes (an account may have none
+ *  yet); the recovery sentence lists only the routes this deployment
+ *  honors. */
 export function sendingAccessNoticeCopy(
   status: SendingAccessStatus,
   opts: { billingEnabled: boolean },
 ): SendingAccessNoticeCopy {
-  const headline = "Your inbox is ready. External sending is restricted.";
-  const planClause = opts.billingEnabled ? ", activate a paid base plan" : "";
-  const body = status.owner_recipient_verified
-    ? `Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, send from your own verified domain or request approval${planClause}.`
-    : `Receive emails from anyone. Agent inboxes in this account are available for testing. To email other recipients, send from your own verified domain or request approval${planClause}.`;
-  return { headline, body };
+  const headline = "External sending is restricted for this account.";
+  const offered = offeredUnlocks(status, opts);
+  const routes: string[] = [];
+  if (offered.domain) routes.push("verify your own domain");
+  routes.push("request approval");
+  if (offered.paid) routes.push("activate a paid base plan");
+  let recovery: string;
+  if (routes.length === 1) {
+    recovery = "To email other recipients, request approval below.";
+  } else if (routes.length === 2) {
+    recovery = `To email other recipients, ${routes[0]} or ${routes[1]}.`;
+  } else {
+    recovery = `To email other recipients, ${routes.slice(0, -1).join(", ")}, or ${routes[routes.length - 1]}.`;
+  }
+  const reach = status.owner_recipient_verified
+    ? "Receive emails from anyone. Send to your verified account email or agent inboxes in this account."
+    : "Receive emails from anyone. Agent inboxes in this account are available for testing.";
+  return { headline, body: `${reach} ${recovery}` };
 }
 
 // ── Composer preflight ──────────────────────────────────────────────────

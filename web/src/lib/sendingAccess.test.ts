@@ -4,7 +4,9 @@ import {
   parseErrorEnvelope,
   parseExternalSendingNotEnabledError,
   parseRecipientList,
+  offeredUnlocks,
   sendingAccessEligibilityLabel,
+  sendingAccessEnabledRoute,
   sendingAccessNoticeCopy,
   type SendingAccessStatus,
 } from "./sendingAccess";
@@ -74,9 +76,9 @@ describe("sendingAccessEligibilityLabel", () => {
 describe("sendingAccessNoticeCopy", () => {
   it("offers the verified-email destination when owner proof exists", () => {
     const copy = sendingAccessNoticeCopy(base, { billingEnabled: false });
-    expect(copy.headline).toBe("Your inbox is ready. External sending is restricted.");
+    expect(copy.headline).toBe("External sending is restricted for this account.");
     expect(copy.body).toBe(
-      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, send from your own verified domain or request approval.",
+      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, verify your own domain or request approval.",
     );
   });
 
@@ -89,11 +91,49 @@ describe("sendingAccessNoticeCopy", () => {
     expect(copy.body).toMatch(/testing/);
   });
 
-  it("appends the paid-plan option only when the billing gate is enabled", () => {
+  it("lists all three routes as a proper list when billing is enabled and all unlocks apply", () => {
     const copy = sendingAccessNoticeCopy(base, { billingEnabled: true });
     expect(copy.body).toBe(
-      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, send from your own verified domain or request approval, activate a paid base plan.",
+      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, verify your own domain, request approval, or activate a paid base plan.",
     );
+  });
+
+  it.each([
+    [["operator_approval"], true, "To email other recipients, request approval below."],
+    [["operator_approval", "verified_domain"], true, "To email other recipients, verify your own domain or request approval."],
+    [["operator_approval", "paid_entitlement"], true, "To email other recipients, request approval or activate a paid base plan."],
+    [["operator_approval", "paid_entitlement"], false, "To email other recipients, request approval below."],
+  ])("unlocks %j (billing %s) → %s", (unlocks, billingEnabled, sentence) => {
+    const copy = sendingAccessNoticeCopy({ ...base, available_unlocks: unlocks }, { billingEnabled });
+    expect(copy.body.endsWith(sentence)).toBe(true);
+    expect(copy.headline).toBe("External sending is restricted for this account.");
+  });
+});
+
+describe("unlock-aware grants", () => {
+  it("a paid entitlement is not a grant where paid_entitlement is not an unlock", () => {
+    const hosted = { ...base, paid_external_sending_entitled: true, available_unlocks: ["operator_approval"] };
+    expect(isSendingRestricted(hosted)).toBe(true);
+    expect(sendingAccessEligibilityLabel(hosted)).toBeNull();
+    expect(sendingAccessEnabledRoute(hosted)).toBeNull();
+  });
+
+  it("an absent list (older server) keeps the paid grant", () => {
+    expect(isSendingRestricted({ ...base, paid_external_sending_entitled: true })).toBe(false);
+  });
+
+  it("operator approval always lifts it and names the route", () => {
+    const approved = { ...base, shared_external_approved: true, available_unlocks: ["operator_approval"] };
+    expect(isSendingRestricted(approved)).toBe(false);
+    expect(sendingAccessEnabledRoute(approved)).toBe("An operator approved external sending for this account.");
+  });
+
+  it("offeredUnlocks follows the list and the billing gate", () => {
+    expect(offeredUnlocks({ ...base, available_unlocks: ["operator_approval"] }, { billingEnabled: true })).toEqual({
+      domain: false, approval: true, paid: false,
+    });
+    expect(offeredUnlocks(base, { billingEnabled: false })).toEqual({ domain: true, approval: true, paid: false });
+    expect(offeredUnlocks(base, { billingEnabled: true })).toEqual({ domain: true, approval: true, paid: true });
   });
 });
 
