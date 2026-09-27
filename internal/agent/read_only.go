@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/identity"
 )
 
@@ -186,7 +187,9 @@ func (a *API) guardSessionWrite(w http.ResponseWriter, r *http.Request, next htt
 	if a.refuseIfReadOnly(w, r, user.ID) {
 		return
 	}
-	next.ServeHTTP(w, r)
+	// Hand the handler the session this guard resolved: one lookup, and the
+	// handler acts for exactly the user checked here.
+	next.ServeHTTP(w, auth.WithSessionUser(r, user))
 }
 
 // guardUnclassifiedWrite enforces read-only on a write route with no

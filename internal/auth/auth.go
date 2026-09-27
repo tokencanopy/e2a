@@ -768,8 +768,22 @@ func (ua *UserAuth) HandleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	ua.writeMe(w, updated)
 }
 
+// sessionUserKey carries a session user already resolved for this request
+// (WithSessionUser), so a guard and the handler behind it share one lookup.
+type sessionUserKey struct{}
+
+// WithSessionUser returns r carrying user as the session user that
+// AuthenticateRequest resolved for it. Only pass the result of
+// AuthenticateRequest on this same request.
+func WithSessionUser(r *http.Request, user *identity.User) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), sessionUserKey{}, user))
+}
+
 // AuthenticateRequest extracts the user from the session cookie. Returns nil if not authenticated.
 func (ua *UserAuth) AuthenticateRequest(r *http.Request) *identity.User {
+	if u, ok := r.Context().Value(sessionUserKey{}).(*identity.User); ok && u != nil {
+		return u
+	}
 	cookie, err := r.Cookie(SessionCookieName)
 	if err != nil {
 		return nil
