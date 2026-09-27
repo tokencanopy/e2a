@@ -32,14 +32,16 @@ create/update/delete/rotate/test, event redelivery, contacts and imports,
 templates, outreach (engagement) upserts/deletes, protection settings,
 suppression create/delete, the sending-access request, the account's legacy
 dashboard writes (profile PATCH, agent PUT/DELETE, key create/delete), OAuth
-consent (it mints a new grant), the HITL magic-link approve/reject, and the
-internal external-principal attach.
+consent `allow` (it mints a new grant), the HITL magic-link approve/reject, and
+attaching a new external principal.
 
 Allowed:
 
 - every read (lists, gets, message reads, exports, `GET /v1/account`,
   metrics, events, attachment downloads, WebSocket live-tail);
 - `POST /v1/templates/validate` (validates a draft, stores nothing);
+- OAuth consent `deny` (it grants nothing and must reach the client), and an
+  idempotent re-attach of an already-attached external principal;
 - sign-in and sign-out, OAuth token exchange/revocation and
   `/agent/identity` (the credentials they mint are refused for writes like
   any other);
@@ -62,9 +64,11 @@ Allowed:
 |---|---|---|
 | REST `/v1` (API keys of both scopes, dashboard session, OAuth access tokens, agent access tokens, delegated tokens) | `readOnlyGuard` Huma middleware | `operationAccess`: every operation explicit; rule = HTTP method (GET/HEAD read, else write) with three named exceptions (`validateTemplate` read, `deleteAccount` allowed write, `getInfo` public). An operation missing from the table falls back to the method rule, so an unclassified write is refused. |
 | Legacy mux (dashboard `/api/*`, OAuth) | `legacyReadOnlyMiddleware` gorilla middleware | `legacyWriteRoutes`: every non-GET route is `legacyAccountWrite` or `legacyExempt` with its reason. A `legacyAccountWrite` route authenticates the session cookie only, so the guard resolves the caller exactly as the handler does and refuses outright: an `Authorization` header on such a route is `400 ambiguous_credentials` (the guard and the handler can never disagree about the caller), no valid session is `401` from the guard itself. A write route missing from the table defaults to refuse: every credential presented must resolve and none may be read-only (an anonymous request carries no account and passes, which keeps routes the binary mounts on the same router — the SNS `/webhooks/ses` — working). |
+| Raw routes on the `/v1` chi root (not Huma operations) | per route, see `rawRouteReadOnly` | Every non-GET raw route is on an explicit list with its reason (unsubscribe = recipient action; magic links = handler check; trash interstitial unchanged). `TestRawRootRoutesAreClassifiedForReadOnly` walks the root with `chi.Walk` and fails on any other. |
+| OAuth consent (`POST /oauth2/consent`) | `handleOAuthConsent`, after the provider, authorize-request and session checks | Only `allow` is refused (it mints a grant). `deny` still returns fosite's `access_denied` redirect to the client, and unauthenticated callers keep consent's own 404/503/authorize errors. Consent authenticates the session cookie only, so an `Authorization` header cannot steer it. |
 | HITL magic links (`/v1/approve`, `/v1/reject` POST) | `refuseMagicIfReadOnly` in the handler | Token-authorized, not a principal request; the owning account is resolved from the message. |
-| Internal external-principal attach | handler check | The account is named in the signed body. |
-| MCP tools | the `/v1` guard (every tool calls the REST API with the caller's credential) | `MUTATING_TOOLS` / `NON_MUTATING_TOOLS`, pinned against the registered tools and the MCP annotations. The MCP server keeps no account state that could go stale. |
+| Internal external-principal attach | the store's attach transaction (`AttachExternalPrincipal`) | The account is named in the signed body. Attaching a NEW (issuer, subject) to a read-only account is `403 account_read_only`; an idempotent re-attach of an already-attached triple returns `200` as before (the external reconciler replays these). |
+| MCP tools | the `/v1` guard (every tool calls the REST API with the caller's credential) | `MUTATING_TOOLS` / `NON_MUTATING_TOOLS`, advertised on every tool as `_meta["e2a/mutating"]` and pinned by tests: against the registered tools; against the HTTP methods of the `/v1` operations each tool calls (`TOOL_OPERATIONS`, walked against `api/openapi.yaml` with the server's rule); and against the MCP annotations (no readOnlyHint tool mutates, every destructiveHint tool does). The MCP server keeps no account state that could go stale. |
 | HITL expiry sweep (`internal/hitlworker`) | the candidate queries (`ListExpiredPending`, `ListExpiredReviews`) | An approve-on-expiry hold of a read-only account is not a candidate: it stays `pending_review`, so suspicious inbound mail is never released into the inbox or webhooks and held outbound mail is never sent. Excluded at selection, not skipped in the worker, so such holds cannot sit at the head of the ordered, limited sweep and starve other accounts. Reject-on-expiry holds still resolve (rejecting releases nothing). A resume makes them candidates again. |
 | WebSocket | nothing to enforce | The live-tail socket has no client-to-server message types (client frames are discarded); it is a read surface. |
 
@@ -72,6 +76,11 @@ Freshness: the guards do one primary-key lookup per write, uncached, so an
 operator pause or resume takes effect on the very next request. Reads never
 pay the lookup. A failed lookup fails closed: `503 auth_unavailable`, the
 write does not run; so does a principal that resolved without an account.
+
+Rate limiting runs before the guard on `/v1`, so a refused write still
+counts against the caller's request budget. That order is deliberate: the
+guard does a database lookup, and running it first would let an
+over-the-limit caller drive unlimited lookups.
 
 Accepted window: the guard reads the control row before the handler runs,
 outside the handler's transaction. A write whose guard check passed a few
@@ -120,6 +129,15 @@ also freezes every customer write for that account. The readback prints
   account's valid key alongside the cookie (`400 ambiguous_credentials`), a
   bare bearer, and no credential (`401`); an unclassified write route
   defaults to refuse.
+- `internal/httpapi/read_only_routes_test.go`: every non-GET raw route on
+  the `/v1` chi root is a Huma operation or explicitly exempt.
+- `internal/agent/read_only_test.go` (consent): `allow` refused and creates
+  nothing, `deny` still redirects with `access_denied`, an unauthenticated
+  bad authorize request gets consent's own error; (attach) a replay of an
+  attached principal is `200`, a new one `403`.
+- `mcp/tests/tools.test.ts`: the mutating flag against `TOOL_OPERATIONS` ×
+  `api/openapi.yaml`, destructiveHint ⇒ mutating, and `_meta["e2a/mutating"]`
+  on every listed tool.
 - `internal/hitlworker/read_only_test.go`: the expiry sweep leaves a
   read-only account's approve-on-expiry holds pending (inbound and
   outbound), still rejects reject-on-expiry holds, and releases after a
