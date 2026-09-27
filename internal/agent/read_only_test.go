@@ -52,6 +52,11 @@ func setupLegacyReadOnlyAPI(t *testing.T) (*httptest.Server, *identity.Store) {
 	api.SetSupportContact("help@example.test")
 	router := mux.NewRouter()
 	api.RegisterRoutes(router)
+	// An unclassified write route mounted after RegisterRoutes, the way
+	// cmd/e2a mounts POST /webhooks/ses on the same router.
+	router.HandleFunc("/test/unclassified-write", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}).Methods(http.MethodPost)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 	return server, store
@@ -59,12 +64,24 @@ func setupLegacyReadOnlyAPI(t *testing.T) (*httptest.Server, *identity.Store) {
 
 func legacyDo(t *testing.T, method, url, session, body string) (int, string, string) {
 	t.Helper()
+	return legacyDoAuth(t, method, url, session, "", body)
+}
+
+// legacyDoAuth sends a legacy request with the session cookie (when session is
+// non-empty) and an Authorization header (when authz is non-empty).
+func legacyDoAuth(t *testing.T, method, url, session, authz, body string) (int, string, string) {
+	t.Helper()
 	req, err := http.NewRequest(method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
+	if session != "" {
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
+	}
+	if authz != "" {
+		req.Header.Set("Authorization", authz)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -119,9 +136,50 @@ func TestLegacyAccountWritesRefusedForAnAbusePausedAccount(t *testing.T) {
 			t.Errorf("%s %s message %q: want the support contact and never the pause reason", w.method, w.path, msg)
 		}
 	}
+	// The guard authenticates exactly as the handlers do (the session cookie)
+	// and cannot be steered onto another identity by an Authorization header:
+	// a junk bearer, or a valid key of another, unpaused account, alongside
+	// the read-only session is refused outright on every cookie-only route.
+	other, err := store.CreateOrGetUser(ctx, "legacy-other@example.test", "Other", "sub-legacy-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := store.CreateAPIKey(ctx, other.ID, "other", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, authz := range []struct{ name, header string }{
+		{"junk bearer", "Bearer junk"},
+		{"foreign account key", "Bearer " + otherKey.PlaintextKey},
+	} {
+		for _, w := range writes {
+			status, code, _ := legacyDoAuth(t, w.method, server.URL+w.path, session, authz.header, w.body)
+			if status != http.StatusBadRequest || code != "ambiguous_credentials" {
+				t.Errorf("%s: %s %s = %d %q, want 400 ambiguous_credentials", authz.name, w.method, w.path, status, code)
+			}
+		}
+	}
+	// A bare bearer (no session) on a cookie-only route is refused the same
+	// way: the route cannot authenticate it and the guard will not guess.
+	for _, w := range writes {
+		status, code, _ := legacyDoAuth(t, w.method, server.URL+w.path, "", "Bearer "+key.PlaintextKey, w.body)
+		if status != http.StatusBadRequest || code != "ambiguous_credentials" {
+			t.Errorf("bare bearer: %s %s = %d %q, want 400 ambiguous_credentials", w.method, w.path, status, code)
+		}
+	}
+	// No credential at all: refused by the guard with 401, never passed on.
+	for _, w := range writes {
+		if status, _, _ := legacyDoAuth(t, w.method, server.URL+w.path, "", "", w.body); status != http.StatusUnauthorized {
+			t.Errorf("anonymous: %s %s = %d, want 401", w.method, w.path, status)
+		}
+	}
+
 	// Nothing changed underneath the refusals.
 	if got, err := store.GetAgentByEmail(ctx, ag.EmailAddress()); err != nil || got == nil || got.Name != "RO" {
 		t.Fatalf("agent changed or vanished under a refused write: %+v err=%v", got, err)
+	}
+	if got, err := store.GetUserByID(ctx, user.ID); err != nil || got.Name != "RO" {
+		t.Fatalf("profile changed under a refused write: %+v err=%v", got, err)
 	}
 	keys, err := store.ListAPIKeys(ctx, user.ID, 100, time.Time{}, "")
 	if err != nil || len(keys) != 1 {
@@ -141,6 +199,57 @@ func TestLegacyAccountWritesRefusedForAnAbusePausedAccount(t *testing.T) {
 	}
 	if status, _, _ := legacyDo(t, http.MethodGet, server.URL+"/api/auth/me", session, ""); status != http.StatusUnauthorized {
 		t.Errorf("GET /api/auth/me after sign-out = %d, want 401 (the session must be gone)", status)
+	}
+}
+
+// An unclassified legacy write route is refused for a read-only account
+// whichever credential names it, a credential that fails to resolve is
+// refused, and an anonymous request (no account) still reaches the handler.
+func TestUnclassifiedLegacyWriteRouteDefaultsToRefuse(t *testing.T) {
+	server, store := setupLegacyReadOnlyAPI(t)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "legacy-uncl@example.test", "U", "sub-legacy-uncl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := store.CreateAPIKey(ctx, user.ID, "k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.CreateUserSession(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.CreateOrGetUser(ctx, "legacy-uncl-other@example.test", "O", "sub-legacy-uncl-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := store.CreateAPIKey(ctx, other.ID, "o", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := server.URL + "/test/unclassified-write"
+	if status, code, _ := legacyDoAuth(t, http.MethodPost, url, session, "", ""); status != http.StatusNoContent {
+		t.Fatalf("writable account: %d %q, want 204", status, code)
+	}
+	setPause(t, store, user.ID, "paused", "abuse")
+	cases := []struct {
+		name, session, authz string
+		want                 int
+	}{
+		{"anonymous", "", "", http.StatusNoContent},
+		{"stale session", "sess_unknown", "", http.StatusNoContent},
+		{"read-only session", session, "", http.StatusForbidden},
+		{"read-only key", "", "Bearer " + key.PlaintextKey, http.StatusForbidden},
+		{"foreign key + read-only session", session, "Bearer " + otherKey.PlaintextKey, http.StatusForbidden},
+		{"foreign key alone", "", "Bearer " + otherKey.PlaintextKey, http.StatusNoContent},
+		{"junk bearer", "", "Bearer junk", http.StatusUnauthorized},
+		{"junk bearer + read-only session", session, "Bearer junk", http.StatusUnauthorized},
+	}
+	for _, c := range cases {
+		if status, code, _ := legacyDoAuth(t, http.MethodPost, url, c.session, c.authz, ""); status != c.want {
+			t.Errorf("%s: %d %q, want %d", c.name, status, code, c.want)
+		}
 	}
 }
 
