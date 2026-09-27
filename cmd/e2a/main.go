@@ -135,7 +135,7 @@ func main() {
 	flag.BoolVar(&spFlags.pauseAccount, "pause-account-sending", false, "pause an account's sending (requires -account-id, -pause-class, -reason; optional -evidence-ref); works on trashed accounts, then exit")
 	flag.BoolVar(&spFlags.resumeAccount, "resume-account-sending", false, "resume a paused account's sending (requires -account-id, -reason), then exit")
 	flag.BoolVar(&spFlags.inspectPause, "inspect-account-sending", false, "print an account's pause state and class (requires -account-id), then exit")
-	flag.StringVar(&spFlags.pauseClass, "pause-class", "", "pause class for -pause-account-sending: operator, abuse, billing or system (abuse makes a later purge write abuse tombstones)")
+	flag.StringVar(&spFlags.pauseClass, "pause-class", "", "pause class for -pause-account-sending: operator, abuse, billing or system (abuse also makes the account read-only — every customer write is refused — and makes a later purge write abuse tombstones)")
 	flag.StringVar(&spFlags.evidenceRef, "evidence-ref", "", "optional private evidence reference (e.g. an incident id, max 200 chars) recorded with a pause and kept in the deleted-account summary")
 
 	var acctFlags accountCommandFlags
