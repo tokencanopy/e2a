@@ -99,15 +99,23 @@ describe("sendingAccessNoticeCopy", () => {
   });
 
   it.each([
-    [["operator_approval"], true, "To email other recipients, request approval below."],
+    [["operator_approval"], true, "To email other recipients, request approval."],
     [["operator_approval", "verified_domain"], true, "To email other recipients, verify your own domain or request approval."],
     [["operator_approval", "paid_entitlement"], true, "To email other recipients, request approval or activate a paid base plan."],
-    [["operator_approval", "paid_entitlement"], false, "To email other recipients, request approval below."],
+    [["operator_approval", "paid_entitlement"], false, "To email other recipients, request approval."],
   ])("unlocks %j (billing %s) → %s", (unlocks, billingEnabled, sentence) => {
     const copy = sendingAccessNoticeCopy({ ...base, available_unlocks: unlocks }, { billingEnabled });
     expect(copy.body.endsWith(sentence)).toBe(true);
     expect(copy.headline).toBe("External sending is restricted for this account.");
   });
+});
+
+it("says 'below' only when the request form renders under the copy", () => {
+  const approvalOnly = { ...base, available_unlocks: ["operator_approval"] };
+  expect(sendingAccessNoticeCopy(approvalOnly, { billingEnabled: false, formBelow: true }).body).toMatch(
+    /request approval below\.$/,
+  );
+  expect(sendingAccessNoticeCopy(approvalOnly, { billingEnabled: false }).body).toMatch(/request approval\.$/);
 });
 
 describe("unlock-aware grants", () => {

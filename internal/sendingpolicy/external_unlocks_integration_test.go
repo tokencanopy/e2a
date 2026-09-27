@@ -232,7 +232,7 @@ func TestSubmitAccessRequestRefusesUnrestrictedAccounts(t *testing.T) {
 		want   error
 	}{
 		"restricted standard account files": {esaPolicy(sendingpolicy.ModeEnforce), func(*fixture, string) {}, nil},
-		"already approved": {esaPolicy(sendingpolicy.ModeEnforce), func(f *fixture, u string) { f.setApproved(u, true) }, sendingpolicy.ErrSendingAccessNotRestricted},
+		"already approved":                  {esaPolicy(sendingpolicy.ModeEnforce), func(f *fixture, u string) { f.setApproved(u, true) }, sendingpolicy.ErrSendingAccessNotRestricted},
 		"paid entitlement where it unlocks": {esaPolicy(sendingpolicy.ModeEnforce), func(f *fixture, u string) { f.setEntitled(u, true) }, sendingpolicy.ErrSendingAccessNotRestricted},
 		"paid entitlement under approval-only": {esaUnlockPolicy([]sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval}),
 			func(f *fixture, u string) { f.setEntitled(u, true) }, nil},

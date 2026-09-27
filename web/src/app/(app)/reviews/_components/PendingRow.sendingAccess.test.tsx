@@ -140,6 +140,27 @@ describe("PendingRow — external sending access preflight", () => {
     expect(screen.queryByText(/External sending is restricted/)).not.toBeInTheDocument();
   });
 
+  it("hosted approval-only policy: a verified agent domain does NOT suppress the warning", async () => {
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: { ...restrictedAccount.sending_access, available_unlocks: ["operator_approval"] },
+      },
+      domains: [
+        {
+          domain: "acme.dev",
+          verified: true,
+          capabilities: { inbound: "verified", outbound: "verified" },
+        },
+      ],
+    });
+    render(<PendingRow summary={summary} expanded onToggle={() => {}} onResolved={() => {}} />);
+
+    const warning = await screen.findByRole("alert");
+    expect(warning).toHaveTextContent("External sending is restricted for this account");
+    expect(warning).toHaveTextContent("customer@bigco.example");
+  });
+
   it("does not warn when the account isn't restricted", async () => {
     stage({ account: notRestrictedAccount });
     render(<PendingRow summary={summary} expanded onToggle={() => {}} onResolved={() => {}} />);

@@ -81,7 +81,9 @@ describe("SendingAccessNotice", () => {
     render(<SendingAccessNotice status={{ ...restricted, available_unlocks: ["operator_approval"] }} />);
     const links = screen.getAllByRole("link").map((l) => l.textContent);
     expect(links).toEqual(["Request approval"]);
-    expect(screen.getByText(/To email other recipients, request approval below\./)).toBeInTheDocument();
+    // The notice links to the form; it is not "below" here.
+    expect(screen.getByText(/To email other recipients, request approval\.$/)).toBeInTheDocument();
+    expect(screen.queryByText(/below/)).not.toBeInTheDocument();
   });
 
   it("verified_domain listed: offers Verify a domain after Request approval", () => {

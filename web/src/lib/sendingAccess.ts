@@ -108,12 +108,12 @@ export type SendingAccessNoticeCopy = { headline: string; body: string };
 /** Disclosure copy for the restriction banner (dashboard + onboarding +
  *  /sending-access). Callers must already have confirmed
  *  `isSendingRestricted(status)` — this always returns the "restricted"
- *  copy. The headline says nothing about inboxes (an account may have none
+ *  copy. Pass `formBelow` only when the request form renders beneath it. The headline says nothing about inboxes (an account may have none
  *  yet); the recovery sentence lists only the routes this deployment
  *  honors. */
 export function sendingAccessNoticeCopy(
   status: SendingAccessStatus,
-  opts: { billingEnabled: boolean },
+  opts: { billingEnabled: boolean; formBelow?: boolean },
 ): SendingAccessNoticeCopy {
   const headline = "External sending is restricted for this account.";
   const offered = offeredUnlocks(status, opts);
@@ -123,7 +123,12 @@ export function sendingAccessNoticeCopy(
   if (offered.paid) routes.push("activate a paid base plan");
   let recovery: string;
   if (routes.length === 1) {
-    recovery = "To email other recipients, request approval below.";
+    // "below" only where the request form is actually rendered under the
+    // copy (the /sending-access page with no pending request); the inbox
+    // notice links to it instead.
+    recovery = opts.formBelow
+      ? "To email other recipients, request approval below."
+      : "To email other recipients, request approval.";
   } else if (routes.length === 2) {
     recovery = `To email other recipients, ${routes[0]} or ${routes[1]}.`;
   } else {

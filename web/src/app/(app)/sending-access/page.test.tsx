@@ -147,10 +147,18 @@ describe("/sending-access", () => {
   });
 
   it("shows the under-review state and hides the form for a pending request", async () => {
-    stage({ account: restrictedAccount, requestGet: requestView("pending") });
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: { ...restrictedAccount.sending_access, available_unlocks: ["operator_approval"] },
+      },
+      requestGet: requestView("pending"),
+    });
     render(<SendingAccessPage />);
 
     expect(await screen.findByText("Your request is under review")).toBeInTheDocument();
+    // The form is hidden while pending, so the copy must not point "below".
+    expect(screen.queryByText(/request approval below/)).not.toBeInTheDocument();
     // The decision email makes this promise true.
     expect(screen.getByText("We'll follow up by email once an operator decides.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Submit request" })).not.toBeInTheDocument();

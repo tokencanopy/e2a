@@ -174,7 +174,7 @@ export default function SendingAccessPage() {
           </div>
         ) : restricted ? (
           (() => {
-            const copy = sendingAccessNoticeCopy(status, { billingEnabled });
+            const copy = sendingAccessNoticeCopy(status, { billingEnabled, formBelow: showForm });
             const offered = offeredUnlocks(status, { billingEnabled });
             return (
               <div data-testid="sending-access-restricted-card" className="p-4" style={cardStyle("var(--warn-bg)", "var(--warn-bg)")}>
