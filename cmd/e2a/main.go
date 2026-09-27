@@ -128,6 +128,8 @@ func main() {
 	flag.BoolVar(&spFlags.approveExternal, "approve-external-sending", false, "grant an account shared-identity external sending (requires -account-id, -expected-external-sending-revision, -reason; optional -external-sending-request-id), then exit")
 	flag.BoolVar(&spFlags.revokeExternal, "revoke-external-sending", false, "revoke an account's shared-identity external sending grant (requires -account-id, -expected-external-sending-revision, -reason), then exit")
 	flag.BoolVar(&spFlags.declineExternal, "decline-external-sending-request", false, "decline a pending external sending request without changing the grant (requires -account-id, -external-sending-request-id), then exit")
+	flag.BoolVar(&spFlags.listExternal, "list-external-sending-requests", false, "list pending external sending requests (id, account, created_at, volume, current grant; add -all for every request), then exit")
+	flag.BoolVar(&spFlags.listAll, "all", false, "with -list-external-sending-requests: include decided requests")
 	flag.StringVar(&spFlags.accountID, "account-id", "", "account (user) id an external sending command acts on")
 	flag.Int64Var(&spFlags.expectedExternal, "expected-external-sending-revision", -1, "external sending access revision the operator inspected (CAS)")
 	flag.StringVar(&spFlags.requestID, "external-sending-request-id", "", "pending external sending request an approve/decline decides")

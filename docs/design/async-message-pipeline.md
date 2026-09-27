@@ -416,7 +416,13 @@ deployment's notification identity (`notifications.from_address` /
 `reply_to`), authorized through the gate as a `customer_notification`
 operation keyed by the request (`op_esad_<request>`); operator-authored copy
 only, never the customer's free text. A failed notice prints a warning and
-never fails the command. The operator notification of a NEW request is skipped
+never fails the command. `-list-external-sending-requests` (add `-all` for
+decided ones) prints the review queue — request id, account id, state, times,
+expected volume and the account's current grant, never customer text — and a
+direct grant while a request is pending prints a warning to re-run with
+`-external-sending-request-id`. Requests from accounts the rule does not
+currently restrict are refused with `409 conflict`. The operator notification
+of a NEW request is skipped
 for system/internal (`account_class`-exempt) accounts, which the rule never
 binds. Operator grants are
 local server commands (`-approve-external-sending` / `-revoke-external-sending`

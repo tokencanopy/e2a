@@ -494,3 +494,50 @@ func (m *Module) LatestAccessRequest(ctx context.Context, userID string) (*Acces
 	}
 	return &r, nil
 }
+
+// AccessRequestListing is one row of the operator's request queue. Account
+// id, state and numbers only — no customer free text and no address.
+type AccessRequestListing struct {
+	ID                  string
+	AccountID           string
+	State               string
+	CreatedAt           time.Time
+	DecidedAt           *time.Time
+	ExpectedDailyVolume int
+	// Approved is the account's CURRENT shared-identity grant.
+	Approved bool
+}
+
+// maxAccessRequestListing bounds one listing; the queue is a review
+// worklist, not an export.
+const maxAccessRequestListing = 500
+
+// ListAccessRequests returns pending requests (or, with all, every request)
+// oldest first, each with the account's current grant. It is the operator's
+// queue: the new-request email is a notification, not the system of record.
+func (m *Module) ListAccessRequests(ctx context.Context, all bool) ([]AccessRequestListing, error) {
+	rows, err := m.pool.Query(ctx, `
+		SELECT r.id, r.user_id, r.state, r.created_at, r.decided_at, r.expected_daily_volume,
+		       COALESCE(c.external_sending_approved, false)
+		  FROM external_sending_access_requests AS r
+		  LEFT JOIN account_sending_controls AS c ON c.user_id = r.user_id
+		 WHERE $1 OR r.state = 'pending'
+		 ORDER BY r.created_at, r.id
+		 LIMIT $2`, all, maxAccessRequestListing)
+	if err != nil {
+		return nil, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
+	}
+	defer rows.Close()
+	var out []AccessRequestListing
+	for rows.Next() {
+		var l AccessRequestListing
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.State, &l.CreatedAt, &l.DecidedAt, &l.ExpectedDailyVolume, &l.Approved); err != nil {
+			return nil, fmt.Errorf("sendingpolicy: scan sending access request: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
+	}
+	return out, nil
+}

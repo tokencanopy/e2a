@@ -496,3 +496,71 @@ func TestExternalSendingDecisionNotice(t *testing.T) {
 		t.Fatalf("out=%q", out.String())
 	}
 }
+
+func TestListExternalSendingRequestsAndPendingWarning(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	clearEnvForTest(t)
+	cfg := spTestConfig()
+	cfg.SendingProtect.ExternalSendingAccess = &config.ExternalSendingAccessConfig{Mode: "enforce", AccountsCreatedAtOrAfter: "1970-01-01T00:00:00Z",
+		Unlocks: []string{"operator_approval"}}
+	policy, err := sendingpolicy.FromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, policy)
+	file := func(user string) string {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO users (id, email, google_subject) VALUES ($1, $1 || '@list-cmd.example.test', 'sub-' || $1)`, user); err != nil {
+			t.Fatal(err)
+		}
+		req, _, err := module.SubmitAccessRequest(ctx, user, sendingpolicy.AccessRequestInput{UseCase: "synthetic secret use case", Recipients: "synthetic", ExpectedDailyVolume: 42})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req.ID
+	}
+	reqA := file("usr_list_a")
+	reqB := file("usr_list_b")
+	if err := module.DeclineExternalAccessRequest(ctx, "usr_list_b", reqB, "cli:test"); err != nil {
+		t.Fatal(err)
+	}
+	run := func(f *sendingProtectionFlags) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runSendingProtectionCommand(ctx, cfg, pool, sendingpolicy.Secrets{}, f, &out); err != nil {
+			t.Fatalf("command: %v", err)
+		}
+		return out.String()
+	}
+
+	out := run(&sendingProtectionFlags{listExternal: true})
+	for _, want := range []string{"requests (pending):           1", "request_id:               " + reqA, "account_id:               usr_list_a",
+		"state:                    pending", "expected_daily_volume:    42", "external_sending_approved: false", "created_at:"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("pending listing missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, reqB) {
+		t.Fatalf("a decided request must not appear without -all:\n%s", out)
+	}
+	if strings.Contains(out, "secret use case") || strings.Contains(out, "@") {
+		t.Fatalf("the listing must not print customer text or addresses:\n%s", out)
+	}
+	all := run(&sendingProtectionFlags{listExternal: true, listAll: true})
+	if !strings.Contains(all, "requests (all):           2") || !strings.Contains(all, reqB) || !strings.Contains(all, "state:                    declined") || !strings.Contains(all, "decided_at:") {
+		t.Fatalf("-all listing:\n%s", all)
+	}
+
+	// A direct grant while a request is pending warns and does not decide it.
+	var buf bytes.Buffer
+	if err := runExternalSendingCommand(ctx, module, &fakeDecisionNotifier{}, &sendingProtectionFlags{approveExternal: true, accountID: "usr_list_a", expectedExternal: 0, reason: "direct"}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "warning:                  request "+reqA+" is still pending; re-run with -external-sending-request-id "+reqA) {
+		t.Fatalf("missing pending warning:\n%s", buf.String())
+	}
+	if latest, _ := module.LatestAccessRequest(ctx, "usr_list_a"); latest == nil || latest.State != "pending" {
+		t.Fatalf("a direct grant must not auto-decide the request: %+v", latest)
+	}
+}

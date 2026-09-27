@@ -36,6 +36,8 @@ type sendingProtectionFlags struct {
 	approveExternal  bool
 	revokeExternal   bool
 	declineExternal  bool
+	listExternal     bool
+	listAll          bool
 	accountID        string
 	expectedExternal int64
 	requestID        string
@@ -63,14 +65,14 @@ type sendingProtectionFlags struct {
 
 func (f *sendingProtectionFlags) commandRequested() bool {
 	return f.inspect || f.activate || f.register || f.attest || f.capabilities || f.reconcile ||
-		f.inspectExternal || f.approveExternal || f.revokeExternal || f.declineExternal ||
+		f.inspectExternal || f.approveExternal || f.revokeExternal || f.declineExternal || f.listExternal ||
 		f.pauseAccount || f.resumeAccount || f.inspectPause
 }
 
 func (f *sendingProtectionFlags) selectedCount() int {
 	n := 0
 	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile,
-		f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal,
+		f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal, f.listExternal,
 		f.pauseAccount, f.resumeAccount, f.inspectPause} {
 		if set {
 			n++
@@ -133,6 +135,8 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 		return runPrintCapabilities(source, secrets, stdout)
 	case f.reconcile:
 		return runReconcileLegacySendingJobs(ctx, pool, sendingpolicy.NewGate(pool, secrets, source, policy), stdout)
+	case f.listExternal:
+		return runListExternalRequests(ctx, sendingpolicy.NewPolicyModule(pool, secrets, source, policy), f.listAll, stdout)
 	case f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal:
 		module := sendingpolicy.NewPolicyModule(pool, secrets, source, policy)
 		return runExternalSendingCommand(ctx, module, newDecisionNotifier(cfg, pool, module), f, stdout)
@@ -368,6 +372,11 @@ func runExternalSendingCommand(ctx context.Context, module *sendingpolicy.Module
 		// direct grant (for example pre-granting existing accounts before a
 		// rollout) has no request to answer.
 		sendDecisionNotice(ctx, notifier, f.requestID, stdout)
+	} else if f.approveExternal && res.Record.PendingRequestID != "" {
+		// A direct grant does not decide the account's open request; left
+		// alone it stays pending forever and the owner is never told.
+		fmt.Fprintf(stdout, "warning:                  request %s is still pending; re-run with -external-sending-request-id %s to decide it and email the account owner\n",
+			res.Record.PendingRequestID, res.Record.PendingRequestID)
 	}
 	if !res.Record.Approved && res.Record.PaidEntitled && unlockAvailable(res.Record.AvailableUnlocks, sendingpolicy.UnlockPaidEntitlement) {
 		fmt.Fprintf(stdout, "warning:                  the account still holds the paid-base entitlement, which independently allows external sending; pause the account to stop all sending\n")
@@ -508,4 +517,32 @@ func sendDecisionNotice(ctx context.Context, notifier decisionNotifier, requestI
 		return
 	}
 	fmt.Fprintf(stdout, "decision_notice:          sent to the account owner\n")
+}
+
+// runListExternalRequests prints the operator's request queue: pending
+// requests by default, every request with -all. Ids, states, times and
+// numbers only — never customer free text or an address.
+func runListExternalRequests(ctx context.Context, module *sendingpolicy.Module, all bool, stdout io.Writer) error {
+	reqs, err := module.ListAccessRequests(ctx, all)
+	if err != nil {
+		return err
+	}
+	scope := "pending"
+	if all {
+		scope = "all"
+	}
+	fmt.Fprintf(stdout, "requests (%s):           %d\n", scope, len(reqs))
+	for _, r := range reqs {
+		fmt.Fprintf(stdout, "\n")
+		fmt.Fprintf(stdout, "request_id:               %s\n", r.ID)
+		fmt.Fprintf(stdout, "account_id:               %s\n", r.AccountID)
+		fmt.Fprintf(stdout, "state:                    %s\n", r.State)
+		fmt.Fprintf(stdout, "created_at:               %s\n", r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		if r.DecidedAt != nil {
+			fmt.Fprintf(stdout, "decided_at:               %s\n", r.DecidedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		}
+		fmt.Fprintf(stdout, "expected_daily_volume:    %d\n", r.ExpectedDailyVolume)
+		fmt.Fprintf(stdout, "external_sending_approved: %v\n", r.Approved)
+	}
+	return nil
 }
