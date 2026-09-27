@@ -124,7 +124,7 @@ Usage:
   e2a sending-access status         Beta: show this account's external-sending restriction
                                    and its latest access request, if any
         --json                     Raw { sendingAccess, latestRequest } objects
-  e2a sending-access request        Beta: ask support to review external sending access
+  e2a sending-access request        Beta: ask an operator to review external sending access
         --use-case <text>          What you're building and why (1-2000 chars)
         --recipients <text>        Who you'll email (1-1000 chars)
         --volume <n>               Expected recipients per day (1-1000000)

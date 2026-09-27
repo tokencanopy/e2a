@@ -190,6 +190,29 @@ describe("whoami command", () => {
     expect(output).not.toContain("External sending:");
   });
 
+  it("a paid plan is not a grant where available_unlocks omits paid_entitlement", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: true,
+          ownerRecipientVerified: true,
+          availableUnlocks: ["operator_approval"],
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("External sending: restricted");
+    expect(output).toContain("request approval");
+    // Only routes the deployment honors are offered.
+    expect(output).not.toContain("verified domain");
+    expect(output).not.toContain("paid plan");
+  });
+
   it("says nothing new when sending_access is omitted (older/self-host deployment)", async () => {
     mockAccountGet.mockResolvedValue(makeAccount());
     const { whoami } = await import("../commands/whoami.js");
