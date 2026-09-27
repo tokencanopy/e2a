@@ -74,6 +74,24 @@ type Module struct {
 	configPolicy RuntimePolicy
 
 	commitAttestation func(context.Context, pgx.Tx) error
+
+	// clock is the ingestion clock the feedback path stamps aggregates with;
+	// nil means time.Now. Tests and staging drills pin it to cross UTC days.
+	clock func() time.Time
+}
+
+// WithClock pins the module's ingestion clock (feedback day assignment and
+// retention); nil restores time.Now.
+func (m *Module) WithClock(fn func() time.Time) *Module {
+	m.clock = fn
+	return m
+}
+
+func (m *Module) now() time.Time {
+	if m.clock != nil {
+		return m.clock()
+	}
+	return time.Now()
 }
 
 // NewModule binds the module to a pool and the immutable trust roots parsed at

@@ -593,6 +593,9 @@ type Store struct {
 	// transactions (mode "trash" / "restore") — how the durable billing
 	// notice is enqueued atomically with the transition.
 	accountStateHook func(ctx context.Context, tx pgx.Tx, userID, mode string) error
+	// feedbackRetentionOverride is the policy-supplied post-deletion horizon
+	// for retained feedback provenance; zero means DefaultFeedbackRetention.
+	feedbackRetentionOverride time.Duration
 }
 
 // SetAccountStateHook installs the in-transaction account-state hook (see

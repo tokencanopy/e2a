@@ -31,7 +31,9 @@ type outboundSendingDeps struct {
 type outboundSending struct {
 	gate sendingpolicy.Gate
 	// module is the same policy owner behind gate, exposed through its other
-	// narrow roles (external-sending-access preflight/status/requests).
+	// narrow roles: external-sending-access preflight/status/requests, the
+	// deletion-resistant feedback processor, the keyring coverage check, and
+	// the retention janitor all hang off it.
 	module    *sendingpolicy.Module
 	submitter *outbound.ProviderSubmitter
 	jobs      *outboundsend.Jobs
