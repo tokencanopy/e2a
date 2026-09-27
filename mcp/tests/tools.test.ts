@@ -12,7 +12,13 @@ import {
 import type { McpClient } from "../src/client.js";
 import { buildServer } from "../src/server.js";
 import { ADMIN_TOOLS, assertToolTiersComplete, toolNamesForScope, RUNTIME_TOOLS } from "../src/tools/tiers.js";
-import { assertMutatingClassificationComplete, MUTATING_TOOLS, NON_MUTATING_TOOLS } from "../src/tools/mutating.js";
+import {
+  assertMutatingClassificationComplete,
+  MUTATING_META_KEY,
+  MUTATING_TOOLS,
+  NON_MUTATING_TOOLS,
+  TOOL_OPERATIONS,
+} from "../src/tools/mutating.js";
 import { messageSummaryViewForTool, registerMessageTools } from "../src/tools/messages.js";
 import { registerAgentTools } from "../src/tools/agents.js";
 import { registerDomainTools } from "../src/tools/domains.js";
@@ -1174,6 +1180,59 @@ describe("e2a MCP server", () => {
       if (t.annotations?.readOnlyHint === true) {
         expect(NON_MUTATING_TOOLS.has(t.name), `${t.name} is readOnlyHint, so it must be non-mutating`).toBe(true);
       }
+    }
+  });
+
+  it("every destructiveHint tool is mutating", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      if (t.annotations?.destructiveHint === true) {
+        expect(MUTATING_TOOLS.has(t.name), `${t.name} is destructiveHint, so it must be mutating`).toBe(true);
+      }
+    }
+  });
+
+  it("every tool advertises its mutating flag as _meta[\"e2a/mutating\"]", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      expect(t._meta?.[MUTATING_META_KEY], `${t.name} _meta["${MUTATING_META_KEY}"]`).toBe(MUTATING_TOOLS.has(t.name));
+    }
+  });
+
+  it("the mutating flag matches the HTTP methods of the /v1 operations each tool calls", async () => {
+    // Walk api/openapi.yaml for operationId → method (the committed spec is
+    // golden-tested against the live handlers, so it is the server's truth).
+    const spec = readFileSync(new URL("../../api/openapi.yaml", import.meta.url), "utf8");
+    const methodOf = new Map<string, string>();
+    let inPaths = false;
+    let method = "";
+    for (const line of spec.split("\n")) {
+      if (/^paths:\s*$/.test(line)) { inPaths = true; continue; }
+      if (inPaths && /^\S/.test(line)) inPaths = false;
+      if (!inPaths) continue;
+      const m = /^ {4}(get|put|post|patch|delete|head|options):\s*$/.exec(line);
+      if (m) { method = m[1]!.toUpperCase(); continue; }
+      const op = /^ {6}operationId:\s*(\S+)\s*$/.exec(line);
+      if (op && method) methodOf.set(op[1]!, method);
+    }
+    expect(methodOf.get("sendMessage")).toBe("POST");
+    expect(methodOf.get("listAgents")).toBe("GET");
+    // Independent derivation of the server's rule (classifyOperation):
+    // GET/HEAD read, everything else a write, except validateTemplate.
+    const isWrite = (opId: string) => {
+      const mth = methodOf.get(opId);
+      if (!mth) throw new Error(`TOOL_OPERATIONS names ${opId}, which api/openapi.yaml does not define`);
+      if (opId === "validateTemplate") return false;
+      return mth !== "GET" && mth !== "HEAD";
+    };
+    const { tools } = await client.listTools(); // account scope → full surface
+    const registered = new Set(tools.map((t) => t.name));
+    expect(new Set(Object.keys(TOOL_OPERATIONS))).toEqual(registered);
+    for (const name of registered) {
+      const ops = TOOL_OPERATIONS[name] ?? [];
+      expect(ops.length, `${name} names at least one operation`).toBeGreaterThan(0);
+      const writes = ops.some(isWrite);
+      expect(MUTATING_TOOLS.has(name), `${name} calls ${ops.join(", ")}: mutating must be ${writes}`).toBe(writes);
     }
   });
 

@@ -14,9 +14,12 @@
 // This map records which tools that guard will refuse (mutating: the tool
 // calls a /v1 write operation) and which stay available (reads). It is the
 // contract an agent can rely on — "while read-only, exactly these tools keep
-// working" — and it is pinned by tests: every registered tool must be in
-// exactly one set, and the sets must agree with the MCP annotations
-// (a readOnlyHint tool never mutates; a mutating tool is never readOnlyHint).
+// working" — advertised on every tool as `_meta["e2a/mutating"]` (set in
+// server.ts at registration) and pinned by tests: every registered tool must
+// be in exactly one set; the sets must agree with the HTTP methods of the /v1
+// operations each tool calls (TOOL_OPERATIONS, walked against
+// api/openapi.yaml); and they must agree with the MCP annotations (a
+// readOnlyHint tool never mutates; a destructiveHint tool always does).
 
 /** Tools that call a /v1 write operation — refused for a read-only account. */
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
@@ -115,6 +118,108 @@ export const NON_MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "get_agent_metrics",
   "get_account_metrics",
 ]);
+
+/**
+ * The /v1 operation(s) (OpenAPI operationId) each tool calls. This is the
+ * independent evidence behind the two sets above: a test walks it against
+ * api/openapi.yaml and requires a tool to be in MUTATING_TOOLS exactly when
+ * one of its operations is a write under the server's rule (any method other
+ * than GET/HEAD, except validateTemplate, which stores nothing) — the same
+ * rule as `classifyOperation` in internal/httpapi/read_only.go.
+ */
+export const TOOL_OPERATIONS: Readonly<Record<string, readonly string[]>> = {
+  // agents
+  whoami: ["getAccount"],
+  list_agents: ["listAgents"],
+  get_agent: ["getAgent"],
+  create_agent: ["createAgent"],
+  update_agent: ["updateAgent"],
+  get_protection: ["getAgentProtection"],
+  update_protection: ["getAgentProtection", "putAgentProtection"],
+  delete_agent: ["deleteAgent"],
+  restore_agent: ["restoreAgent"],
+  // messages
+  list_messages: ["listMessages"],
+  get_message: ["getMessage"],
+  get_message_lifecycle: ["getMessageLifecycle"],
+  get_attachment: ["getAttachment"],
+  get_attachment_data: ["getAttachment"],
+  send_message: ["sendMessage"],
+  send_email: ["sendMessage"],
+  reply_to_message: ["replyToMessage"],
+  forward_message: ["forwardMessage"],
+  update_message_labels: ["updateMessage"],
+  delete_message: ["deleteMessage"],
+  restore_message: ["restoreMessage"],
+  list_conversations: ["listConversations"],
+  get_conversation: ["getConversation"],
+  // reviews (canonical + deprecated aliases)
+  list_reviews: ["listReviews"],
+  get_review: ["getReview"],
+  approve_review: ["approveReview"],
+  reject_review: ["rejectReview"],
+  list_pending_messages: ["listReviews"],
+  get_pending_message: ["getReview"],
+  approve_pending_message: ["approveReview"],
+  reject_pending_message: ["rejectReview"],
+  approve_message: ["approveReview"],
+  reject_message: ["rejectReview"],
+  // domains
+  list_domains: ["listDomains"],
+  get_domain: ["getDomain"],
+  register_domain: ["registerDomain"],
+  verify_domain: ["verifyDomain"],
+  delete_domain: ["deleteDomain"],
+  // webhooks + events
+  list_webhooks: ["listWebhooks"],
+  get_webhook: ["getWebhook"],
+  create_webhook: ["createWebhook"],
+  update_webhook: ["updateWebhook"],
+  delete_webhook: ["deleteWebhook"],
+  rotate_webhook_secret: ["rotateWebhookSecret"],
+  test_webhook: ["testWebhook"],
+  list_webhook_deliveries: ["listWebhookDeliveries"],
+  list_events: ["listEvents"],
+  get_event: ["getEvent"],
+  redeliver_event: ["redeliverEvent"],
+  // templates
+  list_templates: ["listTemplates"],
+  get_template: ["getTemplate"],
+  create_template: ["createTemplate"],
+  update_template: ["updateTemplate"],
+  delete_template: ["deleteTemplate"],
+  validate_template: ["validateTemplate"],
+  list_starter_templates: ["listStarterTemplates"],
+  get_starter_template: ["getStarterTemplate"],
+  // api keys
+  list_api_keys: ["listApiKeys"],
+  create_api_key: ["createApiKey"],
+  delete_api_key: ["deleteApiKey"],
+  // contacts + outreach
+  list_contacts: ["listContacts"],
+  get_contact: ["getContact"],
+  create_contact: ["createContact"],
+  update_contact: ["updateContact"],
+  delete_contact: ["deleteContact"],
+  import_contacts: ["importContacts"],
+  delete_contact_import: ["deleteImportBatch"],
+  list_outreach_contacts: ["listEngagements"],
+  get_outreach_contact: ["getEngagement"],
+  set_outreach_contact: ["upsertEngagement"],
+  delete_outreach_contact: ["deleteEngagement"],
+  // suppressions
+  list_suppressions: ["listSuppressions"],
+  delete_suppression: ["deleteSuppression"],
+  list_agent_suppressions: ["listAgentSuppressions"],
+  create_agent_suppression: ["createAgentSuppression"],
+  delete_agent_suppression: ["deleteAgentSuppression"],
+  // metrics
+  get_agent_metrics: ["getAgentMetrics"],
+  get_account_metrics: ["getAccountMetrics"],
+};
+
+/** The `_meta` key under which every tool advertises its mutating flag. */
+export const MUTATING_META_KEY = "e2a/mutating";
 
 /** True when `name` calls a /v1 write (refused while the account is read-only). */
 export function isMutatingTool(name: string): boolean {
