@@ -302,3 +302,62 @@ describe("API keys — agent scope", () => {
     expect(screen.getByText("bot@acme.io")).toBeInTheDocument();
   });
 });
+
+describe("read-only account", () => {
+  // An account paused for abuse review is read-only: the Create button is
+  // disabled up front, and a refused create (e.g. a stale page) shows the
+  // read-only copy instead of the raw envelope.
+  function stageReadOnly(readOnly: boolean, createBody?: string) {
+    mockFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/v1/account") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: () =>
+            Promise.resolve(
+              JSON.stringify({
+                user: { id: "usr_1", email: "owner@example.test" },
+                scope: "account",
+                plan_code: "free",
+                limits: { max_agents: 3, max_domains: 1, max_messages_month: 3000, max_storage_bytes: 1 },
+                usage: { agents: 0, domains: 0, messages_month: 0, storage_bytes: 0 },
+                upgrade_url: "",
+                read_only: readOnly,
+              }),
+            ),
+        });
+      }
+      if (url === "/v1/account/api-keys" && init?.method === "POST") {
+        return Promise.resolve({ ok: false, status: 403, text: () => Promise.resolve(createBody ?? "") });
+      }
+      if (url === "/v1/account/api-keys") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ items: [] }) });
+      }
+      if (url === "/v1/agents") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ items: [] }) });
+      }
+      return Promise.resolve({ ok: false, text: () => Promise.resolve("not found") });
+    });
+  }
+
+  it("disables Create key while the account is read-only", async () => {
+    stageReadOnly(true);
+    render(<APIKeysPage />);
+    const button = await screen.findByRole("button", { name: /create key/i });
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(button).toHaveAttribute("title", expect.stringMatching(/read-only/i));
+  });
+
+  it("shows the read-only copy when a create is refused with account_read_only", async () => {
+    stageReadOnly(
+      false,
+      JSON.stringify({ error: { code: "account_read_only", message: "sending is paused for this account" } }),
+    );
+    render(<APIKeysPage />);
+    const button = await screen.findByRole("button", { name: /create key/i });
+    await userEvent.click(button);
+    expect(
+      await screen.findByText("Your account is read-only while sending is paused for abuse review. Contact support."),
+    ).toBeInTheDocument();
+  });
+});

@@ -8,6 +8,7 @@ import { SWRProvider } from "../components/swr/SWRProvider";
 import { PendingPollingOwner } from "../components/swr/PendingPollingOwner";
 import { SignInLinks } from "../components/SignInLinks";
 import { RestoredNotice } from "../components/RestoredNotice";
+import { ReadOnlyBanner } from "../components/ReadOnlyBanner";
 import { Sidebar } from "../components/loft/Sidebar";
 
 const FOCUSABLE_SELECTOR =
@@ -273,6 +274,7 @@ export default function AppLayout({
         </div>
 
         <div className="flex-1 overflow-auto">
+          <ReadOnlyBanner />
           <RestoredNotice />
           {children}
         </div>

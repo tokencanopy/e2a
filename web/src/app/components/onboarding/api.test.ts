@@ -20,6 +20,7 @@ import {
   getWebhook,
   listWebhookDeliveries,
   getSendingAccessRequest,
+  registerDomain,
   type MessageViewWire,
 } from "./api";
 
@@ -566,5 +567,31 @@ describe("getSendingAccessRequest", () => {
       Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve("{}") }),
     );
     await expect(getSendingAccessRequest()).rejects.toMatchObject({ status: 500 });
+  });
+});
+
+describe("read-only accounts", () => {
+  // Any write the helper makes for an abuse-paused account comes back 403
+  // account_read_only; the dashboard shows its own copy, not the raw envelope.
+  it("turns a 403 account_read_only into the dashboard read-only copy", async () => {
+    const body = JSON.stringify({
+      error: { code: "account_read_only", message: "sending is paused for this account pending an abuse review" },
+    });
+    mockFetch.mockImplementation(() =>
+      Promise.resolve({ ok: false, status: 403, text: () => Promise.resolve(body) }),
+    );
+    await expect(registerDomain("brand.example.test")).rejects.toMatchObject({
+      status: 403,
+      code: "account_read_only",
+      message: "Your account is read-only while sending is paused for abuse review. Contact support.",
+    });
+  });
+
+  it("leaves other errors untouched", async () => {
+    const body = JSON.stringify({ error: { code: "forbidden", message: "no" } });
+    mockFetch.mockImplementation(() =>
+      Promise.resolve({ ok: false, status: 403, text: () => Promise.resolve(body) }),
+    );
+    await expect(registerDomain("brand.example.test")).rejects.toMatchObject({ status: 403, message: body });
   });
 });

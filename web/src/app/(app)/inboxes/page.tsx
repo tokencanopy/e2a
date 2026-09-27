@@ -9,6 +9,7 @@ import { listDomains } from "../../components/onboarding/api";
 import { canReceive } from "../../components/onboarding/state";
 import { useAgents } from "../../components/hooks/useAgents";
 import { useSendingAccess } from "../../components/hooks/useSendingAccess";
+import { useAccountReadOnly } from "../../components/hooks/useAccountReadOnly";
 import { SendingAccessNotice } from "../../components/SendingAccessNotice";
 import { domainsKey } from "../../../lib/swrKeys";
 import type { DashboardAgent } from "../../components/types";
@@ -89,6 +90,7 @@ function FilterBar({
 }
 
 export default function DashboardPage() {
+  const readOnly = useAccountReadOnly();
   const { user } = useAuth();
   // Both feeds are read through SWR so an agent edit on the Settings
   // page (which invalidates `agentsKey`) flows back into this view
@@ -171,7 +173,8 @@ export default function DashboardPage() {
         </>
       }
       actions={
-        agents.length > 0 ? (
+        // A read-only account cannot create inboxes; the banner explains why.
+        agents.length > 0 && !readOnly ? (
           <Link
             href="/get-started"
             className="inline-flex items-center gap-1.5 text-[13px] font-medium px-4 py-2"

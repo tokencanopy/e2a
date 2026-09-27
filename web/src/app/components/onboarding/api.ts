@@ -12,6 +12,7 @@ import type {
   WebhookView,
 } from "../../../lib/webhooks";
 import type { SendingAccessStatus } from "../../../lib/sendingAccess";
+import { ACCOUNT_READ_ONLY_CODE, readOnlyMessageFromBody } from "../../../lib/readOnly";
 import type {
   AttachmentMeta,
   DashboardAgent,
@@ -26,10 +27,13 @@ import type {
  *  status code so callers can branch on 404 vs 500 vs 401. */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** Machine code from the error envelope, when the helper recognized one. */
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -41,6 +45,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text();
+    // A read-only account (sending paused for abuse review) gets the
+    // dashboard copy instead of the raw envelope, on every write this
+    // helper makes.
+    const readOnly = readOnlyMessageFromBody(text);
+    if (readOnly) throw new ApiError(readOnly, res.status, ACCOUNT_READ_ONLY_CODE);
     throw new ApiError(text || `Request failed (${res.status})`, res.status);
   }
   // Successful mutation endpoints may return no body.
@@ -986,6 +995,10 @@ export type AccountInfo = {
   restored_at?: string;
   deleted_at?: string;
   purge_after?: string;
+  // True while the account is read-only (sending paused for abuse review):
+  // every write is refused with 403 account_read_only. Absent on servers
+  // that do not report it.
+  read_only?: boolean;
 };
 
 export async function getAccountInfo(): Promise<AccountInfo> {
