@@ -18,8 +18,9 @@ import (
 const ExternalSendingNotEnabledCode = "external_sending_not_enabled"
 
 // ExternalSendingRecoveryPath is the authenticated dashboard page that
-// explains the restriction and offers the recovery routes (verify a domain,
-// request approval, and — on the hosted service — a paid base plan).
+// explains the restriction and offers the recovery routes the deployment's
+// unlock set allows (always a request for approval; a verified domain and a
+// paid base plan only where configured).
 const ExternalSendingRecoveryPath = "/sending-access"
 
 // Allowed-destination tokens carried in the 403 details. Open set.
@@ -84,9 +85,18 @@ func bareRecipient(raw string) string {
 func (a *API) externalSendingNotEnabledError(ctx context.Context, userID string) *OutboundError {
 	allowed := []string{AllowedSameAccountAgents}
 	ownerVerified := false
+	// Unknown unlock set (status unreadable) falls back to naming only the
+	// route that is always available: approval. Never a route the
+	// deployment may not honor.
+	domainUnlock := false
 	if a.externalAccess != nil {
-		if st, err := a.externalAccess.ExternalAccessStatus(ctx, userID); err == nil && st.OwnerRecipientVerified {
-			ownerVerified = true
+		if st, err := a.externalAccess.ExternalAccessStatus(ctx, userID); err == nil {
+			ownerVerified = st.OwnerRecipientVerified
+			for _, u := range st.AvailableUnlocks {
+				if u == sendingpolicy.UnlockVerifiedDomain {
+					domainUnlock = true
+				}
+			}
 		}
 	}
 	msg := "External sending is not enabled for this account. You can send to agent inboxes in this account"
@@ -94,7 +104,12 @@ func (a *API) externalSendingNotEnabledError(ctx context.Context, userID string)
 		allowed = []string{AllowedVerifiedOwnerEmail, AllowedSameAccountAgents}
 		msg += " and to your verified account email"
 	}
-	msg += ". To email other recipients, send from your own verified domain or request approval in the dashboard. Retrying this request will not change the result."
+	if domainUnlock {
+		msg += ". To email other recipients, send from your own verified domain or request approval in the dashboard."
+	} else {
+		msg += ". To email other recipients, request approval in the dashboard (an operator reviews each request)."
+	}
+	msg += " Retrying this request will not change the result."
 	details := map[string]any{"allowed_recipients": allowed}
 	if base := strings.TrimRight(a.publicURL, "/"); base != "" {
 		details["recovery_url"] = base + ExternalSendingRecoveryPath

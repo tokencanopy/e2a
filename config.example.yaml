@@ -349,15 +349,28 @@ sending_protection:
   operator_notice_recipient_version: 1
   # External sending access (optional, absent = disabled). When set, accounts
   # created at/after the cutoff may reach only their verified owner mailbox
-  # and their own live agents through the shared sending identity until an
-  # operator approves them (`e2a -approve-external-sending`), a billing writer
-  # sets account_limits.external_sending_entitled (active paid base plan), or
-  # they send from their own verified domain.
+  # and their own live agents through the shared sending identity until one
+  # of the configured unlocks applies:
+  #   operator_approval  an operator approves them (`e2a -approve-external-sending`);
+  #                      always available — customers file a request, and the
+  #                      owner is emailed the decision
+  #   verified_domain    they send from their own verified domain
+  #   paid_entitlement   a billing writer sets
+  #                      account_limits.external_sending_entitled (paid base plan)
+  # `unlocks` omitted = all three (the behavior before the key existed, and the
+  # same policy hash). An empty list, or one without operator_approval, is a
+  # startup error. The hosted e2a service runs `unlocks: [operator_approval]`
+  # with the cutoff at the epoch: every account is restricted until an operator
+  # approves it, and a verified domain or paid plan is a signal the operator
+  # weighs rather than an automatic unlock (a stolen-card paid signup must not
+  # unlock bulk sending on its own). Pre-grant legitimate accounts before
+  # narrowing the set or moving the cutoff.
   # The cutoff is an immutable RFC3339 UTC instant; leave the block out to keep
   # existing behavior (and the existing policy hash).
   # external_sending_access:
   #   mode: shadow                                   # disabled | shadow | enforce
   #   accounts_created_at_or_after: "2026-10-01T00:00:00Z"
+  #   unlocks: [operator_approval, verified_domain, paid_entitlement]
 
 # Outbound delivery feedback (decision 9 / Slice 4b). When ses_configuration_set
 # is set, outbound mail is tagged with X-SES-CONFIGURATION-SET so SES publishes

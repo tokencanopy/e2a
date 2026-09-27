@@ -25,13 +25,23 @@ import (
 //  2. Feature disabled, account outside the cohort, or a system/internal
 //     account class: existing behavior.
 //  3. The message's ACTUAL outbound identity is the account's own currently
-//     verified custom domain: external recipients allowed.
-//  4. A current operator grant, or the billing-issued paid-base entitlement
-//     (account_limits.external_sending_entitled — never plan_code):
-//     external shared-identity sending allowed.
+//     verified custom domain, AND the policy's unlock set contains
+//     verified_domain: external recipients allowed.
+//  4. A current operator grant (operator_approval, always in the set), or —
+//     when the set contains paid_entitlement — the billing-issued paid-base
+//     entitlement (account_limits.external_sending_entitled — never
+//     plan_code): external shared-identity sending allowed.
 //  5. Otherwise every envelope recipient (To, Cc AND Bcc) must be the
 //     account's currently verified owner mailbox or a live agent of the same
 //     account. One disallowed recipient refuses the whole operation.
+//
+// The unlock set (external_sending_access.unlocks) is part of the one
+// RuntimePolicy every stage reads, so preflight, acceptance, authorization
+// and redemption consult the same set and cannot disagree. Absent means all
+// three unlocks — the rule exactly as it was before the key existed. Hosted
+// e2a runs [operator_approval]: explicit operator approval is the only
+// unlock, and a verified domain or a paid plan is a signal the operator
+// weighs, not an automatic one.
 //
 // Every fact is read from durable state at decision time; nothing is cached.
 // A read error is returned, never translated into "not approved" or "allowed".
@@ -294,7 +304,8 @@ func decideExternalRoute(ctx context.Context, q dbQuerier, policy RuntimePolicy,
 	if !applies {
 		return RouteNotApplicable, nil
 	}
-	if in.claimsOwnIdentity && in.agentID != "" {
+	esa := *policy.ExternalSendingAccess // non-nil: externalAccessApplies checked it
+	if in.claimsOwnIdentity && in.agentID != "" && esa.Allows(UnlockVerifiedDomain) {
 		ok, err := customIdentityVerified(ctx, q, in.userID, in.agentID)
 		if err != nil {
 			return "", err
@@ -303,10 +314,10 @@ func decideExternalRoute(ctx context.Context, q dbQuerier, policy RuntimePolicy,
 			return RouteCustomIdentity, nil
 		}
 	}
-	if facts.approved {
+	if facts.approved && esa.Allows(UnlockOperatorApproval) {
 		return RouteOperatorApproval, nil
 	}
-	if facts.entitled {
+	if facts.entitled && esa.Allows(UnlockPaidEntitlement) {
 		return RoutePaidEntitlement, nil
 	}
 	if len(in.envelope) == 0 {
@@ -472,6 +483,9 @@ type ExternalAccessStatus struct {
 	PaidExternalSendingEntitled bool
 	// OwnerRecipientVerified reports valid proof for the current mailbox.
 	OwnerRecipientVerified bool
+	// AvailableUnlocks is the deployment's effective unlock set, in
+	// canonical order: which routes can lift the restriction. Never empty.
+	AvailableUnlocks []ExternalUnlock
 }
 
 // ExternalAccessStatus reads the account's eligibility.
@@ -497,6 +511,7 @@ func (m *Module) ExternalAccessStatus(ctx context.Context, userID string) (Exter
 		SharedExternalApproved:      facts.approved,
 		PaidExternalSendingEntitled: facts.entitled,
 		OwnerRecipientVerified:      facts.ownerRecipientVerified(),
+		AvailableUnlocks:            policy.ExternalSendingAccess.AvailableUnlocks(),
 	}, nil
 }
 

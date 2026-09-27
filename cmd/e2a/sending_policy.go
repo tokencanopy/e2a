@@ -6,11 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/user"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/outbound"
+	"github.com/tokencanopy/e2a/internal/sendingaccessnotice"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 )
 
@@ -129,7 +134,8 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 	case f.reconcile:
 		return runReconcileLegacySendingJobs(ctx, pool, sendingpolicy.NewGate(pool, secrets, source, policy), stdout)
 	case f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal:
-		return runExternalSendingCommand(ctx, sendingpolicy.NewPolicyModule(pool, secrets, source, policy), f, stdout)
+		module := sendingpolicy.NewPolicyModule(pool, secrets, source, policy)
+		return runExternalSendingCommand(ctx, module, newDecisionNotifier(cfg, pool, module), f, stdout)
 	case f.pauseAccount, f.resumeAccount, f.inspectPause:
 		return runAccountPauseCommand(ctx, sendingpolicy.NewPolicyModule(pool, secrets, source, policy), f, stdout)
 	}
@@ -313,7 +319,7 @@ func runPrintCapabilities(source sendingpolicy.PolicySource, secrets sendingpoli
 // operator inspected, and a nonblank reason; a stale revision writes nothing,
 // and the same state at the current revision is a no-op. After a lost
 // response, inspect before retrying.
-func runExternalSendingCommand(ctx context.Context, module *sendingpolicy.Module, f *sendingProtectionFlags, stdout io.Writer) error {
+func runExternalSendingCommand(ctx context.Context, module *sendingpolicy.Module, notifier decisionNotifier, f *sendingProtectionFlags, stdout io.Writer) error {
 	if strings.TrimSpace(f.accountID) == "" {
 		return errors.New("external sending commands require -account-id")
 	}
@@ -333,6 +339,7 @@ func runExternalSendingCommand(ctx context.Context, module *sendingpolicy.Module
 			return err
 		}
 		fmt.Fprintf(stdout, "request:                  %s declined (grant unchanged)\n", f.requestID)
+		sendDecisionNotice(ctx, notifier, f.requestID, stdout)
 		return nil
 	}
 	if strings.TrimSpace(f.reason) == "" {
@@ -356,7 +363,13 @@ func runExternalSendingCommand(ctx context.Context, module *sendingpolicy.Module
 		fmt.Fprintf(stdout, "status:                   no-op; the grant already had this state at revision %d\n", res.Record.Revision)
 	}
 	printExternalAccess(stdout, res.Record)
-	if !res.Record.Approved && res.Record.PaidEntitled {
+	if f.approveExternal && strings.TrimSpace(f.requestID) != "" {
+		// Only an approval that decides a customer request is announced: a
+		// direct grant (for example pre-granting existing accounts before a
+		// rollout) has no request to answer.
+		sendDecisionNotice(ctx, notifier, f.requestID, stdout)
+	}
+	if !res.Record.Approved && res.Record.PaidEntitled && unlockAvailable(res.Record.AvailableUnlocks, sendingpolicy.UnlockPaidEntitlement) {
 		fmt.Fprintf(stdout, "warning:                  the account still holds the paid-base entitlement, which independently allows external sending; pause the account to stop all sending\n")
 	}
 	return nil
@@ -375,9 +388,27 @@ func printExternalAccess(stdout io.Writer, rec sendingpolicy.ExternalAccessRecor
 	fmt.Fprintf(stdout, "owner_recipient_verified: %v\n", rec.OwnerVerified)
 	fmt.Fprintf(stdout, "enforcement_applies:      %v\n", rec.EnforcementApplies)
 	fmt.Fprintf(stdout, "sending_paused:           %v\n", rec.Paused)
+	if rec.AvailableUnlocks != nil {
+		names := make([]string, len(rec.AvailableUnlocks))
+		for i, u := range rec.AvailableUnlocks {
+			names[i] = string(u)
+		}
+		fmt.Fprintf(stdout, "available_unlocks:        %s\n", strings.Join(names, ","))
+	}
 	if rec.PendingRequestID != "" {
 		fmt.Fprintf(stdout, "pending_request_id:       %s\n", rec.PendingRequestID)
 	}
+}
+
+// unlockAvailable reports whether the governing policy lets u lift the
+// restriction.
+func unlockAvailable(set []sendingpolicy.ExternalUnlock, u sendingpolicy.ExternalUnlock) bool {
+	for _, have := range set {
+		if have == u {
+			return true
+		}
+	}
+	return false
 }
 
 // runAccountPauseCommand pauses, resumes or inspects an account's sending.
@@ -434,4 +465,47 @@ func printAccountPause(stdout io.Writer, rec sendingpolicy.AccountPauseRecord) {
 	if rec.EvidenceRef != "" {
 		fmt.Fprintf(stdout, "evidence_ref:   %s\n", rec.EvidenceRef)
 	}
+}
+
+// decisionNotifier emails the account owner the decision on a request.
+type decisionNotifier interface {
+	NotifyDecision(ctx context.Context, requestID string) error
+}
+
+// newDecisionNotifier builds the decision notice sender over the command's
+// own policy module (the same gate the server authorizes through) and the
+// configured outbound relay. Nil when no relay is configured: the decision
+// still commits, and the command prints why no notice went out.
+func newDecisionNotifier(cfg *config.Config, pool *pgxpool.Pool, module *sendingpolicy.Module) decisionNotifier {
+	relay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
+	if !relay.Configured() || strings.TrimSpace(cfg.OutboundSMTP.FromDomain) == "" {
+		return nil
+	}
+	submitter := outbound.NewProviderSubmitter(relay, module)
+	submitter.SetSESConfigurationSet(cfg.DeliveryFeedback.SESConfigurationSet)
+	return sendingaccessnotice.New(pool, module, submitter, cfg.OutboundSMTP.FromDomain,
+		cfg.Notifications.FromAddress, cfg.Notifications.ReplyTo, cfg.HTTP.PublicURL).
+		WithDKIM(identity.NewStore(pool))
+}
+
+// decisionNoticeTimeout bounds the notice so a hung relay cannot hold the
+// operator's terminal.
+const decisionNoticeTimeout = 30 * time.Second
+
+// sendDecisionNotice emails the decision after it has committed. It never
+// fails the command: the decision is durable either way, so a failed notice
+// is a warning line the operator can follow up on by hand.
+func sendDecisionNotice(ctx context.Context, notifier decisionNotifier, requestID string, stdout io.Writer) {
+	if notifier == nil {
+		fmt.Fprintf(stdout, "warning:                  decision notice not sent: no outbound SMTP relay is configured\n")
+		return
+	}
+	noticeCtx, cancel := context.WithTimeout(ctx, decisionNoticeTimeout)
+	defer cancel()
+	if err := notifier.NotifyDecision(noticeCtx, requestID); err != nil {
+		log.Printf("[sending-protection] decision notice for request %s failed: %v", requestID, err)
+		fmt.Fprintf(stdout, "warning:                  decision notice not sent (the decision stands): %v\n", err)
+		return
+	}
+	fmt.Fprintf(stdout, "decision_notice:          sent to the account owner\n")
 }

@@ -385,9 +385,40 @@ lock is taken on the accept path: acceptance reads the runtime policy without
 the singleton share lock because it already holds source locks. The control
 is an optional `external_sending_access` runtime-policy object (absent =
 disabled, legacy hashes unchanged): `mode`, the immutable cohort cutoff
-and `accounts_created_at_or_after`. The paid-base entitlement is the
+`accounts_created_at_or_after`, and the optional `unlocks` set drawn from the
+closed vocabulary `operator_approval`, `verified_domain`, `paid_entitlement`.
+Omitted `unlocks` means all three (the original rule, same hash); a present set
+must be non-empty and must contain `operator_approval` (validated at startup
+and on every stored-policy read — an unreachable policy fails loudly instead of
+silently denying everyone). The set is consulted by the one decision function
+every seam above calls, from the same `RuntimePolicy`, so the stages cannot
+disagree: without `verified_domain` step 3 (own verified identity) no longer
+applies, and without `paid_entitlement` step 4 ignores the entitlement column.
+The metrics route vocabulary is unchanged. `GET /v1/account` reports the
+effective set as `sending_access.available_unlocks` so clients render only the
+recovery routes the deployment honors; a binary that understands the key
+advertises the `external_sending_unlocks` runtime-policy feature marker.
+The paid-base entitlement is the
 billing-written `account_limits.external_sending_entitled` boolean (the
-server only reads it; `plan_code` is not authorization). Operator grants are
+server only reads it; `plan_code` is not authorization).
+
+Hosted e2a runs `unlocks: [operator_approval]` with the cutoff at the epoch:
+every account is restricted by default and explicit operator approval is the
+only unlock. A paid plan used to unlock shared-identity sending instantly; in a
+2026-09-26 incident a paid signup made with a stolen card used that instant
+unlock to send a phishing burst within hours. A verified domain or a paid plan
+is now evidence the operator weighs when reviewing a request, not an automatic
+unlock. Self-hosters keep the default (all three) or choose their own set.
+When an operator decides a request (`-approve-external-sending
+-external-sending-request-id …` or `-decline-external-sending-request`), the
+command emails the account owner a neutral decision notice from the
+deployment's notification identity (`notifications.from_address` /
+`reply_to`), authorized through the gate as a `customer_notification`
+operation keyed by the request (`op_esad_<request>`); operator-authored copy
+only, never the customer's free text. A failed notice prints a warning and
+never fails the command. The operator notification of a NEW request is skipped
+for system/internal (`account_class`-exempt) accounts, which the rule never
+binds. Operator grants are
 local server commands (`-approve-external-sending` / `-revoke-external-sending`
 with a revision CAS and append-only `external_sending_access_events`); no API
 credential can grant access. Owner-mailbox proof

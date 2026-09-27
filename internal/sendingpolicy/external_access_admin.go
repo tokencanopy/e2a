@@ -58,6 +58,10 @@ type ExternalAccessRecord struct {
 	OwnerVerified      bool
 	EnforcementApplies bool
 	PendingRequestID   string
+	// AvailableUnlocks is the effective unlock set of the governing policy
+	// (nil when the control is disabled), so the operator sees whether the
+	// paid entitlement or a verified domain would lift the restriction.
+	AvailableUnlocks []ExternalUnlock
 }
 
 // InspectExternalAccess reads the grant, its revision and every other fact an
@@ -99,6 +103,9 @@ func (m *Module) InspectExternalAccess(ctx context.Context, accountID string) (E
 		return ExternalAccessRecord{}, err
 	}
 	rec.EnforcementApplies = applies && policy.ExternalSendingMode() == ModeEnforce
+	if policy.ExternalSendingMode() != ModeDisabled {
+		rec.AvailableUnlocks = policy.ExternalSendingAccess.AvailableUnlocks()
+	}
 	err = m.pool.QueryRow(ctx, `
 		SELECT id FROM external_sending_access_requests
 		 WHERE user_id = $1 AND state = 'pending'`, accountID,
@@ -288,6 +295,11 @@ type AccessRequest struct {
 	ExpectedDailyVolume int
 	CreatedAt           time.Time
 	DecidedAt           *time.Time
+	// FromExemptAccount is set by SubmitAccessRequest when the filing
+	// account's server-owned account_class is exempt from the rule
+	// (system/internal). Such a request needs no operator decision, so the
+	// caller skips the operator notification. Not part of the customer view.
+	FromExemptAccount bool
 }
 
 // AccessRequestInput is the bounded customer-supplied part of a request. The
@@ -354,16 +366,18 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 	// unique index (one pending request per account) is the serialization
 	// point; a concurrent duplicate submit loses the insert and reads back the
 	// winner's pending request.
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT true FROM users WHERE id = $1`, userID).Scan(&exists); err != nil {
+	var class string
+	if err := tx.QueryRow(ctx, `SELECT account_class FROM users WHERE id = $1`, userID).Scan(&class); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AccessRequest{}, false, ErrAccountNotFound
 		}
 		return AccessRequest{}, false, fmt.Errorf("sendingpolicy: read user: %w", err)
 	}
+	exempt := accountClassExempt(class)
 	existing, err := scanAccessRequest(tx.QueryRow(ctx,
 		`SELECT `+accessRequestColumns+` FROM external_sending_access_requests WHERE user_id = $1 AND state = 'pending'`, userID))
 	if err == nil {
+		existing.FromExemptAccount = exempt
 		return existing, false, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -394,6 +408,7 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 			if rerr != nil {
 				return AccessRequest{}, false, fmt.Errorf("sendingpolicy: read concurrent pending request: %w", rerr)
 			}
+			winner.FromExemptAccount = exempt
 			return winner, false, nil
 		}
 		return AccessRequest{}, false, fmt.Errorf("sendingpolicy: insert access request: %w", err)
@@ -401,6 +416,7 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 	if err := tx.Commit(ctx); err != nil {
 		return AccessRequest{}, false, fmt.Errorf("sendingpolicy: commit access request: %w", err)
 	}
+	created.FromExemptAccount = exempt
 	return created, true, nil
 }
 

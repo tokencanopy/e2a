@@ -17,8 +17,8 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
-from typing import Any, ClassVar, Dict, List
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
+from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -26,12 +26,13 @@ class SendingAccessView(BaseModel):
     """
     SendingAccessView
     """ # noqa: E501
+    available_unlocks: Optional[List[StrictStr]] = Field(default=None, description="The routes this deployment accepts for lifting the restriction. Open set: treat entries as strings and ignore unknown values. Known values: operator_approval (file a request with POST /v1/account/sending-access/request; an operator reviews it and the account owner is emailed the decision — always present), verified_domain (sending as the account's own verified custom domain reaches external recipients), paid_entitlement (a paid base plan lifts the restriction). Absent only from servers that predate the field, which accept all three.")
     enforcement_applies: StrictBool = Field(description="True when the deployment enforces external sending access for this account (enforce mode, account inside the rollout cohort, not a platform account). Stays true after approval. False when the control is disabled or in shadow mode, or the account is outside the cohort.")
     owner_recipient_verified: StrictBool = Field(description="True when the account's current sign-in email was verified by a trusted login, so it is an allowed destination while external sending is restricted.")
-    paid_external_sending_entitled: StrictBool = Field(description="True when an active paid base subscription grants external sending (hosted service). Independent of shared_external_approved.")
+    paid_external_sending_entitled: StrictBool = Field(description="True when the account holds the billing-issued paid base entitlement (hosted service). It lifts the restriction only when available_unlocks contains paid_entitlement; otherwise it is informational. Independent of shared_external_approved.")
     shared_external_approved: StrictBool = Field(description="True when an operator granted this account external sending through the shared sending identity. Reports the grant only, not whether enforcement is on.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["enforcement_applies", "owner_recipient_verified", "paid_external_sending_entitled", "shared_external_approved"]
+    __properties: ClassVar[List[str]] = ["available_unlocks", "enforcement_applies", "owner_recipient_verified", "paid_external_sending_entitled", "shared_external_approved"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -79,6 +80,11 @@ class SendingAccessView(BaseModel):
             for _key, _value in self.additional_properties.items():
                 _dict[_key] = _value
 
+        # set to None if available_unlocks (nullable) is None
+        # and model_fields_set contains the field
+        if self.available_unlocks is None and "available_unlocks" in self.model_fields_set:
+            _dict['available_unlocks'] = None
+
         return _dict
 
     @classmethod
@@ -91,6 +97,7 @@ class SendingAccessView(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
+            "available_unlocks": obj.get("available_unlocks"),
             "enforcement_applies": obj.get("enforcement_applies"),
             "owner_recipient_verified": obj.get("owner_recipient_verified"),
             "paid_external_sending_entitled": obj.get("paid_external_sending_entitled"),

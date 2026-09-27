@@ -575,9 +575,16 @@ type SendingProtectionConfig struct {
 // Mode is disabled|shadow|enforce; AccountsCreatedAtOrAfter is the immutable
 // RFC3339 UTC cohort cutoff (for example 2026-10-01T00:00:00Z). Both are
 // validated by internal/sendingpolicy.
+//
+// Unlocks optionally narrows which routes may lift the restriction, from the
+// closed vocabulary operator_approval, verified_domain, paid_entitlement.
+// Absent (nil) means all three — the behavior before the key existed. An
+// explicit empty list, or a list without operator_approval, is a startup
+// error. Hosted e2a runs [operator_approval]: explicit approval only.
 type ExternalSendingAccessConfig struct {
-	Mode                     string `yaml:"mode"`
-	AccountsCreatedAtOrAfter string `yaml:"accounts_created_at_or_after"`
+	Mode                     string   `yaml:"mode"`
+	AccountsCreatedAtOrAfter string   `yaml:"accounts_created_at_or_after"`
+	Unlocks                  []string `yaml:"unlocks"`
 }
 
 // LimitsConfig is the operator-configured fallback applied to any user

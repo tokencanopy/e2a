@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -392,7 +393,8 @@ func TestExternalAccessPreflightAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != (sendingpolicy.ExternalAccessStatus{EnforcementApplies: true}) {
+	allUnlocks := []sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval, sendingpolicy.UnlockVerifiedDomain, sendingpolicy.UnlockPaidEntitlement}
+	if want := (sendingpolicy.ExternalAccessStatus{EnforcementApplies: true, AvailableUnlocks: allUnlocks}); !reflect.DeepEqual(st, want) {
 		t.Fatalf("fresh status = %+v", st)
 	}
 	if v, err := m.ExternalAccessPreflight(f.ctx, user, agent, []string{sibling}); err != nil || !v.Allowed || v.Route != sendingpolicy.RouteRestrictedRecipients {
@@ -409,8 +411,8 @@ func TestExternalAccessPreflightAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := sendingpolicy.ExternalAccessStatus{EnforcementApplies: true, SharedExternalApproved: true, PaidExternalSendingEntitled: true, OwnerRecipientVerified: true}
-	if st != want {
+	want := sendingpolicy.ExternalAccessStatus{EnforcementApplies: true, SharedExternalApproved: true, PaidExternalSendingEntitled: true, OwnerRecipientVerified: true, AvailableUnlocks: allUnlocks}
+	if !reflect.DeepEqual(st, want) {
 		t.Fatalf("status = %+v, want %+v", st, want)
 	}
 

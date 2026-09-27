@@ -2,6 +2,7 @@ package sendingpolicy
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tokencanopy/e2a/internal/config"
 )
@@ -54,6 +55,15 @@ func FromConfig(cfg *config.Config) (RuntimePolicy, error) {
 		policy.ExternalSendingAccess = &ExternalSendingAccessPolicy{
 			Mode:                     Mode(esa.Mode),
 			AccountsCreatedAtOrAfter: esa.AccountsCreatedAtOrAfter,
+		}
+		// nil stays nil (absent = every unlock); an explicit empty list
+		// stays an empty non-nil slice so Validate rejects it loudly.
+		if esa.Unlocks != nil {
+			unlocks := make([]ExternalUnlock, len(esa.Unlocks))
+			for i, u := range esa.Unlocks {
+				unlocks[i] = ExternalUnlock(strings.TrimSpace(u))
+			}
+			policy.ExternalSendingAccess.Unlocks = unlocks
 		}
 	}
 

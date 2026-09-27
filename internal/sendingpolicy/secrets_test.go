@@ -135,8 +135,8 @@ func TestBuildCapabilitiesShape(t *testing.T) {
 		}
 	}
 
-	if len(caps.PolicyFeatures) != 1 || caps.PolicyFeatures[0] != PolicyFeatureExternalSendingAccess {
-		t.Errorf("policy features = %v, want [external_sending_access]", caps.PolicyFeatures)
+	if len(caps.PolicyFeatures) != 2 || caps.PolicyFeatures[0] != PolicyFeatureExternalSendingAccess || caps.PolicyFeatures[1] != PolicyFeatureExternalSendingUnlocks {
+		t.Errorf("policy features = %v, want [external_sending_access external_sending_unlocks]", caps.PolicyFeatures)
 	}
 
 	empty := BuildCapabilities(PolicySourceConfig, Secrets{})
