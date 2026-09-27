@@ -2,7 +2,7 @@
 // profile name-edit flow: edit → validate → PATCH → setUser, plus the
 // error and cancel branches.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "../../../test-utils/swr";
 import userEvent from "@testing-library/user-event";
 import SettingsPage from "./page";
 
@@ -39,6 +39,17 @@ beforeEach(() => {
   };
   setUser.mockClear();
   mockFetch.mockReset();
+  // Default for the sending-access status row's two background reads
+  // (GET /v1/account, GET /v1/account/sending-access/request) — this suite
+  // isn't testing that row, so any shape without a `sending_access` field
+  // keeps it from rendering. Individual tests override this for the
+  // PATCH /api/auth/me flow they're actually exercising.
+  mockFetch.mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({}),
+    text: async () => "{}",
+  });
 });
 
 async function openEditor() {

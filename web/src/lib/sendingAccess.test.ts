@@ -6,8 +6,10 @@ import {
   parseRecipientList,
   offeredUnlocks,
   sendingAccessEligibilityLabel,
+  sendingAccessEnabledReason,
   sendingAccessEnabledRoute,
   sendingAccessNoticeCopy,
+  sendingAccessSettingsSummary,
   type SendingAccessStatus,
 } from "./sendingAccess";
 
@@ -142,6 +144,84 @@ describe("unlock-aware grants", () => {
     });
     expect(offeredUnlocks(base, { billingEnabled: false })).toEqual({ domain: true, approval: true, paid: false });
     expect(offeredUnlocks(base, { billingEnabled: true })).toEqual({ domain: true, approval: true, paid: true });
+  });
+});
+
+describe("sendingAccessEnabledReason", () => {
+  it("is null when enforcement doesn't apply", () => {
+    expect(sendingAccessEnabledReason({ ...base, enforcement_applies: false })).toBeNull();
+  });
+
+  it("is null while still restricted", () => {
+    expect(sendingAccessEnabledReason(base)).toBeNull();
+  });
+
+  it("names operator approval", () => {
+    expect(sendingAccessEnabledReason({ ...base, shared_external_approved: true })).toBe(
+      "operator approved",
+    );
+  });
+
+  it("names the paid plan", () => {
+    expect(sendingAccessEnabledReason({ ...base, paid_external_sending_entitled: true })).toBe(
+      "paid plan",
+    );
+  });
+
+  it("prefers operator approval when both grants are held, matching sendingAccessEnabledRoute", () => {
+    const both = { ...base, shared_external_approved: true, paid_external_sending_entitled: true };
+    expect(sendingAccessEnabledReason(both)).toBe("operator approved");
+    expect(sendingAccessEnabledRoute(both)).toBe(
+      "An operator approved external sending for this account.",
+    );
+  });
+});
+
+describe("sendingAccessSettingsSummary", () => {
+  it("is null when the deployment has no sending_access object", () => {
+    expect(sendingAccessSettingsSummary(undefined, undefined)).toBeNull();
+    expect(sendingAccessSettingsSummary(null, null)).toBeNull();
+  });
+
+  it("is Restricted with no request on file", () => {
+    expect(sendingAccessSettingsSummary(base, null)).toBe("Restricted");
+    expect(sendingAccessSettingsSummary(base, undefined)).toBe("Restricted");
+  });
+
+  it("is Restricted — request under review for a pending request", () => {
+    expect(sendingAccessSettingsSummary(base, { state: "pending" })).toBe(
+      "Restricted — request under review",
+    );
+  });
+
+  it("is Restricted — request declined for the latest declined request", () => {
+    expect(sendingAccessSettingsSummary(base, { state: "declined" })).toBe(
+      "Restricted — request declined",
+    );
+  });
+
+  it("falls back to plain Restricted for an unrecognized open-set request state", () => {
+    expect(sendingAccessSettingsSummary(base, { state: "expired" })).toBe("Restricted");
+  });
+
+  it("is Enabled — operator approved once an operator grants access", () => {
+    const approved = { ...base, shared_external_approved: true };
+    // The request being "approved" (or anything else) is irrelevant once
+    // the account itself is no longer restricted.
+    expect(sendingAccessSettingsSummary(approved, { state: "approved" })).toBe(
+      "Enabled — operator approved",
+    );
+  });
+
+  it("is Enabled — paid plan when the paid entitlement lifts the restriction", () => {
+    const entitled = { ...base, paid_external_sending_entitled: true };
+    expect(sendingAccessSettingsSummary(entitled, null)).toBe("Enabled — paid plan");
+  });
+
+  it("is plain Enabled when enforcement doesn't apply to this account", () => {
+    expect(sendingAccessSettingsSummary({ ...base, enforcement_applies: false }, null)).toBe(
+      "Enabled",
+    );
   });
 });
 

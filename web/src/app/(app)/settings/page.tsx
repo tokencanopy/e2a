@@ -1,10 +1,19 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
+import useSWR from "swr";
 import { useAuth } from "../../components/AuthProvider";
 import { PageShell } from "../../components/loft/PageShell";
+import { useSendingAccess } from "../../components/hooks/useSendingAccess";
+import {
+  getSendingAccessRequest,
+  type SendingAccessRequest,
+} from "../../components/onboarding/api";
 import { readApiError } from "../../../lib/accountDeletion";
 import { hardNavigate } from "../../../lib/navigation";
+import { sendingAccessRequestKey } from "../../../lib/swrKeys";
+import { sendingAccessSettingsSummary } from "../../../lib/sendingAccess";
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -196,9 +205,48 @@ function ProfileSection({
           </dd>
           <dt style={{ color: "var(--fg-muted)" }}>Member since</dt>
           <dd style={{ color: "var(--fg)" }}>{formatDate(user.created_at)}</dd>
+          <SendingAccessRow />
         </dl>
       </div>
     </section>
+  );
+}
+
+// Beta: the external sending access restriction (see /sending-access — the
+// dashboard notice and a blocked send's recovery_url both point there, but
+// once an account is approved that banner disappears, and a declined
+// account has no other way back to it). `status` is undefined outright on a
+// deployment with the feature disabled, in which case there is nothing to
+// show — this renders no row at all rather than a "not restricted" line, so
+// self-host Settings pages don't gain a permanent no-op fact.
+function SendingAccessRow() {
+  const { status, isLoading: statusLoading } = useSendingAccess();
+  const { data: request, isLoading: requestLoading } = useSWR<SendingAccessRequest | null>(
+    sendingAccessRequestKey,
+    getSendingAccessRequest,
+  );
+
+  // Wait for both reads to settle so a restricted account never flashes a
+  // bare "Restricted" before its request state (pending vs. declined) is
+  // known, and so an SWR error on either read (network blip) just leaves the
+  // row absent instead of showing stale or wrong copy.
+  if (statusLoading || requestLoading) return null;
+  const summary = sendingAccessSettingsSummary(status, request);
+  if (!summary) return null;
+
+  return (
+    <>
+      <dt style={{ color: "var(--fg-muted)" }}>External sending</dt>
+      <dd style={{ color: "var(--fg)" }}>
+        <Link
+          href="/sending-access"
+          className="underline font-medium"
+          style={{ color: "var(--accent-strong)" }}
+        >
+          {summary}
+        </Link>
+      </dd>
+    </>
   );
 }
 

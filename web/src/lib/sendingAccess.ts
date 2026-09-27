@@ -89,6 +89,53 @@ export function sendingAccessEnabledRoute(
   return "Your paid base plan includes external sending for this account.";
 }
 
+/** Short reason phrase for a compact "Enabled — <reason>" status value (the
+ *  Settings page), same route and same precedence as `sendingAccessEnabledRoute`
+ *  above — just worded to follow "Enabled — " instead of a full sentence. A
+ *  verified custom domain unlocks external sending per outbound message
+ *  (internal/sendingpolicy's RouteCustomIdentity), never as an account-wide
+ *  grant, so it has no field on this object and can never produce a reason
+ *  here. Null when there's nothing to say: enforcement doesn't apply to this
+ *  account (the caller falls back to a plain "Enabled"), or the account is
+ *  still restricted. */
+export function sendingAccessEnabledReason(
+  status: SendingAccessStatus | null | undefined,
+): string | null {
+  if (!status?.enforcement_applies || isSendingRestricted(status)) return null;
+  if (status.shared_external_approved) return "operator approved";
+  return "paid plan";
+}
+
+/** Latest sending-access request, reduced to the one field this module
+ *  needs. Matches `SendingAccessRequest` (components/onboarding/api.ts)
+ *  structurally without importing it — that module already imports
+ *  `SendingAccessStatus` from here, and a back-import would cycle. */
+export type SendingAccessRequestLike = { state: string } | null | undefined;
+
+/** One-line "External sending" status for the Settings page:
+ *  "Restricted" / "Restricted — request under review" /
+ *  "Restricted — request declined" / "Enabled" / "Enabled — <reason>".
+ *  Null when the deployment has no `sending_access` object at all
+ *  (self-host, feature disabled) — callers render no row in that case
+ *  rather than a "not restricted" line, the same "absent means nothing to
+ *  say" rule the rest of this module follows. Callers should only invoke
+ *  this once both the account status and the latest request have settled,
+ *  so a restricted account never flashes before its request state (pending
+ *  vs. declined) is known. */
+export function sendingAccessSettingsSummary(
+  status: SendingAccessStatus | null | undefined,
+  request: SendingAccessRequestLike,
+): string | null {
+  if (!status) return null;
+  if (isSendingRestricted(status)) {
+    if (request?.state === "pending") return "Restricted — request under review";
+    if (request?.state === "declined") return "Restricted — request declined";
+    return "Restricted";
+  }
+  const reason = sendingAccessEnabledReason(status);
+  return reason ? `Enabled — ${reason}` : "Enabled";
+}
+
 /** Which recovery routes to offer a restricted account: approval always;
  *  a verified domain only where the deployment accepts it; a paid plan only
  *  where the deployment accepts it AND billing is enabled (hosted-only UI). */
