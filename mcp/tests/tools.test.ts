@@ -31,6 +31,7 @@ import { registerLegacyTools } from "../src/tools/legacy.js";
 import { registerContactTools } from "../src/tools/contacts.js";
 import { registerSuppressionTools } from "../src/tools/suppressions.js";
 import { registerMetricsTools } from "../src/tools/metrics.js";
+import { registerSendingAccessTools } from "../src/tools/sendingaccess.js";
 import { CodedError, runTool, toMcpOutput } from "../src/tools/util.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -591,7 +592,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(78);
+    expect(frozenToolNames).toHaveLength(80);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -622,9 +623,10 @@ describe("e2a MCP server", () => {
     registerContactTools(recorder, stub);
     registerSuppressionTools(recorder, stub);
     registerMetricsTools(recorder, stub);
+    registerSendingAccessTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(78);
+    expect(names).toHaveLength(80);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
@@ -652,6 +654,7 @@ describe("e2a MCP server", () => {
     registerContactTools(recorder, stub);
     registerSuppressionTools(recorder, stub);
     registerMetricsTools(recorder, stub);
+    registerSendingAccessTools(recorder, stub);
     registerLegacyTools(recorder, stub);
     expect(() => assertMutatingClassificationComplete(names)).not.toThrow();
     expect(() => assertMutatingClassificationComplete([...names, "brand_new_tool"])).toThrow(/unclassified: brand_new_tool/);
@@ -662,14 +665,14 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
     expect(RUNTIME_TOOLS.size).toBe(21);
-    expect(ADMIN_TOOLS.size).toBe(57);
-    expect(toolNamesForScope("account").size).toBe(78);
+    expect(ADMIN_TOOLS.size).toBe(59);
+    expect(toolNamesForScope("account").size).toBe(80);
   });
 
-  it("account scope exposes all 78 canonical and compatibility tools", async () => {
+  it("account scope exposes all 80 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(78);
+    expect(tools).toHaveLength(80);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
