@@ -148,10 +148,19 @@ func (a *API) NotifySendingAccessRequest(ctx context.Context, userID string, req
 	}
 }
 
+// untrustedLineBreaks are every line break a mail client may render: CR,
+// VT, FF, NEL and the Unicode line/paragraph separators, besides LF.
+var untrustedLineBreaks = strings.NewReplacer(
+	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
+	"\u0085", "\n", "\u2028", "\n", "\u2029", "\n",
+)
+
 // quoteUntrusted prefixes every line of customer-supplied text with "> " so
-// it is visibly fenced off from operator content in the notification.
+// it is visibly fenced off from operator content in the notification. It
+// splits on every Unicode line break, not only LF, so no line can escape
+// the fence (intake also rejects these characters; this is the second wall).
 func quoteUntrusted(text string) string {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	lines := strings.Split(untrustedLineBreaks.Replace(text), "\n")
 	for i, line := range lines {
 		lines[i] = "> " + line
 	}

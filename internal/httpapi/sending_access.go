@@ -129,7 +129,7 @@ func (s *Server) registerSendingAccess() {
 		Description: "Files a request for support to review this account's external sending access. " +
 			"Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). " +
 			"After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). " +
-			"Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. " + sendingAccessBetaDoc,
+			"Filing a request never grants access by itself. 409 conflict when the account is not currently restricted (enforcement does not apply to it, it is already approved, or an available unlock already lifts the restriction) — nothing is filed. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. " + sendingAccessBetaDoc,
 		Security:      []map[string][]string{{"bearer": {}}},
 		DefaultStatus: http.StatusCreated,
 		// Two success statuses (201 created, 200 existing pending request),
@@ -183,6 +183,8 @@ func (s *Server) handleCreateSendingAccessRequest(ctx context.Context, in *creat
 	switch {
 	case errors.Is(err, sendingpolicy.ErrExternalAccessDisabled):
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "external sending access is not enabled on this deployment")
+	case errors.Is(err, sendingpolicy.ErrSendingAccessNotRestricted):
+		return nil, NewError(http.StatusConflict, "conflict", "external sending is not restricted for this account; there is nothing to request")
 	case errors.Is(err, sendingpolicy.ErrInvalidAccessRequest):
 		return nil, NewError(http.StatusBadRequest, "invalid_request", err.Error())
 	case errors.Is(err, sendingpolicy.ErrAccessRequestRateLimited):

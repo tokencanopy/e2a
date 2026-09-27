@@ -273,3 +273,21 @@ func TestSendingAccessRequestSkipsOperatorNotificationForExemptClass(t *testing.
 		})
 	}
 }
+
+func TestSendingAccessRequestNotRestrictedIsConflict(t *testing.T) {
+	notified := 0
+	srv := testServer(t, func(d *Deps) {
+		d.SubmitSendingAccessRequest = func(context.Context, string, sendingpolicy.AccessRequestInput) (sendingpolicy.AccessRequest, bool, error) {
+			return sendingpolicy.AccessRequest{}, false, sendingpolicy.ErrSendingAccessNotRestricted
+		}
+		d.NotifySendingAccessRequest = func(context.Context, string, sendingpolicy.AccessRequest) { notified++ }
+	})
+	form := map[string]any{"use_case": "x", "recipients": "y", "expected_daily_volume": 1}
+	code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/account/sending-access/request", "good", form)
+	if code != 409 || errCode(body) != "conflict" {
+		t.Fatalf("not restricted: %d %v", code, body)
+	}
+	if notified != 0 {
+		t.Fatal("a refused request must not notify the operator")
+	}
+}

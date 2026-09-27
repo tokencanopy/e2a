@@ -34,6 +34,11 @@ var (
 	ErrAccessRequestRateLimited = errors.New("sendingpolicy: too many sending access requests")
 	// ErrInvalidAccessRequest means a request field failed validation.
 	ErrInvalidAccessRequest = errors.New("sendingpolicy: invalid sending access request")
+	// ErrSendingAccessNotRestricted means the account is not currently
+	// restricted (enforcement does not bind it, it is already approved, or
+	// an available unlock already lifts it): there is nothing to request,
+	// so no row is written and no operator is notified.
+	ErrSendingAccessNotRestricted = errors.New("sendingpolicy: external sending is not restricted for this account")
 )
 
 // NewPolicyModule binds a module to a pool, the trust roots and the
@@ -322,10 +327,35 @@ const (
 	accessRequestMax    = 3
 )
 
+// normalizeRequestText converts CRLF line endings to LF — the one line-break
+// form the operator email's quoting fence is built around — and trims.
+func normalizeRequestText(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
+}
+
+// hasForbiddenRequestRune reports a control character other than LF and TAB,
+// or a Unicode line/paragraph separator. Either could break out of the
+// "> " fence that marks customer text as untrusted in the operator email.
+func hasForbiddenRequestRune(s string) bool {
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			continue
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			return true
+		case r == '\u2028' || r == '\u2029':
+			return true
+		}
+	}
+	return false
+}
+
 func (in AccessRequestInput) validate() error {
-	useCase := strings.TrimSpace(in.UseCase)
-	recipients := strings.TrimSpace(in.Recipients)
+	useCase := normalizeRequestText(in.UseCase)
+	recipients := normalizeRequestText(in.Recipients)
 	switch {
+	case hasForbiddenRequestRune(useCase) || hasForbiddenRequestRune(recipients):
+		return fmt.Errorf("%w: use_case and recipients must not contain control characters or Unicode line separators (line breaks and tabs are fine)", ErrInvalidAccessRequest)
 	case useCase == "" || len([]rune(useCase)) > MaxAccessRequestUseCase:
 		return fmt.Errorf("%w: use_case must be 1-%d characters", ErrInvalidAccessRequest, MaxAccessRequestUseCase)
 	case recipients == "" || len([]rune(recipients)) > MaxAccessRequestRecipients:
@@ -349,8 +379,12 @@ func scanAccessRequest(row pgx.Row) (AccessRequest, error) {
 // is therefore idempotent while a request is pending; after a decline a new
 // request (an appeal) may be filed within the rolling-window cap.
 func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in AccessRequestInput) (AccessRequest, bool, error) {
-	if err := m.requireExternalAccessEnabled(ctx); err != nil {
+	policy, err := m.policyForRead(ctx, m.pool)
+	if err != nil {
 		return AccessRequest{}, false, err
+	}
+	if policy.ExternalSendingMode() == ModeDisabled {
+		return AccessRequest{}, false, ErrExternalAccessDisabled
 	}
 	if err := in.validate(); err != nil {
 		return AccessRequest{}, false, err
@@ -374,6 +408,30 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 		return AccessRequest{}, false, fmt.Errorf("sendingpolicy: read user: %w", err)
 	}
 	exempt := accountClassExempt(class)
+	if !exempt {
+		// Only an account the rule actually restricts right now may file:
+		// enforce mode, inside the cohort, not approved, and no available
+		// unlock already lifting it. Anything else would only mint operator
+		// mail with nothing to decide. System/internal classes are exempt
+		// from the rule; they may still file (first-party conformance) and
+		// are never notified.
+		facts, err := loadAccountAccessFacts(ctx, tx, userID)
+		if errors.Is(err, errAccountMissing) {
+			return AccessRequest{}, false, ErrAccountNotFound
+		}
+		if err != nil {
+			return AccessRequest{}, false, err
+		}
+		applies, err := externalAccessApplies(policy, facts)
+		if err != nil {
+			return AccessRequest{}, false, err
+		}
+		esa := policy.ExternalSendingAccess
+		if !applies || policy.ExternalSendingMode() != ModeEnforce || facts.approved ||
+			(facts.entitled && esa.Allows(UnlockPaidEntitlement)) {
+			return AccessRequest{}, false, ErrSendingAccessNotRestricted
+		}
+	}
 	existing, err := scanAccessRequest(tx.QueryRow(ctx,
 		`SELECT `+accessRequestColumns+` FROM external_sending_access_requests WHERE user_id = $1 AND state = 'pending'`, userID))
 	if err == nil {
@@ -398,7 +456,7 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 		INSERT INTO external_sending_access_requests (id, user_id, use_case, recipients, expected_daily_volume)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING `+accessRequestColumns,
-		randomID("esar_"), userID, strings.TrimSpace(in.UseCase), strings.TrimSpace(in.Recipients), in.ExpectedDailyVolume))
+		randomID("esar_"), userID, normalizeRequestText(in.UseCase), normalizeRequestText(in.Recipients), in.ExpectedDailyVolume))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {

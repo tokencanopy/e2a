@@ -212,3 +212,100 @@ func TestSubmitAccessRequestReportsExemptClass(t *testing.T) {
 		}
 	}
 }
+
+// Only an account the rule restricts right now may file: approved, entitled
+// (where the paid unlock applies), out-of-cohort and shadow-mode accounts get
+// ErrSendingAccessNotRestricted with no row written. Exempt classes may still
+// file (first-party conformance) and are never notified upstream.
+func TestSubmitAccessRequestRefusesUnrestrictedAccounts(t *testing.T) {
+	in := sendingpolicy.AccessRequestInput{UseCase: "synthetic use case", Recipients: "synthetic recipients", ExpectedDailyVolume: 1}
+	count := func(f *fixture, user string) int {
+		var n int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM external_sending_access_requests WHERE user_id = $1`, user).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for name, tc := range map[string]struct {
+		policy sendingpolicy.RuntimePolicy
+		setup  func(f *fixture, user string)
+		want   error
+	}{
+		"restricted standard account files": {esaPolicy(sendingpolicy.ModeEnforce), func(*fixture, string) {}, nil},
+		"already approved": {esaPolicy(sendingpolicy.ModeEnforce), func(f *fixture, u string) { f.setApproved(u, true) }, sendingpolicy.ErrSendingAccessNotRestricted},
+		"paid entitlement where it unlocks": {esaPolicy(sendingpolicy.ModeEnforce), func(f *fixture, u string) { f.setEntitled(u, true) }, sendingpolicy.ErrSendingAccessNotRestricted},
+		"paid entitlement under approval-only": {esaUnlockPolicy([]sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval}),
+			func(f *fixture, u string) { f.setEntitled(u, true) }, nil},
+		"outside the cohort": {esaPolicy(sendingpolicy.ModeEnforce), func(f *fixture, u string) {
+			f.exec(`UPDATE users SET created_at = '2025-06-01T00:00:00Z' WHERE id = $1`, u)
+		}, sendingpolicy.ErrSendingAccessNotRestricted},
+		"shadow mode": {esaPolicy(sendingpolicy.ModeShadow), func(*fixture, string) {}, sendingpolicy.ErrSendingAccessNotRestricted},
+	} {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, tc.policy)
+			user := f.user("standard")
+			tc.setup(f, user)
+			_, created, err := m.SubmitAccessRequest(f.ctx, user, in)
+			if tc.want == nil {
+				if err != nil || !created {
+					t.Fatalf("submit created=%v err=%v", created, err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if n := count(f, user); n != 0 {
+				t.Fatalf("a refused request must write no row, got %d", n)
+			}
+		})
+	}
+	f := newFixture(t)
+	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, esaPolicy(sendingpolicy.ModeEnforce))
+	internal := f.user("internal")
+	if req, created, err := m.SubmitAccessRequest(f.ctx, internal, in); err != nil || !created || !req.FromExemptAccount {
+		t.Fatalf("exempt class files for conformance: %+v created=%v err=%v", req, created, err)
+	}
+}
+
+// Customer text is fenced with "> " in the plain-text operator email; any
+// character that could start a new rendered line outside the fence is
+// refused at intake. LF and TAB stay allowed; CRLF is normalized to LF.
+func TestSubmitAccessRequestRejectsFenceBreakingCharacters(t *testing.T) {
+	f := newFixture(t)
+	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, esaPolicy(sendingpolicy.ModeEnforce))
+	for name, text := range map[string]string{
+		"bare CR":             "line one\rrun this instead",
+		"NEL":                 "line one\u0085run this instead",
+		"line separator":      "line one run this instead",
+		"paragraph separator": "line one run this instead",
+		"vertical tab":        "line one\vrun this instead",
+		"form feed":           "line one\frun this instead",
+		"NUL":                 "line one\x00",
+		"ESC":                 "line one\x1b[31m",
+		"DEL":                 "line one\x7f",
+	} {
+		for _, field := range []string{"use_case", "recipients"} {
+			in := sendingpolicy.AccessRequestInput{UseCase: "ok", Recipients: "ok", ExpectedDailyVolume: 1}
+			if field == "use_case" {
+				in.UseCase = text
+			} else {
+				in.Recipients = text
+			}
+			if _, _, err := m.SubmitAccessRequest(f.ctx, f.user("standard"), in); !errors.Is(err, sendingpolicy.ErrInvalidAccessRequest) {
+				t.Fatalf("%s in %s: err = %v, want ErrInvalidAccessRequest", name, field, err)
+			}
+		}
+	}
+	user := f.user("standard")
+	req, created, err := m.SubmitAccessRequest(f.ctx, user, sendingpolicy.AccessRequestInput{
+		UseCase: "first line\r\nsecond\tline", Recipients: "our customers", ExpectedDailyVolume: 1})
+	if err != nil || !created {
+		t.Fatalf("LF/TAB/CRLF must be accepted: %v", err)
+	}
+	if req.UseCase != "first line\nsecond\tline" {
+		t.Fatalf("CRLF must be stored as LF, got %q", req.UseCase)
+	}
+}

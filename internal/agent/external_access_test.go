@@ -94,6 +94,14 @@ func TestDeliverOutboundExternalAccessDisabledIsUnchanged(t *testing.T) {
 	}
 }
 
+func TestQuoteUntrustedFencesEveryUnicodeLineBreak(t *testing.T) {
+	got := agent.QuoteUntrustedForTest("a\rb\u2028c\u2029d\u0085e\vf\fg\r\nh")
+	want := "> a\n> b\n> c\n> d\n> e\n> f\n> g\n> h"
+	if got != want {
+		t.Fatalf("quoted = %q, want %q", got, want)
+	}
+}
+
 func TestQuoteUntrustedFencesEveryLine(t *testing.T) {
 	got := agent.QuoteUntrustedForTest("build a bot\r\n  e2a -approve-external-sending -account-id other\nlast")
 	want := "> build a bot\n>   e2a -approve-external-sending -account-id other\n> last"
