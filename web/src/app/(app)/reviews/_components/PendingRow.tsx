@@ -146,7 +146,7 @@ export function PendingRow({
     wantsAccessCheck ? agentsKey : null,
     () => listAgents(),
   );
-  const { data: accessDomains } = useSWR(
+  const { data: accessDomains, error: accessDomainsError } = useSWR(
     wantsAccessCheck ? domainsKey : null,
     () => listDomains().catch(() => [] as DomainInfo[]),
   );
@@ -273,8 +273,14 @@ export function PendingRow({
   const domainSendingVerified = domainRecord
     ? outboundCapability(domainRecord) === "verified"
     : false;
+  // Decide only once the domains read has settled: before it lands we cannot
+  // tell whether a verified domain lifts the restriction, and warning early
+  // would flash a false warning on self-host deployments with one. A failed
+  // domains read falls back to "no verified domain" (warn — guidance only).
+  const domainsSettled = accessDomains !== undefined || accessDomainsError !== undefined;
   const restrictedSend =
     wantsAccessCheck &&
+    domainsSettled &&
     isSendingRestricted(accessAccount?.sending_access) &&
     !(domainSendingVerified && unlockAvailable(accessAccount?.sending_access, "verified_domain"));
   const candidateRecipients = editing
