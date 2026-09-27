@@ -46,7 +46,10 @@ Allowed:
 - moving the account to the trash (`DELETE /v1/account` without `permanent`,
   receipt `mode: "trash"`); the permanent erase stays `409 erase_held` while
   any pause applies, and the dashboard restore/erase interstitial is
-  unchanged (erase is held there too);
+  unchanged (erase is held there too). While the account is read-only the
+  trash does **not** tear down its SES sender identities (the domains are
+  still unverified, so nothing is sent from them): they stay as provider-side
+  evidence until the purge at the end of the trash window;
 - anonymous surfaces that belong to no account: dynamic client registration
   (the client is bound to an account only at consent, which is refused), the
   public feedback form (how a paused customer reaches support), the public
@@ -58,16 +61,27 @@ Allowed:
 | Surface | Enforcement point | Classification |
 |---|---|---|
 | REST `/v1` (API keys of both scopes, dashboard session, OAuth access tokens, agent access tokens, delegated tokens) | `readOnlyGuard` Huma middleware | `operationAccess`: every operation explicit; rule = HTTP method (GET/HEAD read, else write) with three named exceptions (`validateTemplate` read, `deleteAccount` allowed write, `getInfo` public). An operation missing from the table falls back to the method rule, so an unclassified write is refused. |
-| Legacy mux (dashboard `/api/*`, OAuth) | `legacyReadOnlyMiddleware` gorilla middleware | `legacyWriteRoutes`: every non-GET route is `legacyAccountWrite` or `legacyExempt` with its reason. |
+| Legacy mux (dashboard `/api/*`, OAuth) | `legacyReadOnlyMiddleware` gorilla middleware | `legacyWriteRoutes`: every non-GET route is `legacyAccountWrite` or `legacyExempt` with its reason. A `legacyAccountWrite` route authenticates the session cookie only, so the guard resolves the caller exactly as the handler does and refuses outright: an `Authorization` header on such a route is `400 ambiguous_credentials` (the guard and the handler can never disagree about the caller), no valid session is `401` from the guard itself. A write route missing from the table defaults to refuse: every credential presented must resolve and none may be read-only (an anonymous request carries no account and passes, which keeps routes the binary mounts on the same router — the SNS `/webhooks/ses` — working). |
 | HITL magic links (`/v1/approve`, `/v1/reject` POST) | `refuseMagicIfReadOnly` in the handler | Token-authorized, not a principal request; the owning account is resolved from the message. |
 | Internal external-principal attach | handler check | The account is named in the signed body. |
 | MCP tools | the `/v1` guard (every tool calls the REST API with the caller's credential) | `MUTATING_TOOLS` / `NON_MUTATING_TOOLS`, pinned against the registered tools and the MCP annotations. The MCP server keeps no account state that could go stale. |
+| HITL expiry sweep (`internal/hitlworker`) | the candidate queries (`ListExpiredPending`, `ListExpiredReviews`) | An approve-on-expiry hold of a read-only account is not a candidate: it stays `pending_review`, so suspicious inbound mail is never released into the inbox or webhooks and held outbound mail is never sent. Excluded at selection, not skipped in the worker, so such holds cannot sit at the head of the ordered, limited sweep and starve other accounts. Reject-on-expiry holds still resolve (rejecting releases nothing). A resume makes them candidates again. |
 | WebSocket | nothing to enforce | The live-tail socket has no client-to-server message types (client frames are discarded); it is a read surface. |
 
 Freshness: the guards do one primary-key lookup per write, uncached, so an
 operator pause or resume takes effect on the very next request. Reads never
 pay the lookup. A failed lookup fails closed: `503 auth_unavailable`, the
-write does not run.
+write does not run; so does a principal that resolved without an account.
+
+Accepted window: the guard reads the control row before the handler runs,
+outside the handler's transaction. A write whose guard check passed a few
+milliseconds before an operator's pause commits can still complete (the same
+holds for the HITL sweep between candidate selection and the hold's
+transition). This is accepted: the pause is an operator action on a human
+timescale, the next request is refused, and the one consequence that matters
+most — sending — is re-checked at the sending gate
+(`sendingpolicy`, immediately before provider submission), which refuses a
+paused account regardless of what the guard saw.
 
 ## Error shape
 
@@ -101,9 +115,18 @@ also freezes every customer write for that account. The readback prints
   pass.
 - `internal/agent/read_only_internal_test.go`: every legacy write route is
   classified.
-- DB-backed seams: `internal/identity/account_read_only_test.go`,
+- `internal/agent/read_only_test.go`: every legacy account-write route
+  refused for a read-only session, including with a junk bearer or another
+  account's valid key alongside the cookie (`400 ambiguous_credentials`), a
+  bare bearer, and no credential (`401`); an unclassified write route
+  defaults to refuse.
+- `internal/hitlworker/read_only_test.go`: the expiry sweep leaves a
+  read-only account's approve-on-expiry holds pending (inbound and
+  outbound), still rejects reject-on-expiry holds, and releases after a
+  resume.
+- DB-backed seams: `internal/identity/account_read_only_test.go` (incl. the
+  trash keeping sender identities while read-only),
   `internal/sendingpolicy/account_read_only_test.go`,
-  `internal/agent/read_only_test.go`,
   `internal/apiserver/read_only_db_test.go` (full composition, operator pause
   path, trash/erase).
 - Conformance: `account_read_only_refuses_writes` in
