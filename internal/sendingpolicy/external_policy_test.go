@@ -222,3 +222,32 @@ func TestExternalAccessUnlocksValidation(t *testing.T) {
 		t.Fatal("a stored empty unlock set must be rejected")
 	}
 }
+
+func TestExternalAccessExplicitFullUnlockSetHashesLikeOmitted(t *testing.T) {
+	omitted := DisabledPolicy()
+	omitted.ExternalSendingAccess = &ExternalSendingAccessPolicy{Mode: ModeEnforce, AccountsCreatedAtOrAfter: "2026-10-01T00:00:00Z"}
+	full := DisabledPolicy()
+	full.ExternalSendingAccess = &ExternalSendingAccessPolicy{Mode: ModeEnforce, AccountsCreatedAtOrAfter: "2026-10-01T00:00:00Z",
+		Unlocks: []ExternalUnlock{UnlockPaidEntitlement, UnlockOperatorApproval, UnlockVerifiedDomain}}
+	ho, err := Hash(omitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hf, err := Hash(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ho != hf {
+		t.Fatal("an explicit full unlock set must canonicalize to the omitted form")
+	}
+	if full.ExternalSendingAccess.Unlocks == nil {
+		t.Fatal("canonicalizing must not mutate the caller's value")
+	}
+	// A duplicate-padded list is still rejected before canonicalization.
+	dup := DisabledPolicy()
+	dup.ExternalSendingAccess = &ExternalSendingAccessPolicy{Mode: ModeEnforce, AccountsCreatedAtOrAfter: "2026-10-01T00:00:00Z",
+		Unlocks: []ExternalUnlock{UnlockOperatorApproval, UnlockOperatorApproval, UnlockPaidEntitlement}}
+	if err := dup.Validate(); err == nil {
+		t.Fatal("duplicates must be rejected")
+	}
+}

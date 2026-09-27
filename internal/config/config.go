@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
@@ -784,6 +785,9 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	if err := checkSendingProtectionStrict(data); err != nil {
+		return nil, err
+	}
 
 	// E2A_ENV overrides `env:` in config.yaml. Every other config knob
 	// already has an env-var override; env: previously had none — the only
@@ -1289,4 +1293,65 @@ func absoluteHTTPURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("invalid absolute http(s) URL")
 	}
 	return parsed, nil
+}
+
+// checkSendingProtectionStrict re-decodes ONLY the `sending_protection`
+// subtree with unknown keys rejected. The rest of the file stays lenient
+// (self-hosters carry keys from older docs), but this block is a security
+// policy: a misspelled `unlock:` or `Unlocks:` under external_sending_access,
+// or a key indented one level off, would otherwise silently mean "every
+// unlock". It also rejects an explicitly null or blank `unlocks:` — yaml.v3
+// decodes `unlocks:`, `unlocks: null` and `unlocks: ~` to a nil slice without
+// ever invoking a custom unmarshaler, which would read as "absent = all
+// three" and bypass the empty-list rejection. Presence is therefore detected
+// on the YAML node itself.
+func checkSendingProtectionStrict(data []byte) error {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	if len(root.Content) == 0 {
+		return nil
+	}
+	sp := mappingValue(root.Content[0], "sending_protection")
+	if sp == nil || sp.ShortTag() == "!!null" {
+		return nil
+	}
+	raw, err := yaml.Marshal(sp)
+	if err != nil {
+		return fmt.Errorf("sending_protection: %w", err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	var strict SendingProtectionConfig
+	if err := dec.Decode(&strict); err != nil {
+		return fmt.Errorf("sending_protection: %w", err)
+	}
+	esa := mappingValue(sp, "external_sending_access")
+	if esa == nil || esa.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(esa.Content); i += 2 {
+		if esa.Content[i].Value != "unlocks" {
+			continue
+		}
+		v := esa.Content[i+1]
+		if v.ShortTag() == "!!null" {
+			return errors.New("sending_protection.external_sending_access.unlocks is null or blank; omit the key to allow every unlock, or list the unlocks (it must contain operator_approval)")
+		}
+	}
+	return nil
+}
+
+// mappingValue returns the value node for key in a mapping node, or nil.
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
 }

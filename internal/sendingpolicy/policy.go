@@ -471,6 +471,20 @@ func (p RuntimePolicy) normalized() RuntimePolicy {
 				}
 			}
 			copied.Unlocks = sorted
+			// The full vocabulary means exactly what an omitted key means,
+			// so it canonicalizes to omitted: one policy, one reviewed hash.
+			// Validation runs on the value as written, before this.
+			if len(sorted) == len(externalUnlockOrder) {
+				full := true
+				for i, u := range externalUnlockOrder {
+					if sorted[i] != u {
+						full = false
+					}
+				}
+				if full {
+					copied.Unlocks = nil
+				}
+			}
 		}
 		p.ExternalSendingAccess = &copied
 	}

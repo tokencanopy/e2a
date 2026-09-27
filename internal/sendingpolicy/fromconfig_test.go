@@ -105,17 +105,24 @@ func TestFromConfigExternalSendingUnlocks(t *testing.T) {
 		t.Fatalf("hosted unlocks = %v", got)
 	}
 
+	// Every one of these must stop startup, at load (null/blank/misspelled
+	// key) or at policy validation (content) — never read as "all three".
 	for name, body := range map[string]string{
 		"explicit empty list":       "    unlocks: []\n",
+		"explicit null":             "    unlocks: null\n",
+		"blank":                     "    unlocks:\n",
+		"tilde":                     "    unlocks: ~\n",
 		"missing operator_approval": "    unlocks: [verified_domain, paid_entitlement]\n",
 		"unknown unlock":            "    unlocks: [operator_approval, plan]\n",
+		"wrong-case entry":          "    unlocks: [Operator_Approval]\n",
+		"misspelled key":            "    unlock: [operator_approval]\n",
 	} {
 		cfg, err := load(t, head+body)
 		if err != nil {
-			t.Fatalf("%s: load: %v", name, err)
+			continue // refused at load: startup fails
 		}
 		if _, err := FromConfig(cfg); err == nil {
-			t.Fatalf("%s: must fail config validation", name)
+			t.Fatalf("%s: must fail startup", name)
 		}
 	}
 }
