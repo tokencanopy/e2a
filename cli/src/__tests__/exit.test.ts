@@ -23,6 +23,15 @@ describe("API error exit classification", () => {
   });
 });
 
+describe("account_read_only exit classification", () => {
+  it("maps account_read_only to its own READ_ONLY code, not AUTH or REQUEST", () => {
+    // The credential is valid (not AUTH) and the invocation is fine (not
+    // REQUEST): the account itself is frozen for an abuse review, so no write
+    // succeeds until an operator resumes it.
+    expect(exitCodeForAPIError({ code: "account_read_only", retryable: false })).toBe(EXIT.READ_ONLY);
+  });
+});
+
 describe("exit code contract", () => {
   it("published values are frozen — add codes, never renumber", () => {
     expect(EXIT.OK).toBe(0);
@@ -35,5 +44,6 @@ describe("exit code contract", () => {
     expect(EXIT.SEND_OUTCOME).toBe(7);
     expect(EXIT.WARN).toBe(8);
     expect(EXIT.CONFIG).toBe(9);
+    expect(EXIT.READ_ONLY).toBe(10);
   });
 });

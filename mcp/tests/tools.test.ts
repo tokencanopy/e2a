@@ -12,6 +12,7 @@ import {
 import type { McpClient } from "../src/client.js";
 import { buildServer } from "../src/server.js";
 import { ADMIN_TOOLS, assertToolTiersComplete, toolNamesForScope, RUNTIME_TOOLS } from "../src/tools/tiers.js";
+import { assertMutatingClassificationComplete, MUTATING_TOOLS, NON_MUTATING_TOOLS } from "../src/tools/mutating.js";
 import { messageSummaryViewForTool, registerMessageTools } from "../src/tools/messages.js";
 import { registerAgentTools } from "../src/tools/agents.js";
 import { registerDomainTools } from "../src/tools/domains.js";
@@ -622,6 +623,34 @@ describe("e2a MCP server", () => {
     expect(() => assertToolTiersComplete(names)).not.toThrow();
   });
 
+  it("every registered tool is classified mutating or not (read-only drift guard)", () => {
+    // Same true registered set as the tier guard above: an unclassified tool
+    // would leave agents unable to know whether it works while the account
+    // is read-only (docs/design/account-read-only.md).
+    const names: string[] = [];
+    const recorder = {
+      registerTool: (name: string) => {
+        names.push(name);
+        return undefined;
+      },
+    } as unknown as McpServer;
+    const stub = makeStubClient();
+    registerMessageTools(recorder, stub);
+    registerAgentTools(recorder, stub);
+    registerDomainTools(recorder, stub);
+    registerReviewTools(recorder, stub);
+    registerWebhookTools(recorder, stub);
+    registerEventTools(recorder, stub);
+    registerTemplateTools(recorder, stub);
+    registerApiKeyTools(recorder, stub);
+    registerContactTools(recorder, stub);
+    registerSuppressionTools(recorder, stub);
+    registerMetricsTools(recorder, stub);
+    registerLegacyTools(recorder, stub);
+    expect(() => assertMutatingClassificationComplete(names)).not.toThrow();
+    expect(() => assertMutatingClassificationComplete([...names, "brand_new_tool"])).toThrow(/unclassified: brand_new_tool/);
+  });
+
   it("unrecognized scope falls back to the runtime tier (least privilege)", () => {
     expect(toolNamesForScope("bogus")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
@@ -1134,6 +1163,43 @@ describe("e2a MCP server", () => {
       expect(byName.get(n)?.readOnlyHint ?? false, `${n} not read-only`).toBe(false);
     }
     expect(byName.get("get_message")?.readOnlyHint, "get_message not read-only").toBe(false);
+  });
+
+  it("the mutating flag agrees with the annotations", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      if (MUTATING_TOOLS.has(t.name)) {
+        expect(t.annotations?.readOnlyHint ?? false, `${t.name} mutates, so it cannot be readOnlyHint`).toBe(false);
+      }
+      if (t.annotations?.readOnlyHint === true) {
+        expect(NON_MUTATING_TOOLS.has(t.name), `${t.name} is readOnlyHint, so it must be non-mutating`).toBe(true);
+      }
+    }
+  });
+
+  it("a mutating tool refused for a read-only account surfaces account_read_only", async () => {
+    // The /v1 guard is the MCP surface's enforcement point: the tool call
+    // reaches the API with the caller's credential and the 403 comes back as
+    // a non-retryable tool error an agent can branch on.
+    (stub.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new E2AError({
+        code: "account_read_only",
+        message:
+          "sending is paused for this account pending an abuse review, and the account is read-only: reads still work, but no changes can be made until the review is complete. Contact support to appeal.",
+        status: 403,
+        retryable: false,
+      }),
+    );
+    const res = await client.callTool({
+      name: "send_message",
+      arguments: { to: ["x@example.com"], subject: "s", text: "b" },
+    });
+    expect(res.isError).toBe(true);
+    const text = (res.content as Array<{ text: string }>)[0]?.text ?? "";
+    expect(text).toContain("[account_read_only]");
+    expect(text).toContain("read-only");
+    expect(text).not.toContain("(retryable)");
+    expect(res.structuredContent).toMatchObject({ code: "account_read_only", retryable: false, status: 403 });
   });
 
   it("send_message forwards args to client.send", async () => {

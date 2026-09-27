@@ -123,6 +123,11 @@ const CODE_TABLE: Record<string, { make: Make; retryable: boolean }> = {
   // deleted or closed account and cannot register or be restored (account
   // trash / purge). Not retryable — the same identity will refuse again.
   registration_refused: { make: mkPermission, retryable: false },
+  // The account is read-only: its sending is paused pending an abuse review,
+  // so every write is refused (reads and moving the account to the trash keep
+  // working). Not retryable — nothing succeeds until an operator resumes the
+  // account; contact support. GET /v1/account reports it as read_only.
+  account_read_only: { make: mkPermission, retryable: false },
   // 404 / 410 — the *_not_found suffix family resolves in resolve() below.
   not_found: { make: mkNotFound, retryable: false },
   gone: { make: mkNotFound, retryable: false },

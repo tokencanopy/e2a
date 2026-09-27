@@ -519,3 +519,4 @@ only added to.
 | `7` | A persisted send failed or returned an unrecognized outcome — do not retry; inspect the returned message id |
 | `8` | Diagnostics (`doctor`) completed with warnings only — nothing broken |
 | `9` | Diagnostics (`doctor`) found a definite configuration failure — do not retry; fix the reported configuration |
+| `10` | The account is read-only (`account_read_only`): sending is paused pending an abuse review, so every write is refused — do not retry or rotate keys; contact support |

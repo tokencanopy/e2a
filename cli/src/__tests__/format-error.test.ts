@@ -61,4 +61,20 @@ describe("formatError", () => {
   it("handles a non-E2AError throw without crashing", () => {
     expect(formatError(new Error("boom"))).toBe("Error: boom\n");
   });
+
+  it("renders account_read_only with read-only guidance and no retry advice", () => {
+    const err = new E2AError({
+      code: "account_read_only",
+      message: "sending is paused for this account pending an abuse review, and the account is read-only",
+      status: 403,
+      retryable: false,
+    });
+    const out = formatError(err);
+    expect(out).toContain("[account_read_only]");
+    expect(out).toContain("read-only while its sending is paused for an abuse review");
+    expect(out).toContain("reads (whoami, messages, listen) still work");
+    expect(out.toLowerCase()).toContain("do not retry");
+    expect(out).toContain("contact support");
+    expect(out).not.toContain("e2a sending-access request");
+  });
 });

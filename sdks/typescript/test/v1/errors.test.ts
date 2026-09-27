@@ -172,6 +172,12 @@ describe("code-first class selection (F2)", () => {
       E2APermissionError,
     );
     expect(toE2AError({ status: 403, code: "sending_paused", message: "x" }).retryable).toBe(false);
+    // account_read_only: an abuse-paused account refuses every write —
+    // PERMISSION, never retryable until an operator resumes the account.
+    const readOnly = toE2AError({ status: 403, code: "account_read_only", message: "x" });
+    expect(readOnly).toBeInstanceOf(E2APermissionError);
+    expect(readOnly.retryable).toBe(false);
+    expect(readOnly.code).toBe("account_read_only");
     // external_sending_not_enabled: PERMISSION (not quota), never retryable —
     // the account may not send to one or more recipients through its shared
     // sending identity, and nothing was queued.

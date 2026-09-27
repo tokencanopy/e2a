@@ -41,6 +41,15 @@ export async function whoami(opts: WhoamiOptions): Promise<void> {
   if (account.restoredAt) {
     process.stdout.write(`restored: ${account.restoredAt.toISOString()} (from trash)\n`);
   }
+  // Read-only accounts: sending is paused for an abuse review and every write
+  // is refused (account_read_only, exit 10). Say so up front so a preflight
+  // does not go on to attempt writes that cannot succeed.
+  if (account.readOnly) {
+    process.stdout.write(
+      "read-only: yes (sending is paused pending an abuse review; reads still work, " +
+        "every change is refused — contact support)\n",
+    );
+  }
 
   // Beta, additive: `sending_access` is omitted entirely on a deployment that
   // doesn't run this control, so say nothing rather than printing a

@@ -883,6 +883,12 @@ function formatError(err: unknown): string {
       "  request approval with: e2a sending-access request --use-case <text> --recipients <text> --volume <n>\n" +
       "  do not retry this request as-is — the same recipients will refuse again.\n";
   }
+  if (err instanceof E2AError && err.code === "account_read_only") {
+    out +=
+      "  this account is read-only while its sending is paused for an abuse review.\n" +
+      "  reads (whoami, messages, listen) still work; no change will succeed until the review is complete.\n" +
+      "  do not retry or rotate keys — contact support to appeal.\n";
+  }
   return out;
 }
 

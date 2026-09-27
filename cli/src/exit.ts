@@ -45,10 +45,19 @@ export const EXIT = {
    * REQUEST (5) because nothing about the invocation itself was wrong.
    */
   CONFIG: 9,
+  /**
+   * The account is read-only (`account_read_only`): its sending is paused
+   * pending an abuse review, so every write is refused. Distinct from AUTH
+   * (the credential is fine) and REQUEST (nothing about the invocation was
+   * wrong): no write will succeed until an operator resumes the account, so
+   * wrappers must neither retry nor rotate keys — contact support.
+   */
+  READ_ONLY: 10,
 } as const;
 
 export function exitCodeForAPIError(error: { code: string; retryable: boolean }): number {
   if (error.code === "unauthorized" || error.code === "forbidden") return EXIT.AUTH;
+  if (error.code === "account_read_only") return EXIT.READ_ONLY;
   return error.retryable ? EXIT.ERROR : EXIT.REQUEST;
 }
 

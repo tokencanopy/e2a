@@ -29,6 +29,10 @@ export class AccountView {
     */
     'purgeAfter'?: Date;
     /**
+    * True while the account is read-only because its sending is paused pending an abuse review: every write is refused with 403 account_read_only, while reads and moving the account to the trash keep working. False otherwise. Absent when the deployment does not report it or its state is unavailable.
+    */
+    'readOnly'?: boolean;
+    /**
     * When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore.
     */
     'restoredAt'?: Date;
@@ -78,6 +82,12 @@ export class AccountView {
             "baseName": "purge_after",
             "type": "Date",
             "format": "date-time"
+        },
+        {
+            "name": "readOnly",
+            "baseName": "read_only",
+            "type": "boolean",
+            "format": ""
         },
         {
             "name": "restoredAt",

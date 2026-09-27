@@ -87,6 +87,25 @@ describe("whoami command", () => {
     expect(output).not.toContain("restored:");
   });
 
+  it("says the account is read-only when readOnly is set", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount({ readOnly: true }));
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("read-only: yes");
+    expect(output).toContain("abuse review");
+  });
+
+  it("says nothing about read-only for a writable account", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount({ readOnly: false }));
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).not.toContain("read-only");
+  });
+
   it("emits raw JSON with --json", async () => {
     const account = makeAccount();
     mockAccountGet.mockResolvedValue(account);
