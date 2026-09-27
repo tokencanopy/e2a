@@ -83,3 +83,29 @@ func TestExampleConfigStillLoads(t *testing.T) {
 		t.Fatalf("config.example.yaml: %v", err)
 	}
 }
+
+// Anchors, aliases and merge keys defined outside the block resolve in the
+// strict pass exactly as in the lenient one — and strictness and the null
+// check still apply through them.
+func TestSendingProtectionStrictResolvesAnchors(t *testing.T) {
+	const anchors = "x-unlocks: &unl [operator_approval]\n" +
+		"x-esa: &esa\n  mode: enforce\n  accounts_created_at_or_after: \"1970-01-01T00:00:00Z\"\n"
+	cfg, err := loadYAML(t, anchors+"sending_protection:\n  external_sending_access:\n    <<: *esa\n    unlocks: *unl\n")
+	if err != nil {
+		t.Fatalf("anchors/aliases/merge keys must load: %v", err)
+	}
+	esa := cfg.SendingProtect.ExternalSendingAccess
+	if esa == nil || esa.Mode != "enforce" || len(esa.Unlocks) != 1 || esa.Unlocks[0] != "operator_approval" {
+		t.Fatalf("aliased block decoded wrong: %+v", esa)
+	}
+	whole := "x-sp: &sp\n  external_sending_access:\n    mode: enforce\n    accounts_created_at_or_after: \"1970-01-01T00:00:00Z\"\n    unlocks: [operator_approval]\nsending_protection: *sp\n"
+	if _, err := loadYAML(t, whole); err != nil {
+		t.Fatalf("an aliased sending_protection block must load: %v", err)
+	}
+	if _, err := loadYAML(t, "x-esa: &esa\n  mode: enforce\n  accounts_created_at_or_after: \"1970-01-01T00:00:00Z\"\n  unlock: [operator_approval]\nsending_protection:\n  external_sending_access: *esa\n"); err == nil {
+		t.Fatal("a misspelled key reached through an alias must still fail")
+	}
+	if _, err := loadYAML(t, "x-null: &n null\n"+esaHead+"    unlocks: *n\n"); err == nil {
+		t.Fatal("a null unlocks reached through an alias must still fail")
+	}
+}

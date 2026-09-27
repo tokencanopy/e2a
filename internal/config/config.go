@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/mail"
 	"net/netip"
@@ -1306,6 +1307,20 @@ func absoluteHTTPURL(raw string) (*url.URL, error) {
 // three" and bypass the empty-list rejection. Presence is therefore detected
 // on the YAML node itself.
 func checkSendingProtectionStrict(data []byte) error {
+	// One strict decode of the WHOLE document, so anchors, aliases and merge
+	// keys defined anywhere resolve exactly as in the lenient decode. Only
+	// sending_protection is typed; every other top-level key lands in the
+	// inline map, which keeps the rest of the file lenient.
+	var strict struct {
+		SP   SendingProtectionConfig `yaml:"sending_protection"`
+		Rest map[string]yaml.Node    `yaml:",inline"`
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&strict); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("sending_protection: %w", err)
+	}
+
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return err
@@ -1313,45 +1328,50 @@ func checkSendingProtectionStrict(data []byte) error {
 	if len(root.Content) == 0 {
 		return nil
 	}
-	sp := mappingValue(root.Content[0], "sending_protection")
-	if sp == nil || sp.ShortTag() == "!!null" {
+	esa := mappingValue(mappingValue(root.Content[0], "sending_protection"), "external_sending_access")
+	if esa == nil {
 		return nil
 	}
-	raw, err := yaml.Marshal(sp)
-	if err != nil {
-		return fmt.Errorf("sending_protection: %w", err)
-	}
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true)
-	var strict SendingProtectionConfig
-	if err := dec.Decode(&strict); err != nil {
-		return fmt.Errorf("sending_protection: %w", err)
-	}
-	esa := mappingValue(sp, "external_sending_access")
-	if esa == nil || esa.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(esa.Content); i += 2 {
-		if esa.Content[i].Value != "unlocks" {
-			continue
-		}
-		v := esa.Content[i+1]
-		if v.ShortTag() == "!!null" {
-			return errors.New("sending_protection.external_sending_access.unlocks is null or blank; omit the key to allow every unlock, or list the unlocks (it must contain operator_approval)")
-		}
+	if v := mappingValue(esa, "unlocks"); v != nil && v.ShortTag() == "!!null" {
+		return errors.New("sending_protection.external_sending_access.unlocks is null or blank; omit the key to allow every unlock, or list the unlocks (it must contain operator_approval)")
 	}
 	return nil
 }
 
 // mappingValue returns the value node for key in a mapping node, or nil.
+// Aliases are followed, and `<<` merge keys are searched after the mapping's
+// own keys (an explicit key wins, as in YAML merge semantics).
 func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	m = resolveAlias(m)
 	if m == nil || m.Kind != yaml.MappingNode {
 		return nil
 	}
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		if m.Content[i].Value == key {
-			return m.Content[i+1]
+			return resolveAlias(m.Content[i+1])
+		}
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != "<<" {
+			continue
+		}
+		merged := resolveAlias(m.Content[i+1])
+		sources := []*yaml.Node{merged}
+		if merged != nil && merged.Kind == yaml.SequenceNode {
+			sources = merged.Content
+		}
+		for _, src := range sources {
+			if v := mappingValue(src, key); v != nil {
+				return v
+			}
 		}
 	}
 	return nil
+}
+
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for depth := 0; n != nil && n.Kind == yaml.AliasNode && depth < 16; depth++ {
+		n = n.Alias
+	}
+	return n
 }
