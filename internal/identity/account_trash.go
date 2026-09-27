@@ -489,6 +489,20 @@ func (s *Store) AccountReadOnly(ctx context.Context, userID string) (bool, error
 	return readOnly, err
 }
 
+// readOnlyApproveHoldExclusion is the predicate the HITL expiry sweeps
+// (ListExpiredPending, ListExpiredReviews) add over agent_identities a: an
+// approve-on-expiry hold of a read-only account is not a candidate, so the
+// sweep never releases held inbound mail into the inbox/webhooks or sends held
+// outbound mail for an account frozen for an abuse review. Excluding it at
+// selection (rather than skipping it in the worker) keeps such holds from
+// sitting at the head of the ordered, LIMITed sweep and starving every other
+// account's expiries; a resume makes them candidates again on the next sweep.
+// Reject-on-expiry holds stay candidates: rejecting releases nothing. The
+// predicate must match AccountReadOnly.
+const readOnlyApproveHoldExclusion = `NOT (a.hitl_expiration_action = 'approve' AND EXISTS (
+		SELECT 1 FROM account_sending_controls asc_ro
+		 WHERE asc_ro.user_id = a.user_id AND asc_ro.state = 'paused' AND asc_ro.pause_class = 'abuse'))`
+
 // AccountReadOnlyCode is the machine-checked error code every surface emits
 // when it refuses a write for a read-only account.
 const AccountReadOnlyCode = "account_read_only"

@@ -4295,7 +4295,8 @@ type ExpirationCandidate struct {
 // ListExpiredPending returns pending_review messages whose
 // approval_expires_at is in the past, joined with their agent's
 // hitl_expiration_action. Ordered by approval_expires_at ASC so
-// earliest-expired are handled first.
+// earliest-expired are handled first. Approve-on-expiry holds of a read-only
+// account are excluded (readOnlyApproveHoldExclusion).
 func (s *Store) ListExpiredPending(ctx context.Context, limit int) ([]ExpirationCandidate, error) {
 	if limit <= 0 {
 		limit = 100
@@ -4307,6 +4308,7 @@ func (s *Store) ListExpiredPending(ctx context.Context, limit int) ([]Expiration
 		 WHERE m.status = 'pending_review' AND m.direction = 'outbound'
 		   AND m.approval_expires_at < now()
 		   AND a.deleted_at IS NULL
+		   AND `+readOnlyApproveHoldExclusion+`
 		 ORDER BY m.approval_expires_at ASC
 		 LIMIT $1`, limit,
 	)

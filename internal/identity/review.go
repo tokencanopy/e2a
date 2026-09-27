@@ -201,7 +201,8 @@ func (s *Store) GetReviewMessage(ctx context.Context, messageID, agentID string)
 // ListExpiredReviews returns inbound pending_review messages whose
 // approval_expires_at has passed, joined with their agent's hitl_expiration_action
 // — the inbound analogue of ListExpiredPending. The expiry worker uses these to
-// auto-resolve held messages per the agent's policy.
+// auto-resolve held messages per the agent's policy. Approve-on-expiry holds of
+// a read-only account are excluded (readOnlyApproveHoldExclusion).
 func (s *Store) ListExpiredReviews(ctx context.Context, limit int) ([]ExpirationCandidate, error) {
 	if limit <= 0 {
 		limit = 100
@@ -213,6 +214,7 @@ func (s *Store) ListExpiredReviews(ctx context.Context, limit int) ([]Expiration
 		 WHERE m.status = 'pending_review' AND m.direction = 'inbound'
 		   AND m.approval_expires_at < now()
 		   AND a.deleted_at IS NULL
+		   AND `+readOnlyApproveHoldExclusion+`
 		 ORDER BY m.approval_expires_at ASC
 		 LIMIT $1`, limit,
 	)
