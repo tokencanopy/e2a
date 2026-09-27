@@ -417,10 +417,14 @@ provider retries. The seam never reads `messages`, `agent_identities`, or
   clears `removal_pending`; that guard has no production remover yet and is
   the contract Task 11's provider reconciliation will build on.
 - **After account deletion** feedback still advances the retained bucket
-  provenance but recreates no customer state; account deletion stamps the
-  30-day post-deletion horizon on the account's correlations and events, and
-  the hourly `sending_feedback_maintenance` job removes expired provenance and
-  daily outcome rows older than the detector window plus one day.
+  provenance but recreates no customer state. The 30-day retention horizon is
+  stamped on the account's correlations and events at **purge** (the seal
+  transaction that makes the account irrecoverable), not at the user's delete
+  click: a trashed account stays restorable for the trash window and is not
+  stamped, so provenance for a self-deleted account can live for the trash
+  window plus 30 days after purge. The hourly `sending_feedback_maintenance`
+  job removes expired provenance and daily outcome rows older than the
+  detector window plus one day.
 - **Keyring coverage is a startup gate**: a server that HAS a keyring
   refuses to start if any unexpired recipient row was signed under a version
   that keyring does not hold. Rotation is superset-first: add the new key

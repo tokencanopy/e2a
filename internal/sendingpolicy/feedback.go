@@ -541,9 +541,10 @@ type FeedbackGCStats struct {
 
 // GCFeedback removes feedback provenance past its horizon and daily outcome
 // rows outside the detector window plus one UTC day of safety. Customer
-// correlations carry no expiry while the account exists; account deletion
-// stamps one (identity.Store.DeleteUserDataTx), so this pass is what makes
-// the post-deletion retention real.
+// correlations carry no expiry while the account exists; the account purge's
+// seal transaction (identity.Store.purgeAccount) stamps one when the account
+// becomes irrecoverable, so this pass is what makes the post-purge retention
+// real. A trashed-but-restorable account is not stamped.
 func (m *Module) GCFeedback(ctx context.Context, now time.Time, windowDays int) (FeedbackGCStats, error) {
 	var st FeedbackGCStats
 	now = now.UTC()
