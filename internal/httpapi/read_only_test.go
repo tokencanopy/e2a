@@ -143,6 +143,9 @@ func readOnlyTestServer(t *testing.T, state func(userID string) (bool, error), c
 			switch r.Header.Get("Authorization") {
 			case "Bearer account":
 				return &identity.Principal{User: &identity.User{ID: "u_ro", Email: "owner@example.test"}, Scope: identity.ScopeAccount}, nil
+			case "Bearer nouser":
+				// A resolver contract violation: no error, no account.
+				return &identity.Principal{Scope: identity.ScopeAccount}, nil
 			case "Bearer agent":
 				// An agent access token / agent-scoped key / delegated token
 				// all resolve to a principal owned by the same account.
@@ -305,6 +308,21 @@ func TestReadOnlyGuardFailsClosed(t *testing.T) {
 	status, code = doReadOnlyRequest(t, srv, roSpecOp{ID: "getAccount", Method: http.MethodGet, Path: "/v1/account"}, "account")
 	if status == http.StatusServiceUnavailable && code == "auth_unavailable" {
 		t.Fatalf("a read failed on the read-only lookup (%d %q); reads must not consult it", status, code)
+	}
+}
+
+// TestReadOnlyGuardRefusesAPrincipalWithoutAnAccount: a principal that
+// resolved without error but carries no account is refused (503), never
+// dereferenced or let through.
+func TestReadOnlyGuardRefusesAPrincipalWithoutAnAccount(t *testing.T) {
+	var calls atomic.Int64
+	srv := readOnlyTestServer(t, func(string) (bool, error) { return false, nil }, &calls)
+	status, code := doReadOnlyRequest(t, srv, roSpecOp{ID: "createContact", Method: http.MethodPost, Path: "/v1/contacts"}, "nouser")
+	if status != http.StatusServiceUnavailable || code != "auth_unavailable" {
+		t.Fatalf("write by a principal without an account = %d %q, want 503 auth_unavailable", status, code)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("the read-only state was consulted without an account id")
 	}
 }
 

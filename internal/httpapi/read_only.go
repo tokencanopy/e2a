@@ -215,6 +215,14 @@ func (s *Server) readOnlyGuard(ctx huma.Context, next func(huma.Context)) {
 		p = resolved
 		ctx = huma.WithContext(ctx, withPrincipal(ctx.Context(), p))
 	}
+	if p == nil || p.User == nil {
+		// A resolver that returns neither an error nor an account is a
+		// contract violation; refuse rather than guess who is writing.
+		log.Printf("[httpapi] read-only check for %s: principal without an account", op.OperationID)
+		writeEnvelope(ctx, NewError(http.StatusServiceUnavailable, "auth_unavailable",
+			"account state is temporarily unavailable; retry"))
+		return
+	}
 	readOnly, err := s.deps.AccountReadOnly(ctx.Context(), p.User.ID)
 	if err != nil {
 		log.Printf("[httpapi] read-only check for %s failed: %v", op.OperationID, err)
