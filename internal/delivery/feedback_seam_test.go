@@ -5,12 +5,15 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type fakeProcessor struct {
-	calls  []ProviderFeedback
-	result FeedbackResult
-	err    error
+	calls   []ProviderFeedback
+	repairs [][]FeedbackRepair
+	result  FeedbackResult
+	err     error
 	// order records "processor" / "correlate" so the test can pin that
 	// accounting runs before any live-message lookup.
 	order *[]string
@@ -24,14 +27,47 @@ func (p *fakeProcessor) ProcessProviderFeedback(_ context.Context, fb ProviderFe
 	return p.result, p.err
 }
 
+func (p *fakeProcessor) RepairSuppressions(_ context.Context, _ string, repairs []FeedbackRepair) error {
+	p.repairs = append(p.repairs, repairs)
+	return nil
+}
+
 type orderingStore struct {
 	*fakeConsumerStore
 	order *[]string
+	// failTxOnce makes the first live transaction fail, the two-phase
+	// window an SNS retry has to recover from.
+	failTxOnce bool
+	txCalls    int
+	// rollback discards whatever the failed transaction's firer recorded.
+	rollback func()
 }
 
 func (s *orderingStore) CorrelateBySESMessageID(ctx context.Context, id string) (*CorrelatedMessage, bool, error) {
-	*s.order = append(*s.order, "correlate")
+	if s.order != nil {
+		*s.order = append(*s.order, "correlate")
+	}
 	return s.fakeConsumerStore.CorrelateBySESMessageID(ctx, id)
+}
+
+func (s *orderingStore) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	s.txCalls++
+	// Mirror a real rollback: the body runs, then every write it made —
+	// suppression rows AND the outbox events it fired — is discarded. That
+	// fidelity is the whole point: the retry must be able to redo them.
+	before := make(map[string]bool, len(s.suppressed))
+	for k, v := range s.suppressed {
+		before[k] = v
+	}
+	err := fn(nil)
+	if s.failTxOnce && s.txCalls == 1 {
+		s.fakeConsumerStore.suppressed = before
+		if s.rollback != nil {
+			s.rollback()
+		}
+		return errors.New("live transaction failed")
+	}
+	return err
 }
 
 func bounceEvent(id, ses string) *Event {
@@ -84,44 +120,92 @@ func TestConsumerProcessorErrorMakesProviderRetry(t *testing.T) {
 	}
 }
 
-// TestConsumerUsesProcessorSuppressionVerdict: when the seam already
-// upserted the suppression, its Inserted verdict decides the event, so a
-// second upsert cannot hide a genuine insert; without a verdict the store
-// path decides as before.
-func TestConsumerUsesProcessorSuppressionVerdict(t *testing.T) {
-	for name, tc := range map[string]struct {
-		result     FeedbackResult
-		wantEvents int
-		wantStore  bool
-	}{
-		"processor inserted":    {result: FeedbackResult{Correlated: true, Suppressions: []FeedbackSuppression{{Address: "bob@example.test", ID: "supp_p", Inserted: true}}}, wantEvents: 1},
-		"processor refreshed":   {result: FeedbackResult{Correlated: true, Suppressions: []FeedbackSuppression{{Address: "bob@example.test", ID: "supp_p", Inserted: false}}}, wantEvents: 0},
-		"no verdict falls back": {result: FeedbackResult{Correlated: true}, wantEvents: 1, wantStore: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			st := newFakeConsumerStore()
-			st.corr["ses-1"] = &CorrelatedMessage{MessageID: "msg_1", UserID: "usr_1", AgentID: "agt_1"}
-			fire, events := recordingFirer()
-			c := NewConsumer(st, fire).WithFeedbackProcessor(&fakeProcessor{result: tc.result})
-			if err := c.Process(context.Background(), bounceEvent("evt-3", "ses-1")); err != nil {
-				t.Fatalf("Process: %v", err)
-			}
-			got := 0
-			for _, e := range *events {
-				if e.eventType == EventSuppressionAdded {
-					got++
-					if !tc.wantStore && e.dedupKey == "" {
-						t.Fatal("suppression event without dedup key")
-					}
-				}
-			}
-			if got != tc.wantEvents {
-				t.Fatalf("suppression events = %d, want %d", got, tc.wantEvents)
-			}
-			if stored := st.suppressed["usr_1|bob@example.test"]; stored != tc.wantStore {
-				t.Fatalf("store upsert = %v, want %v", stored, tc.wantStore)
-			}
-		})
+// TestLiveMessageOwnsTheSuppression: when a message survives, the store
+// writes the suppression inside the live transaction with the source
+// message id and the provider diagnostic, and the seam's reported repair is
+// NOT applied separately — one writer, one announcement.
+func TestLiveMessageOwnsTheSuppression(t *testing.T) {
+	st := newFakeConsumerStore()
+	st.corr["ses-1"] = &CorrelatedMessage{MessageID: "msg_1", UserID: "usr_1", AgentID: "agt_1"}
+	fire, events := recordingFirer()
+	p := &fakeProcessor{result: FeedbackResult{Correlated: true, AccountRef: "usr_1",
+		RepairNeeded: []FeedbackRepair{{Address: "bob@example.test", Source: "bounce", Reason: "bounce:General"}}}}
+	c := NewConsumer(st, fire).WithFeedbackProcessor(p)
+	if err := c.Process(context.Background(), bounceEvent("evt-3", "ses-1")); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !st.suppressed["usr_1|bob@example.test"] {
+		t.Fatal("the live path must write the suppression")
+	}
+	if len(p.repairs) != 0 {
+		t.Fatalf("the seam must not repair while a message owns the row: %v", p.repairs)
+	}
+	got := 0
+	for _, e := range *events {
+		if e.eventType == EventSuppressionAdded {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Fatalf("suppression events = %d, want 1", got)
+	}
+}
+
+// TestSuppressionSurvivesLiveTransactionFailureAndRetry is the regression
+// this design exists for: the accounting seam commits on its own, the live
+// transaction then fails, and the SNS retry must still end with exactly one
+// suppression and exactly one suppression_added event. An earlier shape,
+// where the seam wrote the row and the consumer trusted its insert verdict,
+// lost the event forever on that retry.
+func TestSuppressionSurvivesLiveTransactionFailureAndRetry(t *testing.T) {
+	base := newFakeConsumerStore()
+	base.corr["ses-1"] = &CorrelatedMessage{MessageID: "msg_1", UserID: "usr_1", AgentID: "agt_1"}
+	st := &orderingStore{fakeConsumerStore: base, failTxOnce: true}
+	fire, events := recordingFirer()
+	st.rollback = func() { *events = (*events)[:0] }
+	// The seam is a duplicate on the retry, exactly as the real one is.
+	p := &fakeProcessor{result: FeedbackResult{Correlated: true, AccountRef: "usr_1",
+		RepairNeeded: []FeedbackRepair{{Address: "bob@example.test", Source: "bounce", Reason: "bounce:General"}}}}
+	c := NewConsumer(st, fire).WithFeedbackProcessor(p)
+
+	if err := c.Process(context.Background(), bounceEvent("evt-4", "ses-1")); err == nil {
+		t.Fatal("a failing live transaction must fail Process so SNS retries")
+	}
+	p.result.Duplicate = true
+	if err := c.Process(context.Background(), bounceEvent("evt-4", "ses-1")); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	got := 0
+	for _, e := range *events {
+		if e.eventType == EventSuppressionAdded {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Fatalf("suppression events across the retry = %d, want exactly 1", got)
+	}
+	if !st.suppressed["usr_1|bob@example.test"] {
+		t.Fatal("the retry must leave the suppression in place")
+	}
+}
+
+// TestPurgedMessageRepairsThroughTheSeam: with no live message to own the
+// row, the account-wide repair is applied through the seam instead, and
+// announces nothing (there is no message for an event to reference).
+func TestPurgedMessageRepairsThroughTheSeam(t *testing.T) {
+	st := newFakeConsumerStore() // no correlation → message is gone
+	fire, events := recordingFirer()
+	p := &fakeProcessor{result: FeedbackResult{Correlated: true, AccountRef: "usr_1",
+		RepairNeeded: []FeedbackRepair{{Address: "bob@example.test", Source: "bounce", Reason: "bounce:General"}}}}
+	c := NewConsumer(st, fire).WithFeedbackProcessor(p)
+	if err := c.Process(context.Background(), bounceEvent("evt-5", "ses-gone")); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if len(p.repairs) != 1 || len(p.repairs[0]) != 1 || p.repairs[0][0].Address != "bob@example.test" {
+		t.Fatalf("repairs = %v, want the one address", p.repairs)
+	}
+	if len(*events) != 0 {
+		t.Fatalf("a repair with no message must announce nothing, got %v", *events)
 	}
 }
 

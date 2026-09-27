@@ -3,6 +3,8 @@ package delivery
 import (
 	"encoding/json"
 	"fmt"
+	"net/mail"
+	"sort"
 	"strings"
 	"time"
 )
@@ -232,6 +234,17 @@ func ParseSESNotification(messageBody []byte) (*Event, error) {
 
 func norm(addr string) string { return strings.ToLower(strings.TrimSpace(addr)) }
 
+// normMailbox extracts the addr-spec before normalizing, so "Bob
+// <b@x.test>" and "<b@x.test>" both reduce to the bare address the
+// authorization signed. Falls back to plain normalization when the value
+// does not parse.
+func normMailbox(addr string) string {
+	if parsed, err := mail.ParseAddress(strings.TrimSpace(addr)); err == nil {
+		return norm(parsed.Address)
+	}
+	return norm(strings.Trim(strings.TrimSpace(addr), "<>"))
+}
+
 // maxE2AMessageIDLen bounds a plausible e2a message id ("msg_" + 32 hex chars
 // today; headroom for future id shapes without accepting arbitrary strings).
 const maxE2AMessageIDLen = 64
@@ -282,13 +295,23 @@ func (ev *Event) FeedbackFor() ProviderFeedback {
 	seen := map[string]bool{}
 	var recipients []string
 	for _, r := range ev.Recipients {
-		a := norm(r.Address)
+		// Addr-spec extraction, not just lower+trim: SES reports a bounced
+		// recipient from the DSN's Final-Recipient, which can arrive with
+		// angle brackets or a display name. The authorized envelope was
+		// signed as a bare address, so a decorated value would silently
+		// fail the HMAC match and lose both the accounting and the
+		// suppression repair.
+		a := normMailbox(r.Address)
 		if a == "" || seen[a] {
 			continue
 		}
 		seen[a] = true
 		recipients = append(recipients, a)
 	}
+	// Deterministic order: the processor upserts per recipient, and two
+	// concurrent notifications touching the same rows in provider order
+	// could otherwise deadlock.
+	sort.Strings(recipients)
 	return ProviderFeedback{
 		ProviderEventID:      ev.ProviderEventID,
 		OccurredAt:           ev.OccurredAt,

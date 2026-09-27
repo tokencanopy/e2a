@@ -86,6 +86,33 @@ func (f *fixture) recipientRow(correlationID string) (bucket string, rank int, e
 	return
 }
 
+// provenance returns the event id and provider time the recipient row
+// remembers — what the equal-rank tie-break decides.
+func (f *fixture) provenance(correlationID string) (eventID string, at time.Time) {
+	f.t.Helper()
+	var id *string
+	var ts *time.Time
+	if err := f.pool.QueryRow(f.ctx, `SELECT evidence_event_id, provider_occurred_at FROM sending_feedback_recipients WHERE correlation_id = $1`, correlationID).Scan(&id, &ts); err != nil {
+		f.t.Fatal(err)
+	}
+	if id != nil {
+		eventID = *id
+	}
+	if ts != nil {
+		at = ts.UTC()
+	}
+	return
+}
+
+// repair applies what the seam reported, the way the consumer does when no
+// live message owns the row.
+func (f *fixture) repair(m *sendingpolicy.Module, res delivery.FeedbackResult) {
+	f.t.Helper()
+	if err := m.RepairSuppressions(f.ctx, res.AccountRef, res.RepairNeeded); err != nil {
+		f.t.Fatalf("repair: %v", err)
+	}
+}
+
 func (f *fixture) suppressed(userID, address string) bool {
 	f.t.Helper()
 	var n int
@@ -138,9 +165,14 @@ func TestFeedbackSurvivesMessageAndAgentPurge(t *testing.T) {
 	if !res.Correlated || res.Duplicate || res.AccountRef != user {
 		t.Fatalf("result = %+v", res)
 	}
-	if s, ok := res.SuppressionFor("alice@example.test"); !ok || !s.Inserted || s.Source != "bounce" {
-		t.Fatalf("suppression verdict = %+v ok=%v", s, ok)
+	if len(res.RepairNeeded) != 1 || res.RepairNeeded[0].Address != "alice@example.test" || res.RepairNeeded[0].Source != "bounce" {
+		t.Fatalf("repairs = %+v", res.RepairNeeded)
 	}
+	// The seam reports; it never writes while a message could own the row.
+	if f.suppressed(user, "alice@example.test") {
+		t.Fatal("the seam must not write the suppression itself")
+	}
+	f.repair(module, res)
 	if !f.suppressed(user, "alice@example.test") {
 		t.Fatal("hard bounce must recreate the account suppression while the account exists")
 	}
@@ -156,8 +188,12 @@ func TestFeedbackSurvivesMessageAndAgentPurge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Correlated || len(res.Suppressions) != 0 || f.suppressed(user, "mallory@example.test") {
+	if !res.Correlated || len(res.RepairNeeded) != 0 {
 		t.Fatalf("forged recipient must be rejected: %+v", res)
+	}
+	f.repair(module, res)
+	if f.suppressed(user, "mallory@example.test") {
+		t.Fatal("a recipient outside the authorized envelope must never be suppressed")
 	}
 
 	got := f.outcomes(user)
@@ -198,12 +234,14 @@ func TestFeedbackEvidenceIsMonotonic(t *testing.T) {
 
 	step := func(id string, at time.Time, kind delivery.EventKind, btype, bsub, csub string) {
 		t.Helper()
-		if _, err := module.ProcessProviderFeedback(f.ctx, delivery.ProviderFeedback{
+		res, err := module.ProcessProviderFeedback(f.ctx, delivery.ProviderFeedback{
 			ProviderEventID: id, OccurredAt: at, Kind: kind, BounceType: btype, BounceSubType: bsub, ComplaintSubType: csub,
 			ProviderMessageID: sesID, AttemptCorrelationID: corrID, Recipients: rcpt,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
+		f.repair(module, res)
 	}
 	key := todayKey(1, false)
 
@@ -241,9 +279,11 @@ func TestFeedbackEvidenceIsMonotonic(t *testing.T) {
 		return delivery.ProviderFeedback{ProviderEventID: id, OccurredAt: t0, Kind: kind, BounceType: btype, BounceSubType: bsub, ProviderMessageID: ses2, AttemptCorrelationID: corr2, Recipients: []string{"dave@example.test"}}
 	}
 	for _, x := range []delivery.ProviderFeedback{fb("d1", delivery.KindBounce, "permanent", "General"), fb("d2", delivery.KindBounce, "permanent", "OnTenantSuppressionList"), fb("d3", delivery.KindBounce, "transient", "MailboxFull")} {
-		if _, err := module.ProcessProviderFeedback(f.ctx, x); err != nil {
+		res, err := module.ProcessProviderFeedback(f.ctx, x)
+		if err != nil {
 			t.Fatal(err)
 		}
+		f.repair(module, res)
 	}
 	if c := f.outcomes(user)[key]; c != [4]int{0, 0, 1, 1} {
 		t.Fatalf("second message: %v", c)
@@ -344,7 +384,7 @@ func TestFeedbackAfterAccountDeletionUpdatesProvenanceOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Correlated || res.AccountRef != "" || len(res.Suppressions) != 0 {
+	if !res.Correlated || res.AccountRef != "" || len(res.RepairNeeded) != 0 {
 		t.Fatalf("result after deletion = %+v", res)
 	}
 	b, r, epoch := f.recipientRow(corrID)
@@ -460,5 +500,63 @@ func TestFeedbackGC(t *testing.T) {
 	}
 	if got := f.outcomes(user); len(got) != 1 || got[todayKey(1, true)] != [4]int{2, 0, 0, 0} {
 		t.Fatalf("aggregates after gc = %v", got)
+	}
+}
+
+// TestEqualRankProvenanceTieBreak: an equal-rank duplicate never changes
+// counts, and the row remembers the LATER provider event — an earlier
+// straggler must not overwrite the provenance of the evidence already
+// recorded.
+func TestEqualRankProvenanceTieBreak(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(sendingpolicy.DisabledPolicy())
+	module := sendingpolicy.NewModule(f.pool, f.secrets())
+	user := f.user("standard")
+	agent := f.agent(user)
+	rcpt := []string{"tie@example.test"}
+	msg := f.messageTo(agent, "relay", rcpt)
+	_, corrID, sesID := f.authorizedSend(g, msg, rcpt)
+	base := time.Now().UTC().Add(-time.Hour)
+
+	send := func(id string, at time.Time) {
+		t.Helper()
+		if _, err := module.ProcessProviderFeedback(f.ctx, feedback(id, at, delivery.KindDelivery, sesID, corrID, rcpt[0])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send("mid", base)
+	if id, at := f.provenance(corrID); id != "mid" || !at.Equal(base) {
+		t.Fatalf("provenance = %s/%v", id, at)
+	}
+	// A later equal-rank event advances provenance, counts unchanged.
+	send("late", base.Add(time.Minute))
+	if id, at := f.provenance(corrID); id != "late" || !at.Equal(base.Add(time.Minute)) {
+		t.Fatalf("later equal-rank event must own provenance, got %s/%v", id, at)
+	}
+	// An earlier straggler does not.
+	send("early", base.Add(-time.Minute))
+	if id, _ := f.provenance(corrID); id != "late" {
+		t.Fatalf("an earlier equal-rank event overwrote provenance: %s", id)
+	}
+	if c := f.outcomes(user)[todayKey(1, true)]; c != [4]int{1, 0, 0, 0} {
+		t.Fatalf("equal-rank events changed counts: %v", c)
+	}
+}
+
+// TestSuppressionRepairRequiresALiveAccount: the fallback writer refuses to
+// recreate customer state for an account that no longer exists.
+func TestSuppressionRepairRequiresALiveAccount(t *testing.T) {
+	f := newFixture(t)
+	module := sendingpolicy.NewModule(f.pool, f.secrets())
+	if err := module.RepairSuppressions(f.ctx, "usr_does_not_exist",
+		[]delivery.FeedbackRepair{{Address: "x@example.test", Source: "bounce", Reason: "bounce:General"}}); err != nil {
+		t.Fatalf("a deleted account must be a no-op, not an error: %v", err)
+	}
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM suppressions WHERE address = 'x@example.test'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("repair wrote a suppression for a nonexistent account")
 	}
 }
