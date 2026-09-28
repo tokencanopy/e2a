@@ -839,6 +839,102 @@ func TestSummaryCountsSurviveMessageErasureThroughUsageEvents(t *testing.T) {
 	}
 }
 
+// TestEraseAccountStampsFeedbackRetention: the real account-deletion path
+// (identity.EraseAccount, DELETE /v1/account?permanent=true) trashes then
+// immediately purges the account in one call — the purge's seal transaction
+// is where a retained correlation and its events pick up the post-deletion
+// horizon instead of being removed, since they carry no FK and no plaintext
+// recipient (B8). TrashAccount alone (no purge) must NOT stamp it: a restore
+// must not resurrect rows whose retention countdown already started.
+func TestEraseAccountStampsFeedbackRetention(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	store.SetFeedbackRetention(10 * 24 * time.Hour)
+
+	user, err := store.CreateOrGetUser(ctx, "feedbackerase@example.test", "F", "sub-feedbackerase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.CreateOrGetUser(ctx, "feedbackerase-other@example.test", "O", "sub-feedbackerase-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sending_feedback_correlations (correlation_id, operation_id, submission_attempt, source_account_ref, policy_subject_ref, purpose, shared_reputation, tenant_mode)
+		VALUES ('cor_erase_1', 'msg_erase_1', 1, $1, $1, 'customer_message', true, 'none'),
+		       ('cor_erase_other', 'msg_erase_2', 1, $2, $2, 'customer_message', true, 'none')`,
+		user.ID, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sending_feedback_events (provider_event_id, correlation_id, provider_occurred_at)
+		VALUES ('evt_erase_1', 'cor_erase_1', now()), ('evt_erase_other', 'cor_erase_other', now())`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.EraseAccount(ctx, user.ID, nil); err != nil {
+		t.Fatalf("EraseAccount: %v", err)
+	}
+
+	var corrExpiry, evtExpiry *time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM sending_feedback_correlations WHERE correlation_id = 'cor_erase_1'`).Scan(&corrExpiry); err != nil {
+		t.Fatalf("correlation must survive account erasure: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM sending_feedback_events WHERE provider_event_id = 'evt_erase_1'`).Scan(&evtExpiry); err != nil {
+		t.Fatalf("event must survive account erasure: %v", err)
+	}
+	lo, hi := time.Now().Add(9*24*time.Hour), time.Now().Add(11*24*time.Hour)
+	if corrExpiry == nil || corrExpiry.Before(lo) || corrExpiry.After(hi) {
+		t.Fatalf("correlation expiry = %v, want ~10 days out", corrExpiry)
+	}
+	if evtExpiry == nil || !evtExpiry.Equal(*corrExpiry) {
+		t.Fatalf("event expiry = %v, want the correlation's %v", evtExpiry, corrExpiry)
+	}
+
+	var otherExpiry *time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM sending_feedback_correlations WHERE correlation_id = 'cor_erase_other'`).Scan(&otherExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if otherExpiry != nil {
+		t.Fatalf("another account's provenance was stamped: %v", otherExpiry)
+	}
+}
+
+// TestTrashAccountDoesNotStampFeedbackRetention: trashing alone (no purge)
+// must leave retained provenance's expires_at NULL — the account is still
+// restorable, so starting the deletion clock here would let a restore bring
+// back an account whose feedback evidence is already counting down to purge.
+func TestTrashAccountDoesNotStampFeedbackRetention(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	store.SetFeedbackRetention(10 * 24 * time.Hour)
+
+	user, err := store.CreateOrGetUser(ctx, "feedbacktrash@example.test", "T", "sub-feedbacktrash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sending_feedback_correlations (correlation_id, operation_id, submission_attempt, source_account_ref, policy_subject_ref, purpose, shared_reputation, tenant_mode)
+		VALUES ('cor_trash_1', 'msg_trash_1', 1, $1, $1, 'customer_message', true, 'none')`,
+		user.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.TrashAccount(ctx, user.ID, nil); err != nil {
+		t.Fatalf("TrashAccount: %v", err)
+	}
+
+	var expiry *time.Time
+	if err := pool.QueryRow(ctx, `SELECT expires_at FROM sending_feedback_correlations WHERE correlation_id = 'cor_trash_1'`).Scan(&expiry); err != nil {
+		t.Fatal(err)
+	}
+	if expiry != nil {
+		t.Fatalf("trashing alone must not start the feedback retention clock, got expires_at = %v", expiry)
+	}
+}
+
 func TestRecentDeletionTombstoneForAPlainErase(t *testing.T) {
 	store, pool, _ := tombstoneStore(t)
 	ctx := context.Background()

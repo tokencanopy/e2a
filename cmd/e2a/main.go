@@ -355,6 +355,9 @@ func main() {
 	// External-sending-access decisions (shadow impact / enforce refusals)
 	// as bounded counters; a no-op while the control is disabled.
 	sendingpolicy.SetExternalAccessObserver(metrics.ExternalAccessDecision)
+	// Deletion-resistant feedback ingestion outcomes (B8): bounded
+	// outcome × bucket counter, no address/account/id labels.
+	sendingpolicy.SetFeedbackObserver(metrics.SendingFeedbackIngested)
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)
 	smtpRelay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
 	sender := outbound.NewSenderWithDKIM(smtpRelay, cfg.OutboundSMTP.FromDomain, store)
@@ -424,7 +427,8 @@ func main() {
 		// window, durable in Postgres): the cross-replica counterpart of the
 		// acceptance-time in-memory limiter, enforced immediately before
 		// provider submission so scheduled-send bursts can't exceed it.
-		rate: sendrate.NewStore(pool, time.Minute, 60),
+		rate:          sendrate.NewStore(pool, time.Minute, 60),
+		sharedDomains: nonEmpty(cfg.SharedDomain),
 	})
 	outboundJobs := outboundSending.jobs
 	registrars = append(registrars, outboundJobs)
@@ -432,6 +436,22 @@ func main() {
 	// seam with tokens from the same gate.
 	sendingGate, providerSubmitter := outboundSending.gate, outboundSending.submitter
 	registrars = append(registrars, sendramp.NewMaintenanceJobs(rampStore))
+	// Deletion-resistant feedback provenance (B8): refuse to start if any
+	// retained recipient row was signed under a key version this keyring
+	// does not hold — feedback for it could never be matched and the
+	// detector would be silently blind. The retention janitor and the
+	// consumer's accounting seam hang off the same module.
+	if outboundSending.module == nil {
+		log.Fatalf("sending policy gate is not the concrete module; feedback accounting cannot be wired")
+	}
+	if err := outboundSending.module.VerifyKeyringCoverage(ctx); err != nil {
+		log.Fatalf("Sending feedback keyring coverage: %v", err)
+	}
+	// The purge seal resolves the post-deletion horizon at purge time from
+	// the EFFECTIVE policy — the same accessor the retention janitor reads —
+	// not from the config-file policy captured here at boot.
+	store.SetFeedbackRetentionResolver(outboundSending.module.EffectiveFeedbackRetention)
+	registrars = append(registrars, outboundSending.feedbackMaintenance())
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job
 	// per queue+state (docs/observability.md).
 	registrars = append(registrars, jobs.NewQueueStatsJobs(pool, metrics))
@@ -990,7 +1010,8 @@ func main() {
 	// 4b). Fail-closed: the SNS signature is verified and the TopicArn must be
 	// in the configured allow-list (empty allow-list → every message is
 	// rejected, so this is inert until ops wires the topic).
-	deliveryConsumer := delivery.NewConsumer(store, deliveryEventFirer(webhookOutbox), outboundSendStore.FinalizeProviderAcceptedTx)
+	deliveryConsumer := outboundSending.armDeliveryConsumer(
+		delivery.NewConsumer(store, deliveryEventFirer(webhookOutbox), outboundSendStore.FinalizeProviderAcceptedTx))
 	deliveryVerifier := delivery.NewVerifier(cfg.DeliveryFeedback.SNSTopicARNs, delivery.HTTPCertFetcher)
 	// Public webhook receiver for AWS SNS (SES delivery/bounce/complaint). Named
 	// /webhooks/<provider> — it's an inbound third-party callback, not an internal

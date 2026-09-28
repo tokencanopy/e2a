@@ -3,6 +3,8 @@ package identity
 import (
 	"net/mail"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 // NormalizeEmail returns the canonical lookup form of an email address:
@@ -56,4 +58,45 @@ func NormalizeMailboxAddress(value string) string {
 		return NormalizeEmail(parsed.Address)
 	}
 	return NormalizeEmail(value)
+}
+
+// SuppressionLookupForms returns every spelling under which a suppression of
+// the normalized address may be stored: the address itself plus, for an
+// internationalized domain, its A-label (punycode) and Unicode spellings.
+// Provider feedback reports an IDN recipient in A-label form while a
+// customer may type it in Unicode (or the reverse), and both kinds of row
+// land in the same table — so a send-time lookup that compared only the
+// typed spelling would let a bounced or complained Unicode address through.
+// A domain the IDNA lookup profile refuses contributes only its raw form.
+func SuppressionLookupForms(normalized string) []string {
+	forms := []string{normalized}
+	at := strings.LastIndexByte(normalized, '@')
+	if at <= 0 || at == len(normalized)-1 {
+		return forms
+	}
+	local, domain := normalized[:at+1], normalized[at+1:]
+	for _, conv := range []func(string) (string, error){idna.Lookup.ToASCII, idna.Lookup.ToUnicode} {
+		if d, err := conv(domain); err == nil && d != "" {
+			if f := local + strings.ToLower(d); f != forms[0] && (len(forms) < 2 || f != forms[1]) {
+				forms = append(forms, f)
+			}
+		}
+	}
+	return forms
+}
+
+// suppressionLookupSet expands normalized addresses into every stored
+// spelling SuppressionLookupForms names, deduplicated.
+func suppressionLookupSet(normalized []string) []string {
+	seen := make(map[string]struct{}, len(normalized))
+	out := make([]string, 0, len(normalized))
+	for _, n := range normalized {
+		for _, f := range SuppressionLookupForms(n) {
+			if _, ok := seen[f]; !ok {
+				seen[f] = struct{}{}
+				out = append(out, f)
+			}
+		}
+	}
+	return out
 }

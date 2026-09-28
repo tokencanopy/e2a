@@ -363,7 +363,10 @@ func (s *Server) markSuppressedImportRows(ctx context.Context, userID, agentID s
 	}
 	blockedSet := make(map[string]struct{}, len(blocked))
 	for _, a := range blocked {
-		blockedSet[identity.NormalizeMailboxAddress(a)] = struct{}{}
+		// The stored spelling may be the other IDNA form of the imported one.
+		for _, f := range identity.SuppressionLookupForms(identity.NormalizeMailboxAddress(a)) {
+			blockedSet[f] = struct{}{}
+		}
 	}
 	for i := range items {
 		if _, ok := blockedSet[items[i].Address]; ok {
