@@ -3583,6 +3583,70 @@ scenarios:
           body_match:
             "error.code": unauthorized
 
+  # Runs as {deferred_purge_api_key}: an account whose one agent has a
+  # provider-accepted send to an external recipient an hour ago. The
+  # scenario restores what it trashes, so it is re-runnable.
+  - name: permanent_agent_and_message_delete_deferred_for_recent_sender
+    description: >
+      Permanent deletion of a message sent to an external recipient recently,
+      and of the agent that sent it, is deferred to the trash
+      (docs/design/account-soft-deletion.md, "Deferred erase for recent
+      senders"): each answers 200 with erase_deferred=true, a purge_after and
+      a message, nothing is deleted, and both can be restored.
+    auth_override: "Bearer {deferred_purge_api_key}"
+    steps:
+      - id: trash_message
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: msg_contract_deferred_purge
+
+      - id: message_purge_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge?permanent=true&confirm=DELETE
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            erase_deferred: true
+
+      - id: restore_message
+        action: request
+        method: POST
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge/restore
+        expect:
+          status: 200
+          body_match:
+            id: msg_contract_deferred_purge
+
+      - id: agent_purge_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            email: deferred-purge-bot@agents.localhost
+            erase_deferred: true
+            messages_deleted: 0
+
+      - id: restore_agent
+        action: request
+        method: POST
+        path: /v1/agents/deferred-purge-bot@agents.localhost/restore
+        expect:
+          status: 200
+          body_match:
+            email: deferred-purge-bot@agents.localhost
+
   # ── Read-only accounts (docs/design/account-read-only.md) ──
   # Runs as the contract server's abuse-paused account ({readonly_api_key}),
   # which it seeds read-only. The scenario ends by moving that account to the

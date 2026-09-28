@@ -1310,10 +1310,20 @@ components:
         email:
           description: Email address of the deleted agent.
           type: string
+        erase_deferred:
+          description: "True when permanent=true was requested but the agent emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being deleted now: messages_deleted is 0, and the agent is purged at purge_after unless restored before then. Absent otherwise."
+          type: boolean
+        message:
+          description: Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+          type: string
         messages_deleted:
           description: Number of messages permanently removed by the cascade; zero when the agent is moved to trash.
           format: int64
           type: integer
+        purge_after:
+          description: When a deferred agent becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.
+          format: date-time
+          type: string
       required:
         - deleted
         - email
@@ -1407,8 +1417,18 @@ components:
         deleted:
           description: Always true — the message is deleted (moved to trash or purged). A failed delete is an error envelope, never deleted:false.
           type: boolean
+        erase_deferred:
+          description: True when permanent=true was requested but the message was sent to external recipients recently (within a deployment-configured window, 14 days by default), so it stays in the trash instead of being deleted now; it is purged at purge_after unless restored before then. Absent otherwise.
+          type: boolean
         id:
           description: ID of the deleted message.
+          type: string
+        message:
+          description: Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+          type: string
+        purge_after:
+          description: When a deferred message becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.
+          format: date-time
           type: string
       required:
         - deleted
@@ -5936,7 +5956,7 @@ paths:
         - agents
   /v1/agents/{email}:
     delete:
-      description: Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account's sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+      description: "Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account's sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash."
       operationId: deleteAgent
       parameters:
         - in: path
@@ -5954,12 +5974,12 @@ paths:
             enum:
               - DELETE
             type: string
-        - description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents.
+        - description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
           explode: false
           in: query
           name: permanent
           schema:
-            description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents.
+            description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
             type: boolean
       responses:
         "200":
@@ -6717,7 +6737,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}:
     delete:
-      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
+      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"); a message sent to external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once — it stays in the trash and is purged at purge_after, and the receipt has erase_deferred:true, purge_after and a message. A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
       operationId: deleteMessage
       parameters:
         - description: The agent's full email address.

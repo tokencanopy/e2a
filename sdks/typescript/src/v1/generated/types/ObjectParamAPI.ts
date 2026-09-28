@@ -578,7 +578,7 @@ export interface AgentsApiDeleteAgentRequest {
      */
     confirm: 'DELETE'
     /**
-     * Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents.
+     * Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
      * Defaults to: undefined
      * @type boolean
      * @memberof AgentsApideleteAgent
@@ -778,7 +778,7 @@ export class ObjectAgentsApi {
     }
 
     /**
-     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
      * Delete an agent
      * @param param the request object
      */
@@ -787,7 +787,7 @@ export class ObjectAgentsApi {
     }
 
     /**
-     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
      * Delete an agent
      * @param param the request object
      */
@@ -2270,7 +2270,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
+     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"); a message sent to external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once — it stays in the trash and is purged at purge_after, and the receipt has erase_deferred:true, purge_after and a message. A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
      * Delete a message (move to trash)
      * @param param the request object
      */
@@ -2279,7 +2279,7 @@ export class ObjectMessagesApi {
     }
 
     /**
-     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
+     * Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"); a message sent to external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once — it stays in the trash and is purged at purge_after, and the receipt has erase_deferred:true, purge_after and a message. A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
      * Delete a message (move to trash)
      * @param param the request object
      */

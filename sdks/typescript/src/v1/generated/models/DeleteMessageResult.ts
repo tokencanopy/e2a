@@ -18,9 +18,21 @@ export class DeleteMessageResult {
     */
     'deleted': boolean;
     /**
+    * True when permanent=true was requested but the message was sent to external recipients recently (within a deployment-configured window, 14 days by default), so it stays in the trash instead of being deleted now; it is purged at purge_after unless restored before then. Absent otherwise.
+    */
+    'eraseDeferred'?: boolean;
+    /**
     * ID of the deleted message.
     */
     'id': string;
+    /**
+    * Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+    */
+    'message'?: string;
+    /**
+    * When a deferred message becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.
+    */
+    'purgeAfter'?: Date;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -34,10 +46,28 @@ export class DeleteMessageResult {
             "format": ""
         },
         {
+            "name": "eraseDeferred",
+            "baseName": "erase_deferred",
+            "type": "boolean",
+            "format": ""
+        },
+        {
             "name": "id",
             "baseName": "id",
             "type": "string",
             "format": ""
+        },
+        {
+            "name": "message",
+            "baseName": "message",
+            "type": "string",
+            "format": ""
+        },
+        {
+            "name": "purgeAfter",
+            "baseName": "purge_after",
+            "type": "Date",
+            "format": "date-time"
         }    ];
 
     static getAttributeTypeMap() {

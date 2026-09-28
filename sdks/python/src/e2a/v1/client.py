@@ -487,11 +487,27 @@ class AgentsResource:
             lambda h: self._api.put_agent_protection(email, req, _headers=h)
         )
 
-    async def delete(self, email: str) -> DeleteAgentResult:
-        # The typed .delete() call is the confirmation; the SDK supplies the
-        # ?confirm=DELETE guard the raw API requires (AG-6). Returns the deletion
-        # receipt ({deleted, email, messages_deleted}).
-        return await self._c._write_idempotent(lambda h: self._api.delete_agent(email, confirm="DELETE", _headers=h))
+    async def delete(self, email: str, *, permanent: bool = False) -> DeleteAgentResult:
+        """Move an agent to the trash (restorable via ``restore()`` within the
+        30-day window by default).
+
+        Pass ``permanent=True`` to delete irreversibly right away instead —
+        accepts live and trashed agents. An agent that emailed external
+        recipients recently (within a deployment-configured window, 14 days
+        by default) is not deleted at once: it is moved to the trash (or
+        stays there) so late delivery feedback still reaches it, and the
+        receipt has ``erase_deferred=True``, ``purge_after`` and a
+        human-readable ``message``; it can be restored until ``purge_after``.
+
+        The typed .delete() call is the confirmation; the SDK supplies the
+        ?confirm=DELETE guard the raw API requires (AG-6). Returns the
+        deletion receipt ({deleted, email, messages_deleted}).
+        """
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_agent(
+                email, confirm="DELETE", permanent=permanent or None, _headers=h
+            )
+        )
 
     async def restore(self, email: str) -> AgentView:
         """Restore an agent from the 30-day trash. Scheduled messages restored
@@ -661,7 +677,11 @@ class MessagesResource:
         in the trash ("delete forever") — irreversible, account scope only. The
         typed .delete() call is the confirmation; the SDK supplies the
         ?confirm=DELETE guard the raw API requires on that path (it is ignored
-        when permanent is unset).
+        when permanent is unset). A message sent to external recipients
+        recently (within a deployment-configured window, 14 days by default)
+        is not deleted at once: it stays in the trash, and the receipt has
+        ``erase_deferred=True``, ``purge_after`` and a human-readable
+        ``message``.
 
         A message held for review cannot be deleted (409 message_held) — resolve
         it on the review queue first. Returns the deletion receipt

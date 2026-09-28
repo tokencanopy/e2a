@@ -17,8 +17,9 @@ import pprint
 import re  # noqa: F401
 import json
 
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -28,9 +29,12 @@ class DeleteAgentResult(BaseModel):
     """ # noqa: E501
     deleted: StrictBool = Field(description="Always true — the agent is no longer active. A failed delete is an error envelope, never deleted:false.")
     email: StrictStr = Field(description="Email address of the deleted agent.")
+    erase_deferred: Optional[StrictBool] = Field(default=None, description="True when permanent=true was requested but the agent emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being deleted now: messages_deleted is 0, and the agent is purged at purge_after unless restored before then. Absent otherwise.")
+    message: Optional[StrictStr] = Field(default=None, description="Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.")
     messages_deleted: StrictInt = Field(description="Number of messages permanently removed by the cascade; zero when the agent is moved to trash.")
+    purge_after: Optional[datetime] = Field(default=None, description="When a deferred agent becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["deleted", "email", "messages_deleted"]
+    __properties: ClassVar[List[str]] = ["deleted", "email", "erase_deferred", "message", "messages_deleted", "purge_after"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -92,7 +96,10 @@ class DeleteAgentResult(BaseModel):
         _obj = cls.model_validate({
             "deleted": obj.get("deleted"),
             "email": obj.get("email"),
-            "messages_deleted": obj.get("messages_deleted")
+            "erase_deferred": obj.get("erase_deferred"),
+            "message": obj.get("message"),
+            "messages_deleted": obj.get("messages_deleted"),
+            "purge_after": obj.get("purge_after")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

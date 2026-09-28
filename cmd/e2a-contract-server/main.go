@@ -43,13 +43,15 @@ func main() {
 	// E2A_TEST_DISPOSABLE_DEFERRED_ERASE_API_KEY authenticates the throwaway
 	// account seeded with a recent external send, whose permanent erase is
 	// deferred to the trash (once per server).
+	// E2A_TEST_DEFERRED_PURGE_API_KEY authenticates the account whose agent
+	// and message permanent deletes are deferred (re-runnable scenario).
 	// E2A_TEST_READONLY_API_KEY authenticates the abuse-paused (read-only)
 	// account; its scenario trashes it at the end (once per server).
 	envContent := fmt.Sprintf(
-		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\nE2A_TEST_RESTRICTED_API_KEY=%s\nE2A_TEST_DISPOSABLE_TRASH_API_KEY=%s\nE2A_TEST_DISPOSABLE_ERASE_API_KEY=%s\nE2A_TEST_READONLY_API_KEY=%s\nE2A_TEST_RESTRICTED_SDK_API_KEY=%s\nE2A_TEST_DISPOSABLE_DEFERRED_ERASE_API_KEY=%s\n",
+		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\nE2A_TEST_RESTRICTED_API_KEY=%s\nE2A_TEST_DISPOSABLE_TRASH_API_KEY=%s\nE2A_TEST_DISPOSABLE_ERASE_API_KEY=%s\nE2A_TEST_READONLY_API_KEY=%s\nE2A_TEST_RESTRICTED_SDK_API_KEY=%s\nE2A_TEST_DISPOSABLE_DEFERRED_ERASE_API_KEY=%s\nE2A_TEST_DEFERRED_PURGE_API_KEY=%s\n",
 		srv.BaseURL, srv.APIKey, srv.CappedAPIKey, srv.OverCapAPIKey, srv.RestrictedAPIKey,
 		srv.DisposableTrashAPIKey, srv.DisposableEraseAPIKey, srv.ReadOnlyAPIKey, srv.RestrictedSDKAPIKey,
-		srv.DisposableDeferredEraseAPIKey,
+		srv.DisposableDeferredEraseAPIKey, srv.DeferredPurgeAPIKey,
 	)
 	if envFile != "" {
 		if err := os.WriteFile(envFile, []byte(envContent), 0o600); err != nil {

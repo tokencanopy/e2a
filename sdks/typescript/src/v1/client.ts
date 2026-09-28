@@ -317,6 +317,13 @@ class AgentsResource {
    * call is itself the confirmation; the ?confirm=DELETE guard exists to
    * protect raw/curl callers (AG-6). Returns the deletion receipt
    * ({deleted:true, email, messages_deleted}).
+   *
+   * `{ permanent: true }` on an agent that emailed external recipients
+   * recently (within a deployment-configured window, 14 days by default) is
+   * not deleted at once: it is moved to the trash (or stays there) so late
+   * delivery feedback still reaches it. The call still succeeds — the receipt
+   * has `eraseDeferred: true`, `purgeAfter` and a human-readable `message`,
+   * and the agent can be restored until `purgeAfter`.
    */
   delete(email: string, opts: { permanent?: boolean } = {}): Promise<DeleteAgentResult> {
     return call(() => this.api.deleteAgent(email, "DELETE", opts.permanent));
@@ -438,7 +445,10 @@ class MessagesResource {
    * only. The typed .delete() call is itself the confirmation; the SDK supplies
    * the ?confirm=DELETE guard the raw API requires on that path (the query
    * guard exists to protect raw/curl callers). It is ignored when permanent is
-   * unset.
+   * unset. A message sent to external recipients recently (within a
+   * deployment-configured window, 14 days by default) is not deleted at once:
+   * it stays in the trash, and the receipt has `eraseDeferred: true`,
+   * `purgeAfter` and a human-readable `message`.
    *
    * A message held for review cannot be deleted (409 message_held) — resolve it
    * on the review queue first. Returns the deletion receipt ({deleted:true, id}).

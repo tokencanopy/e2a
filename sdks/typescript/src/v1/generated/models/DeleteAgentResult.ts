@@ -22,9 +22,21 @@ export class DeleteAgentResult {
     */
     'email': string;
     /**
+    * True when permanent=true was requested but the agent emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being deleted now: messages_deleted is 0, and the agent is purged at purge_after unless restored before then. Absent otherwise.
+    */
+    'eraseDeferred'?: boolean;
+    /**
+    * Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+    */
+    'message'?: string;
+    /**
     * Number of messages permanently removed by the cascade; zero when the agent is moved to trash.
     */
     'messagesDeleted': number;
+    /**
+    * When a deferred agent becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.
+    */
+    'purgeAfter'?: Date;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -44,10 +56,28 @@ export class DeleteAgentResult {
             "format": ""
         },
         {
+            "name": "eraseDeferred",
+            "baseName": "erase_deferred",
+            "type": "boolean",
+            "format": ""
+        },
+        {
+            "name": "message",
+            "baseName": "message",
+            "type": "string",
+            "format": ""
+        },
+        {
             "name": "messagesDeleted",
             "baseName": "messages_deleted",
             "type": "number",
             "format": "int64"
+        },
+        {
+            "name": "purgeAfter",
+            "baseName": "purge_after",
+            "type": "Date",
+            "format": "date-time"
         }    ];
 
     static getAttributeTypeMap() {

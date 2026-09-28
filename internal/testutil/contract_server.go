@@ -107,6 +107,11 @@ type ContractServer struct {
 	// (identity.RecentSenderEraseDefer). Deleted exactly once per server;
 	// no other scenario may use it.
 	DisposableDeferredEraseAPIKey string
+	// DeferredPurgeAPIKey authenticates an account whose one agent has a
+	// provider-accepted send to an external recipient an hour ago, so a
+	// permanent delete of that agent or that message is deferred to the
+	// trash. Its scenario restores both, so it is re-runnable.
+	DeferredPurgeAPIKey string
 	// ReadOnlyAPIKey authenticates an account paused for abuse
 	// (pause_class abuse), which makes it read-only: every write is refused
 	// with 403 account_read_only. The read-only scenario ends by moving it to
@@ -449,7 +454,18 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		return nil, err
 	}
 
+	deferredPurgeKey, err := seedDeferredPurgeAccount(ctx, pool, store)
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+
 	return &ContractServer{
+		DeferredPurgeAPIKey:           deferredPurgeKey,
 		DisposableDeferredEraseAPIKey: deferredEraseKey,
 		DisposableTrashAPIKey:         disposable[0],
 		DisposableEraseAPIKey:         disposable[1],
@@ -592,6 +608,40 @@ func seedRecentExternalSenderAccount(ctx context.Context, pool *pgxpool.Pool, st
 		return "", err
 	}
 	key, err := store.CreateAPIKey(ctx, user.ID, "contract-disposable-deferred-erase-key", nil)
+	if err != nil {
+		return "", err
+	}
+	return key.PlaintextKey, nil
+}
+
+// Deferred-purge fixture: the agent and its externally sent message.
+const (
+	ContractDeferredPurgeAgent   = "deferred-purge-bot@agents.localhost"
+	ContractDeferredPurgeMessage = "msg_contract_deferred_purge"
+)
+
+// seedDeferredPurgeAccount seeds the account whose agent and message
+// permanent deletes are deferred (see ContractServer.DeferredPurgeAPIKey).
+func seedDeferredPurgeAccount(ctx context.Context, pool *pgxpool.Pool, store *identity.Store) (string, error) {
+	user, err := store.CreateOrGetUser(ctx, "deferred-purge@example.test", "Contract Deferred Purge", "google-contract-deferred-purge")
+	if err != nil {
+		return "", err
+	}
+	if _, err := store.CreateAgentWithLimit(ctx, ContractDeferredPurgeAgent, "agents.localhost", "Deferred Purge Bot", user.ID, 0); err != nil {
+		return "", err
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO messages (id, agent_id, direction, sender, recipient, subject, delivery_status, created_at, provider_accepted_at)
+		VALUES ($1, $2, 'outbound', $2, 'someone@example.com', 'contract fixture', 'sent',
+		        now() - interval '1 hour', now() - interval '1 hour')`, ContractDeferredPurgeMessage, ContractDeferredPurgeAgent); err != nil {
+		return "", err
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO message_recipients (id, message_id, address, kind, status)
+		VALUES ('rcpt_contract_deferred_purge', $1, 'someone@example.com', 'to', 'sent')`, ContractDeferredPurgeMessage); err != nil {
+		return "", err
+	}
+	key, err := store.CreateAPIKey(ctx, user.ID, "contract-deferred-purge-key", nil)
 	if err != nil {
 		return "", err
 	}

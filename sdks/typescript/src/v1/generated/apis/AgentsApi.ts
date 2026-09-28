@@ -134,11 +134,11 @@ export class AgentsApiRequestFactory extends BaseAPIRequestFactory {
     }
 
     /**
-     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+     * Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account\'s sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
      * Delete an agent
      * @param email
      * @param confirm Must be the literal DELETE. The default action moves the agent to trash; permanent&#x3D;true is irreversible.
-     * @param permanent Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents.
+     * @param permanent Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
      */
     public async deleteAgent(email: string, confirm: 'DELETE', permanent?: boolean, _options?: Configuration): Promise<RequestContext> {
         let _config = _options || this.configuration;
