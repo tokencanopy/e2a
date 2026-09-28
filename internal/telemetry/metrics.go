@@ -148,6 +148,17 @@ type Metrics interface {
 	// Bounded labels only: never an account id, address or domain.
 	ExternalAccessDecision(stage, route, mode string)
 
+	// SendingFeedbackIngested records one deletion-resistant SES feedback
+	// ingestion result (internal/sendingpolicy). outcome ∈ {correlated,
+	// dead_account, unmatched_recipient, uncorrelated_with_marker,
+	// uncorrelated, duplicate}; bucket ∈ {delivered, hard_bounce, complaint,
+	// terminal_other, none}. One sample per recipient of a first-seen
+	// correlated event, one per uncorrelated or duplicate event.
+	// uncorrelated_with_marker is e2a-stamped mail whose retained
+	// correlation is missing — the spec's alerting signal. Bounded labels
+	// only: never an address, account, correlation or provider id.
+	SendingFeedbackIngested(outcome, bucket string)
+
 	// WebhookAttempt records one webhook delivery attempt. outcome ∈
 	// {delivered, retryable_failure, exhausted, webhook_deleted,
 	// skipped_disabled}. statusClass is the HTTP status class of the
@@ -318,6 +329,7 @@ func (NoOp) OutboundTerminalLatency(float64)               {}
 func (NoOp) OutboundAttempt(string, float64)               {}
 func (NoOp) OutboundRateDeferred()                         {}
 func (NoOp) ExternalAccessDecision(string, string, string) {}
+func (NoOp) SendingFeedbackIngested(string, string)        {}
 func (NoOp) WebhookAttempt(string, string, float64)        {}
 func (NoOp) WebhookTerminal(string, string, int)           {}
 func (NoOp) WebhookNotify(string, string)                  {}
@@ -450,6 +462,10 @@ func (l *Log) OutboundRateDeferred() {
 
 func (l *Log) ExternalAccessDecision(stage, route, mode string) {
 	log.Printf("[metrics] event=external_access.decision stage=%s route=%s mode=%s", stage, route, mode)
+}
+
+func (l *Log) SendingFeedbackIngested(outcome, bucket string) {
+	log.Printf("[metrics] event=sending_feedback.ingested outcome=%s bucket=%s", outcome, bucket)
 }
 
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {

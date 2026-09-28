@@ -206,6 +206,9 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.SetQueueOldestAge("outbound", 45.5)
 	p.ExternalAccessDecision("authorization", "denied", "shadow")
 	p.ExternalAccessDecision("preflight", "attacker-controlled", "enforce")
+	p.SendingFeedbackIngested("uncorrelated_with_marker", "complaint")
+	p.SendingFeedbackIngested("correlated", "delivered")
+	p.SendingFeedbackIngested("bob@example.test", "cor_0123")
 
 	out := scrape(t, p)
 	for _, want := range []string{
@@ -223,6 +226,9 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_outbound_rate_deferred_total 1`,
 		`e2a_external_access_decisions_total{mode="shadow",route="denied",stage="authorization"} 1`,
 		`e2a_external_access_decisions_total{mode="enforce",route="other",stage="preflight"} 1`,
+		`e2a_sending_feedback_ingested_total{bucket="complaint",build="unknown",outcome="uncorrelated_with_marker"} 1`,
+		`e2a_sending_feedback_ingested_total{bucket="delivered",build="unknown",outcome="correlated"} 1`,
+		`e2a_sending_feedback_ingested_total{bucket="other",build="unknown",outcome="other"} 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
 		`e2a_webhook_delivery_terminal_total{outcome="delivered",scope="initial"} 1`,
