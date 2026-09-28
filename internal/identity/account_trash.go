@@ -682,9 +682,14 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 				return ErrEraseHeld
 			}
 			// Deferred erase for recent external senders, under the same
-			// lock. A failed check fails toward keeping the evidence: the
-			// account is already trashed and the janitor purges it at the
-			// end of the window.
+			// lock. A failed check (a transient database error, a statement
+			// timeout) defers rather than erases: erasure is irreversible
+			// while a deferral is not — the account is already trashed, the
+			// owner sees a successful delete either way, and the janitor
+			// purges it at the end of the window. Failing open would let an
+			// induced error destroy exactly the evidence this check protects;
+			// failing with an error would leave the caller retrying against
+			// the same fault.
 			deferred, err := accountEraseDeferredTx(ctx, tx, userID)
 			if err != nil {
 				log.Printf("[identity] erase deferral check failed; keeping the account in the trash: user=%s err=%v", userID, err)

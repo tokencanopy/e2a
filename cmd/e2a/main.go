@@ -190,7 +190,7 @@ func main() {
 	// Recipient domains that never count as external: the configured test
 	// domains plus the shared agent domain by name (its domains row may be
 	// owned by the probe account, so the unowned-row rule alone misses it).
-	identity.EraseDeferExemptDomains = append(append([]string(nil), cfg.Trash.EraseDeferExemptDomains...), cfg.SharedDomain)
+	identity.EraseDeferExemptDomains = cfg.EraseDeferExemptDomainList()
 	// Identity tombstones (hosted policy). The key is env-only; a malformed
 	// value is fatal, an absent one leaves tombstone operations failing
 	// closed (signup 503, purge skipped) while the flag is on.

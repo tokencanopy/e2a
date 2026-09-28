@@ -730,6 +730,21 @@ func (t TrashConfig) RecentSenderEraseDefer() int {
 	return d
 }
 
+// EraseDeferExemptDomainList is the full exempt-domain list the server uses
+// for the recent-sender purge deferral: the configured test domains plus the
+// deployment's shared agent domain by name (its domains row may be owned by
+// the probe account, so the unowned-row rule alone would miss it). Entries are
+// trimmed and lower-cased; empty ones are dropped.
+func (c *Config) EraseDeferExemptDomainList() []string {
+	out := make([]string, 0, len(c.Trash.EraseDeferExemptDomains)+1)
+	for _, d := range append(append([]string(nil), c.Trash.EraseDeferExemptDomains...), c.SharedDomain) {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // AccountRetention returns the effective account trash window in days
 // (0 = account trash disabled).
 func (t TrashConfig) AccountRetention() int {

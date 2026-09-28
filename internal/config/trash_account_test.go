@@ -147,3 +147,58 @@ func TestEraseDeferExemptDomains(t *testing.T) {
 		t.Fatalf("env exempt domains = %v", cfg.Trash.EraseDeferExemptDomains)
 	}
 }
+
+// C1/C1b/C2: the two trash windows are validated and lowered independently,
+// and each error names its exact field.
+func TestRecentSenderEraseDeferAgainstEachTrashWindow(t *testing.T) {
+	// account_retention_days larger than retention_days: retention_days binds.
+	_, err := Load(writeTrashConfig(t, "trash:\n  retention_days: 10\n  account_retention_days: 60\n  recent_sender_erase_defer_days: 12\n"))
+	if err == nil || !strings.Contains(err.Error(), "must not exceed trash.retention_days (10)") ||
+		strings.Contains(err.Error(), "account_retention_days") {
+		t.Fatalf("err = %v, want one naming trash.retention_days only", err)
+	}
+	// account_retention_days shorter than retention_days: it binds.
+	_, err = Load(writeTrashConfig(t, "trash:\n  retention_days: 30\n  account_retention_days: 9\n  recent_sender_erase_defer_days: 10\n"))
+	if err == nil || !strings.Contains(err.Error(), "must not exceed trash.account_retention_days (9)") {
+		t.Fatalf("err = %v, want one naming trash.account_retention_days", err)
+	}
+	// Unset window, account trash shorter: lowered to account_retention_days.
+	cfg, err := Load(writeTrashConfig(t, "trash:\n  retention_days: 30\n  account_retention_days: 5\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Trash.RecentSenderEraseDefer(); got != 5 {
+		t.Fatalf("effective window = %d, want 5 (account_retention_days)", got)
+	}
+	// Unset window, account trash disabled (0): only retention_days lowers it.
+	cfg, err = Load(writeTrashConfig(t, "trash:\n  retention_days: 8\n  account_retention_days: 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Trash.RecentSenderEraseDefer(); got != 8 {
+		t.Fatalf("effective window = %d, want 8 (retention_days; account trash disabled)", got)
+	}
+	// Unset window, account_retention_days unset: it reuses retention_days.
+	cfg, err = Load(writeTrashConfig(t, "trash:\n  retention_days: 40\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Trash.RecentSenderEraseDefer(); got != DefaultRecentSenderEraseDeferDays {
+		t.Fatalf("effective window = %d, want the default %d", got, DefaultRecentSenderEraseDeferDays)
+	}
+}
+
+func TestEraseDeferExemptDomainListAddsTheSharedDomain(t *testing.T) {
+	cfg, err := Load(writeTrashConfig(t, "shared_domain: Agents.Example.Test\ntrash:\n  retention_days: 30\n  erase_defer_exempt_domains: [\" Sim.Example.Test \"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.EraseDeferExemptDomainList()
+	if len(got) != 2 || got[0] != "sim.example.test" || got[1] != "agents.example.test" {
+		t.Fatalf("exempt list = %v, want [sim.example.test agents.example.test]", got)
+	}
+	cfg.SharedDomain = ""
+	if got := cfg.EraseDeferExemptDomainList(); len(got) != 1 {
+		t.Fatalf("exempt list without a shared domain = %v, want only the configured entry", got)
+	}
+}

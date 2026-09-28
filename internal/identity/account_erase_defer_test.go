@@ -661,3 +661,67 @@ func TestClaimedUnacceptedSendCounts(t *testing.T) {
 		t.Fatalf("claimed external send: sent=%v err=%v, want true", sent, err)
 	}
 }
+
+// M4c: provider evidence alone defers, whatever the row's status and claim —
+// e.g. a row locally inferred failed that the provider did accept.
+func TestProviderAcceptedUnsettledSendCountsWithoutARecentClaim(t *testing.T) {
+	for name, claim := range map[string]string{"null claim": "NULL", "old claim": "now() - interval '40 days'"} {
+		t.Run(name, func(t *testing.T) {
+			f := newDeferFixture(t, "evidence")
+			ctx := context.Background()
+			if _, err := f.pool.Exec(ctx, `
+				INSERT INTO messages (id, agent_id, direction, sender, recipient, subject, delivery_status,
+				                      provider_message_id, send_claimed_at, to_recipients)
+				VALUES ('msg_evidence', $1, 'outbound', $1, 'x@example.com', 's', 'failed', 'ses-evidence-1', `+claim+`,
+				        ARRAY['x@example.com'])`, f.agent); err != nil {
+				t.Fatal(err)
+			}
+			res, err := f.store.PermanentDeleteAgentIncarnation(ctx, f.agent, f.userID, f.agentCreatedAt(t, f.agent))
+			if err != nil || !res.EraseDeferred {
+				t.Fatalf("result = %+v err=%v, want deferred on provider evidence alone", res, err)
+			}
+		})
+	}
+}
+
+// M6b: owner-mailbox proof is for the CURRENT email only; after an email
+// change the old verified mailbox is an external recipient.
+func TestStaleOwnerMailboxProofCountsAsExternal(t *testing.T) {
+	f := newDeferFixture(t, "stalemailbox")
+	ctx := context.Background()
+	if _, err := f.pool.Exec(ctx, `
+		UPDATE users SET owner_email_verified_address = 'old-owner@example.test', owner_email_verified_at = now(),
+		                 owner_email_verified_source = 'google_oauth', email = 'new-owner@example.test'
+		 WHERE id = $1`, f.userID); err != nil {
+		t.Fatal(err)
+	}
+	f.sent(t, "msg_stale_owner", time.Hour, "old-owner@example.test")
+	if sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-24*time.Hour)); err != nil || !sent {
+		t.Fatalf("send to the previously verified mailbox: sent=%v err=%v, want external", sent, err)
+	}
+	// Control: proof for the current email makes the same mailbox internal.
+	if _, err := f.pool.Exec(ctx, `UPDATE users SET email = 'old-owner@example.test' WHERE id = $1`, f.userID); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-24*time.Hour)); err != nil || sent {
+		t.Fatalf("send to the current verified mailbox: sent=%v err=%v, want internal", sent, err)
+	}
+}
+
+// S8: with account trash disabled there is no window to hold the account in,
+// so a recent external sender's erase is immediate.
+func TestAccountTrashDisabledErasesARecentSenderImmediately(t *testing.T) {
+	prev := identity.AccountTrashRetention
+	identity.AccountTrashRetention = 0
+	t.Cleanup(func() { identity.AccountTrashRetention = prev })
+
+	f := newDeferFixture(t, "notrash")
+	f.sent(t, "msg_notrash", time.Hour, "someone@example.com")
+	res, err := f.store.EraseAccount(context.Background(), f.userID, nil)
+	if err != nil {
+		t.Fatalf("EraseAccount: %v", err)
+	}
+	if res.EraseDeferred || !res.UserDeleted {
+		t.Fatalf("receipt = %+v, want an immediate erase with account trash disabled", res)
+	}
+}

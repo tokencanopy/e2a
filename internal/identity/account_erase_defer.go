@@ -55,17 +55,24 @@ var EraseDeferExemptDomains = []string{"simulator.amazonses.com"}
 // exempts from sending budgets).
 const eraseDeferExemptClassesSQL = `('system', 'internal')`
 
-// eraseDeferRetryLag bounds how long after created_at an ordinary
-// (unscheduled, never-held) message can still be submitted to the provider:
-// the budget hold (budget_hold_max_days, 7 by default) plus retries, with
-// margin. It is the lower bound that lets the recent-send lookup range-scan
-// idx_messages_agent_created instead of every outbound message of the agent.
-const eraseDeferRetryLag = 14 * 24 * time.Hour
+// EraseDeferRetryLag bounds how long after its anchor (created_at, or the
+// scheduled/approval instant for a scheduled or review-held message) a
+// message can still be submitted to the provider. The send worker's longest
+// finite hold is outboundsend.PolicyBudgetHoldHorizon (7 days, measured from
+// that anchor; every hold class promotes to it and nothing moves it later),
+// after which the message fails terminally. The worker derives that deadline
+// from the constant, never from the runtime policy's budget_hold_max_days, so
+// the constant is the true bound. This lag is that bound plus a week of
+// margin for in-flight retries; TestEraseDeferRetryLagCoversTheLongestHold
+// (internal/outboundsend) fails if the hold horizon ever outgrows it. It is
+// the lower bound that lets the recent-send lookup range-scan its indexes
+// instead of every outbound message of the agent.
+const EraseDeferRetryLag = 14 * 24 * time.Hour
 
 // sentExternallySinceSQL reports whether the account ($1) sent to an external
 // recipient at or after $2 within the given scope (the whole account, one
 // agent: agentScope, or one message: messageScope). $3 is the exempt domain
-// list, $4 is $2 minus eraseDeferRetryLag, and $5 the scope id.
+// list, $4 is $2 minus EraseDeferRetryLag, and $5 the scope id.
 //
 // Sends considered (per agent of the account, outbound only):
 //   - arm A: created at or after $4 (a bounded range on
@@ -155,7 +162,7 @@ var (
 )
 
 func sentExternallySince(ctx context.Context, q rowQuerier, query, userID string, since time.Time, scope ...any) (bool, error) {
-	args := append([]any{userID, since, exemptDomains(), since.Add(-eraseDeferRetryLag)}, scope...)
+	args := append([]any{userID, since, exemptDomains(), since.Add(-EraseDeferRetryLag)}, scope...)
 	var sent bool
 	if err := q.QueryRow(ctx, query, args...).Scan(&sent); err != nil {
 		return false, fmt.Errorf("erase: recent external send: %w", err)
