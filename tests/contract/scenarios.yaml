@@ -3548,6 +3548,41 @@ scenarios:
           body_match:
             "error.code": unauthorized
 
+  # Runs as {disposable_deferred_erase_api_key}: a throwaway account the
+  # contract server seeds with a provider-accepted send to an external
+  # recipient an hour ago. Deleted exactly once per run.
+  - name: account_delete_permanent_deferred_for_recent_sender
+    description: >
+      DELETE /v1/account?permanent=true on an account that emailed an external
+      recipient recently is deferred (docs/design/account-soft-deletion.md,
+      "Deferred erase for recent senders"): a 200 trash receipt with
+      erase_deferred=true, a purge_after and a message, user_deleted=false —
+      and the key stops authenticating at once, as for any trash.
+    auth_override: "Bearer {disposable_deferred_erase_api_key}"
+    steps:
+      - id: erase_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            mode: trash
+            erase_deferred: true
+            user_deleted: false
+            messages_deleted: 0
+
+      - id: deferred_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
+
   # ── Read-only accounts (docs/design/account-read-only.md) ──
   # Runs as the contract server's abuse-paused account ({readonly_api_key}),
   # which it seeds read-only. The scenario ends by moving that account to the

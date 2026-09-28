@@ -69,6 +69,9 @@ RESTRICTED_SDK_API_KEY = os.environ.get("E2A_TEST_RESTRICTED_SDK_API_KEY", "")
 # deployed server — those scenarios then skip.
 DISPOSABLE_TRASH_API_KEY = os.environ.get("E2A_TEST_DISPOSABLE_TRASH_API_KEY", "")
 DISPOSABLE_ERASE_API_KEY = os.environ.get("E2A_TEST_DISPOSABLE_ERASE_API_KEY", "")
+# The contract server's throwaway account seeded with a recent external send,
+# whose permanent erase is deferred to the trash (once per server).
+DISPOSABLE_DEFERRED_ERASE_API_KEY = os.environ.get("E2A_TEST_DISPOSABLE_DEFERRED_ERASE_API_KEY", "")
 # The contract server's abuse-paused (read-only) account; its scenario trashes
 # it at the end (once per server). Absent against a deployed server — the
 # scenario then skips.
@@ -166,6 +169,7 @@ OVERCAP_KEY_PLACEHOLDER = "{overcap_api_key}"
 RESTRICTED_KEY_PLACEHOLDER = "{restricted_api_key}"
 DISPOSABLE_TRASH_KEY_PLACEHOLDER = "{disposable_trash_api_key}"
 DISPOSABLE_ERASE_KEY_PLACEHOLDER = "{disposable_erase_api_key}"
+DISPOSABLE_DEFERRED_ERASE_KEY_PLACEHOLDER = "{disposable_deferred_erase_api_key}"
 READONLY_KEY_PLACEHOLDER = "{readonly_api_key}"
 
 
@@ -255,6 +259,8 @@ class Runner:
             self.vars["disposable_trash_api_key"] = DISPOSABLE_TRASH_API_KEY
         if DISPOSABLE_ERASE_API_KEY:
             self.vars["disposable_erase_api_key"] = DISPOSABLE_ERASE_API_KEY
+        if DISPOSABLE_DEFERRED_ERASE_API_KEY:
+            self.vars["disposable_deferred_erase_api_key"] = DISPOSABLE_DEFERRED_ERASE_API_KEY
         if READONLY_API_KEY:
             self.vars["readonly_api_key"] = READONLY_API_KEY
         self._http = httpx.Client(base_url=base_url, timeout=30)
@@ -1306,6 +1312,11 @@ def test_contract_scenario(scenario):
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_DISPOSABLE_TRASH_API_KEY")
     if _scenario_uses_placeholder(scenario, DISPOSABLE_ERASE_KEY_PLACEHOLDER) and not DISPOSABLE_ERASE_API_KEY:
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_DISPOSABLE_ERASE_API_KEY")
+    if (
+        _scenario_uses_placeholder(scenario, DISPOSABLE_DEFERRED_ERASE_KEY_PLACEHOLDER)
+        and not DISPOSABLE_DEFERRED_ERASE_API_KEY
+    ):
+        pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_DISPOSABLE_DEFERRED_ERASE_API_KEY")
     # The read-only scenario runs only against the contract server's seeded
     # abuse-paused account (and trashes it).
     if _scenario_uses_placeholder(scenario, READONLY_KEY_PLACEHOLDER) and not READONLY_API_KEY:

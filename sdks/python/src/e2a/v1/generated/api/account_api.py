@@ -627,7 +627,7 @@ class AccountApi:
     async def delete_account(
         self,
         confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.")],
-        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible.")] = None,
+        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -643,11 +643,11 @@ class AccountApi:
     ) -> DeleteUserDataResult:
         """Delete your account (trash by default; permanent=true erases now)
 
-        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
 
         :param confirm: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible. (required)
         :type confirm: str
-        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
         :type permanent: bool
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -699,7 +699,7 @@ class AccountApi:
     async def delete_account_with_http_info(
         self,
         confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.")],
-        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible.")] = None,
+        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -715,11 +715,11 @@ class AccountApi:
     ) -> ApiResponse[DeleteUserDataResult]:
         """Delete your account (trash by default; permanent=true erases now)
 
-        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
 
         :param confirm: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible. (required)
         :type confirm: str
-        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
         :type permanent: bool
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request
@@ -771,7 +771,7 @@ class AccountApi:
     async def delete_account_without_preload_content(
         self,
         confirm: Annotated[StrictStr, Field(description="Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.")],
-        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible.")] = None,
+        permanent: Annotated[Optional[StrictBool], Field(description="Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.")] = None,
         _request_timeout: Union[
             None,
             Annotated[StrictFloat, Field(gt=0)],
@@ -787,11 +787,11 @@ class AccountApi:
     ) -> RESTResponseType:
         """Delete your account (trash by default; permanent=true erases now)
 
-        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
+        Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object.
 
         :param confirm: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible. (required)
         :type confirm: str
-        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        :param permanent: Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
         :type permanent: bool
         :param _request_timeout: timeout setting for this request. If one
                                  number provided, it will be total request

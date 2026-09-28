@@ -1456,6 +1456,15 @@ class AccountResource:
         other counts describe rows trashed/revoked/unverified, not deleted);
         ``user_deleted`` is true only for ``mode="permanent"``.
 
+        ``permanent=True`` on an account that emailed external recipients
+        recently (within a deployment-configured window, 14 days by default)
+        is not erased at once: it is moved to the trash like a default
+        delete so late delivery feedback (spam complaints, bounces) still
+        reaches it. The call still succeeds — the receipt has
+        ``mode="trash"``, ``erase_deferred=True``, ``purge_after`` (when it
+        will be erased) and a human-readable ``message``; the owner can
+        restore it before ``purge_after``.
+
         Deliberately NOT retried (unlike the other DELETEs): even the
         default trash mode revokes every key/grant/session at once, and a
         transient failure should surface loudly to the caller rather than

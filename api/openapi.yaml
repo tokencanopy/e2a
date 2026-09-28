@@ -1462,6 +1462,12 @@ components:
         domains_deleted:
           format: int64
           type: integer
+        erase_deferred:
+          description: "True when permanent=true was requested but the account emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being erased now: mode is trash and the account is purged at purge_after. The account is already unusable; the owner can restore it by signing in before purge_after. Absent otherwise."
+          type: boolean
+        message:
+          description: Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+          type: string
         messages_deleted:
           format: int64
           type: integer
@@ -5363,7 +5369,7 @@ openapi: 3.1.0
 paths:
   /v1/account:
     delete:
-      description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object."
+      description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object."
       operationId: deleteAccount
       parameters:
         - description: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.
@@ -5376,12 +5382,12 @@ paths:
             enum:
               - DELETE
             type: string
-        - description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        - description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
           explode: false
           in: query
           name: permanent
           schema:
-            description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+            description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
             type: boolean
       responses:
         "200":

@@ -63,6 +63,9 @@ const RESTRICTED_API_KEY = process.env.E2A_TEST_RESTRICTED_API_KEY;
 // deployed server — those scenarios then skip.
 const DISPOSABLE_TRASH_API_KEY = process.env.E2A_TEST_DISPOSABLE_TRASH_API_KEY;
 const DISPOSABLE_ERASE_API_KEY = process.env.E2A_TEST_DISPOSABLE_ERASE_API_KEY;
+// The contract server's throwaway account seeded with a recent external send,
+// whose permanent erase is deferred to the trash (once per server).
+const DISPOSABLE_DEFERRED_ERASE_API_KEY = process.env.E2A_TEST_DISPOSABLE_DEFERRED_ERASE_API_KEY;
 // The contract server's abuse-paused (read-only) account; its scenario trashes
 // it at the end (once per server). Absent against a deployed server — the
 // scenario then skips.
@@ -104,6 +107,10 @@ function scenarioNeedsDisposableTrashAccount(sc: Scenario): boolean {
 
 function scenarioNeedsDisposableEraseAccount(sc: Scenario): boolean {
   return scenarioUsesPlaceholder(sc, "{disposable_erase_api_key}");
+}
+
+function scenarioNeedsDisposableDeferredEraseAccount(sc: Scenario): boolean {
+  return scenarioUsesPlaceholder(sc, "{disposable_deferred_erase_api_key}");
 }
 
 function scenarioNeedsReadOnlyAccount(sc: Scenario): boolean {
@@ -933,6 +940,9 @@ class Runner {
     if (RESTRICTED_API_KEY) this.vars.restricted_api_key = RESTRICTED_API_KEY;
     if (DISPOSABLE_TRASH_API_KEY) this.vars.disposable_trash_api_key = DISPOSABLE_TRASH_API_KEY;
     if (DISPOSABLE_ERASE_API_KEY) this.vars.disposable_erase_api_key = DISPOSABLE_ERASE_API_KEY;
+    if (DISPOSABLE_DEFERRED_ERASE_API_KEY) {
+      this.vars.disposable_deferred_erase_api_key = DISPOSABLE_DEFERRED_ERASE_API_KEY;
+    }
     if (READONLY_API_KEY) this.vars.readonly_api_key = READONLY_API_KEY;
     this.api = new RawApi(apiKey, baseUrl);
     this.seeder = SEED ? new Seeder(baseUrl, apiKey) : null;
@@ -1369,6 +1379,7 @@ describe.skipIf(!baseUrl || !apiKey)("Contract scenarios", () => {
       // against the contract server's seeded disposable accounts.
       (scenarioNeedsDisposableTrashAccount(sc) && !DISPOSABLE_TRASH_API_KEY) ||
       (scenarioNeedsDisposableEraseAccount(sc) && !DISPOSABLE_ERASE_API_KEY) ||
+      (scenarioNeedsDisposableDeferredEraseAccount(sc) && !DISPOSABLE_DEFERRED_ERASE_API_KEY) ||
       // The read-only scenario runs only against the contract server's seeded
       // abuse-paused account (and trashes it).
       (scenarioNeedsReadOnlyAccount(sc) && !READONLY_API_KEY);

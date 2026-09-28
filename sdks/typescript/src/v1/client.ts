@@ -953,6 +953,14 @@ class AccountResource {
    * (`mode` is `"trash"` or `"permanent"`; `messagesDeleted` is 0 on the trash
    * path, with the other counts describing rows trashed/revoked/unverified
    * rather than deleted; `userDeleted` is true only for `mode: "permanent"`).
+   *
+   * `{ permanent: true }` on an account that emailed external recipients
+   * recently (within a deployment-configured window, 14 days by default) is
+   * not erased at once: it is moved to the trash like a default delete so
+   * late delivery feedback (spam complaints, bounces) still reaches it. The
+   * call still succeeds — the receipt has `mode: "trash"`,
+   * `eraseDeferred: true`, `purgeAfter` (when it will be erased) and a
+   * human-readable `message`; the owner can restore it before `purgeAfter`.
    */
   delete(opts: { permanent?: boolean } = {}): Promise<DeleteUserDataResult> {
     return call(() => this.api.deleteAccount("DELETE", opts.permanent || undefined));

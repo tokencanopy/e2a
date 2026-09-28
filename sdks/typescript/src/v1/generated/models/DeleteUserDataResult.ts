@@ -22,6 +22,14 @@ export class DeleteUserDataResult {
     */
     'deleted': boolean;
     'domainsDeleted': number;
+    /**
+    * True when permanent=true was requested but the account emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being erased now: mode is trash and the account is purged at purge_after. The account is already unusable; the owner can restore it by signing in before purge_after. Absent otherwise.
+    */
+    'eraseDeferred'?: boolean;
+    /**
+    * Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+    */
+    'message'?: string;
     'messagesDeleted': number;
     /**
     * How the account was deleted. trash: the account is inert and restorable by signing in to the dashboard until purge_after, after which it is purged; messages_deleted is 0 and the other counts describe rows trashed, revoked or unverified. permanent: the content was erased now (?permanent=true, or a deployment with account trash disabled) and the counts are the rows removed. Open set: tolerate unknown values.
@@ -82,6 +90,18 @@ export class DeleteUserDataResult {
             "baseName": "domains_deleted",
             "type": "number",
             "format": "int64"
+        },
+        {
+            "name": "eraseDeferred",
+            "baseName": "erase_deferred",
+            "type": "boolean",
+            "format": ""
+        },
+        {
+            "name": "message",
+            "baseName": "message",
+            "type": "string",
+            "format": ""
         },
         {
             "name": "messagesDeleted",
