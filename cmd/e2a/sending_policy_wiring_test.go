@@ -146,7 +146,12 @@ func TestFeedbackAccountingWiring(t *testing.T) {
 		secrets: sendingpolicy.Secrets{},
 		source:  sendingpolicy.PolicySourceConfig,
 		policy:  sendingpolicy.DisabledPolicy(),
+		// main passes nonEmpty(cfg.SharedDomain).
+		sharedDomains: nonEmpty("agents.localhost", "  "),
 	})
+	if !composed.module.ExcludesFeedbackDomain("agents.localhost") {
+		t.Fatal("the shared agent domain did not reach the feedback denominator exclusion")
+	}
 
 	bare := delivery.NewConsumer(nil, nil)
 	if bare.FeedbackProcessorWired() {
@@ -161,7 +166,7 @@ func TestFeedbackAccountingWiring(t *testing.T) {
 		t.Fatal("no feedback retention janitor composed")
 	}
 	periodics := janitor.RegisterJobs(river.NewWorkers())
-	if len(periodics) != 1 {
-		t.Fatalf("retention periodics = %d, want 1", len(periodics))
+	if len(periodics) != 2 {
+		t.Fatalf("retention periodics = %d, want 2 (retention pass + reconcile)", len(periodics))
 	}
 }

@@ -707,6 +707,13 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		}
 	}
 
+	// The post-deletion feedback horizon, resolved now from the effective
+	// sending policy (not cached at boot), before the seal takes its locks.
+	feedbackRetention, err := s.resolveFeedbackRetention(ctx)
+	if err != nil {
+		return false, fmt.Errorf("purge: %w", err)
+	}
+
 	// Seal: the remaining account rows and the user itself.
 	err = s.WithTx(ctx, func(tx pgx.Tx) error {
 		var locked string
@@ -746,7 +753,7 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 			UPDATE sending_feedback_correlations
 			   SET expires_at = $2
 			 WHERE source_account_ref = $1 AND expires_at IS NULL`,
-			userID, time.Now().UTC().Add(s.feedbackRetention())); err != nil {
+			userID, time.Now().UTC().Add(feedbackRetention)); err != nil {
 			return fmt.Errorf("purge: stamp feedback retention: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `

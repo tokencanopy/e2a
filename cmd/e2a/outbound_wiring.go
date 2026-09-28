@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/agent"
@@ -26,6 +28,10 @@ type outboundSendingDeps struct {
 	sesConfigSet string
 	metrics      outboundsend.Metrics
 	rate         outboundsend.RateGate
+	// sharedDomains are the deployment's shared agent domains (config
+	// shared_domain). Deliveries to agents hosted on them never count toward
+	// the outcome detector's denominator.
+	sharedDomains []string
 }
 
 // outboundSending is the composed outbound send path.
@@ -47,7 +53,8 @@ type outboundSending struct {
 // enqueue and authorizes every worker execution through the same gate. No
 // raw sender and no direct ramp store reach the worker from here.
 func newOutboundSending(d outboundSendingDeps) outboundSending {
-	module := sendingpolicy.NewPolicyModule(d.pool, d.secrets, d.source, d.policy)
+	module := sendingpolicy.NewPolicyModule(d.pool, d.secrets, d.source, d.policy).
+		WithFeedbackExcludedDomains(d.sharedDomains...)
 	var gate sendingpolicy.Gate = module
 	submitter := outbound.NewProviderSubmitter(d.relay, gate)
 	// Delivery feedback: tag outbound with the SES configuration set so SES
@@ -116,4 +123,16 @@ func (s outboundSending) armDeliveryConsumer(c *delivery.Consumer) *delivery.Con
 // post-deletion horizon.
 func (s outboundSending) feedbackMaintenance() *sendingpolicy.MaintenanceJobs {
 	return sendingpolicy.NewMaintenanceJobs(s.module)
+}
+
+// nonEmpty returns the non-blank values, so an unset config string does not
+// become an empty-domain entry.
+func nonEmpty(values ...string) []string {
+	var out []string
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

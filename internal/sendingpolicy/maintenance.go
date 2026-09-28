@@ -54,7 +54,48 @@ func (w *FeedbackMaintenanceWorker) Work(ctx context.Context, _ *river.Job[Feedb
 	return nil
 }
 
-// MaintenanceJobs registers the feedback retention periodic. Implements
+// feedbackReconcileInterval paces the retention reconciliation: daily is
+// ample for a 30-day horizon. It also runs on start, because an interval
+// periodic's first tick is one interval after process start and a
+// deployment that rolls more often than daily would otherwise never run it.
+const feedbackReconcileInterval = 24 * time.Hour
+
+// FeedbackReconcileArgs is the periodic retention backstop.
+type FeedbackReconcileArgs struct{}
+
+func (FeedbackReconcileArgs) Kind() string { return "sending_feedback_reconcile" }
+
+// FeedbackReconcileWorker stamps the post-deletion horizon on provenance of
+// accounts that are gone but were never stamped, and sweeps orphaned
+// events. See Module.ReconcileFeedbackRetention.
+type FeedbackReconcileWorker struct {
+	river.WorkerDefaults[FeedbackReconcileArgs]
+	module *Module
+}
+
+// NewFeedbackReconcileWorker builds the reconcile worker over a module.
+func NewFeedbackReconcileWorker(module *Module) *FeedbackReconcileWorker {
+	return &FeedbackReconcileWorker{module: module}
+}
+
+func (w *FeedbackReconcileWorker) Work(ctx context.Context, _ *river.Job[FeedbackReconcileArgs]) error {
+	// The same effective-policy horizon the purge seal stamps with.
+	retention, err := w.module.EffectiveFeedbackRetention(ctx)
+	if err != nil {
+		return err
+	}
+	st, err := w.module.ReconcileFeedbackRetention(ctx, w.module.now(), retention)
+	if err != nil {
+		return err
+	}
+	if st.StampedCorrelations+st.StampedEvents+st.OrphanEvents > 0 {
+		log.Printf("[sendingpolicy:feedback-reconcile] stamped correlations=%d events=%d; removed orphan events=%d",
+			st.StampedCorrelations, st.StampedEvents, st.OrphanEvents)
+	}
+	return nil
+}
+
+// MaintenanceJobs registers the feedback retention periodics. Implements
 // jobs.Registrar.
 type MaintenanceJobs struct{ module *Module }
 
@@ -63,11 +104,21 @@ func NewMaintenanceJobs(module *Module) *MaintenanceJobs { return &MaintenanceJo
 
 func (m *MaintenanceJobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 	river.AddWorker(w, &FeedbackMaintenanceWorker{module: m.module})
-	return []*river.PeriodicJob{river.NewPeriodicJob(
-		river.PeriodicInterval(feedbackMaintenanceInterval),
-		func() (river.JobArgs, *river.InsertOpts) {
-			return FeedbackMaintenanceArgs{}, &river.InsertOpts{Queue: jobs.QueueMaintenance}
-		},
-		&river.PeriodicJobOpts{RunOnStart: false},
-	)}
+	river.AddWorker(w, &FeedbackReconcileWorker{module: m.module})
+	return []*river.PeriodicJob{
+		river.NewPeriodicJob(
+			river.PeriodicInterval(feedbackMaintenanceInterval),
+			func() (river.JobArgs, *river.InsertOpts) {
+				return FeedbackMaintenanceArgs{}, &river.InsertOpts{Queue: jobs.QueueMaintenance}
+			},
+			&river.PeriodicJobOpts{RunOnStart: false},
+		),
+		river.NewPeriodicJob(
+			river.PeriodicInterval(feedbackReconcileInterval),
+			func() (river.JobArgs, *river.InsertOpts) {
+				return FeedbackReconcileArgs{}, &river.InsertOpts{Queue: jobs.QueueMaintenance}
+			},
+			&river.PeriodicJobOpts{RunOnStart: true},
+		),
+	}
 }

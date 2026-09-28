@@ -7,13 +7,18 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/tokencanopy/e2a/internal/eventpayload"
 )
 
 type fakeProcessor struct {
 	calls   []ProviderFeedback
 	repairs [][]FeedbackRepair
-	result  FeedbackResult
-	err     error
+	// existing is the set of addresses already suppressed for the account:
+	// a repair for one of them refreshes the row but is not an insert.
+	existing map[string]bool
+	result   FeedbackResult
+	err      error
 	// order records "processor" / "correlate" so the test can pin that
 	// accounting runs before any live-message lookup.
 	order *[]string
@@ -27,9 +32,19 @@ func (p *fakeProcessor) ProcessProviderFeedback(_ context.Context, fb ProviderFe
 	return p.result, p.err
 }
 
-func (p *fakeProcessor) RepairSuppressions(_ context.Context, _ string, repairs []FeedbackRepair) error {
+func (p *fakeProcessor) RepairSuppressionsTx(_ context.Context, _ pgx.Tx, _ string, repairs []FeedbackRepair) ([]FeedbackRepair, error) {
 	p.repairs = append(p.repairs, repairs)
-	return nil
+	if p.existing == nil {
+		p.existing = map[string]bool{}
+	}
+	var inserted []FeedbackRepair
+	for _, r := range repairs {
+		if !p.existing[r.Address] {
+			p.existing[r.Address] = true
+			inserted = append(inserted, r)
+		}
+	}
+	return inserted, nil
 }
 
 type orderingStore struct {
@@ -190,8 +205,8 @@ func TestSuppressionSurvivesLiveTransactionFailureAndRetry(t *testing.T) {
 }
 
 // TestPurgedMessageRepairsThroughTheSeam: with no live message to own the
-// row, the account-wide repair is applied through the seam instead, and
-// announces nothing (there is no message for an event to reference).
+// row, the account-wide repair is applied through the seam instead and
+// announced without a message id.
 func TestPurgedMessageRepairsThroughTheSeam(t *testing.T) {
 	st := newFakeConsumerStore() // no correlation → message is gone
 	fire, events := recordingFirer()
@@ -248,5 +263,84 @@ func TestParseRetainsSubtypesAndAttemptMarker(t *testing.T) {
 	}
 	if fb := ev.FeedbackFor(); len(fb.Recipients) != 1 {
 		t.Fatalf("recipients must be deduplicated after normalization: %v", fb.Recipients)
+	}
+}
+
+func countSuppressionEvents(events []firedEvent) int {
+	n := 0
+	for _, e := range events {
+		if e.eventType == EventSuppressionAdded {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRepairAnnouncesOnlyInsertedRows: a repair whose address is already
+// suppressed (a manual entry, an earlier bounce) refreshes the row but must
+// not fire suppression.added — only a genuinely new row is news.
+func TestRepairAnnouncesOnlyInsertedRows(t *testing.T) {
+	st := newFakeConsumerStore() // message gone
+	fire, events := recordingFirer()
+	p := &fakeProcessor{
+		existing: map[string]bool{"manual@example.test": true},
+		result: FeedbackResult{Correlated: true, AccountRef: "usr_1", RepairNeeded: []FeedbackRepair{
+			{Address: "manual@example.test", Source: "bounce", Reason: "bounce:General"},
+			{Address: "new@example.test", Source: "bounce", Reason: "bounce:General"},
+		}},
+	}
+	c := NewConsumer(st, fire).WithFeedbackProcessor(p)
+	if err := c.Process(context.Background(), bounceEvent("evt-ins", "ses-gone")); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if got := countSuppressionEvents(*events); got != 1 {
+		t.Fatalf("suppression events = %d, want 1 (the inserted row only)", got)
+	}
+	if (*events)[0].data.(eventpayload.DomainSuppressionAddedData).Address != "new@example.test" {
+		t.Fatalf("announced %+v, want the new address", (*events)[0])
+	}
+	// A redelivery repairs nothing new and announces nothing.
+	p.result.Duplicate = true
+	if err := c.Process(context.Background(), bounceEvent("evt-ins", "ses-gone")); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	if got := countSuppressionEvents(*events); got != 1 {
+		t.Fatalf("suppression events after redelivery = %d, want still 1", got)
+	}
+}
+
+// TestFoundMessagePurgedBeforeLockFallsBackToProvenanceRepair: the message
+// correlated before the transaction but its agent was purged before the
+// lock. The live path can no longer own the row, so the provenance repair
+// must write it instead of silently dropping the suppression.
+func TestFoundMessagePurgedBeforeLockFallsBackToProvenanceRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeConsumerStore)
+	}{
+		{"agent purged", func(s *fakeConsumerStore) { s.agentGone = true }},
+		{"recipients purged", func(s *fakeConsumerStore) { s.applicable = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeConsumerStore()
+			st.corr["ses-1"] = &CorrelatedMessage{MessageID: "msg_1", UserID: "usr_1", AgentID: "agt_1"}
+			tc.setup(st)
+			fire, events := recordingFirer()
+			p := &fakeProcessor{result: FeedbackResult{Correlated: true, AccountRef: "usr_1",
+				RepairNeeded: []FeedbackRepair{{Address: "bob@example.test", Source: "bounce", Reason: "bounce:General"}}}}
+			c := NewConsumer(st, fire).WithFeedbackProcessor(p)
+			if err := c.Process(context.Background(), bounceEvent("evt-race", "ses-1")); err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if len(p.repairs) != 1 || p.repairs[0][0].Address != "bob@example.test" {
+				t.Fatalf("repairs = %v, want the provenance repair", p.repairs)
+			}
+			if st.suppressed["usr_1|bob@example.test"] {
+				t.Fatal("the live path must not have written the row")
+			}
+			if got := countSuppressionEvents(*events); got != 1 {
+				t.Fatalf("suppression events = %d, want 1", got)
+			}
+		})
 	}
 }

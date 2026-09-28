@@ -352,6 +352,9 @@ func main() {
 	// External-sending-access decisions (shadow impact / enforce refusals)
 	// as bounded counters; a no-op while the control is disabled.
 	sendingpolicy.SetExternalAccessObserver(metrics.ExternalAccessDecision)
+	// Deletion-resistant feedback ingestion outcomes (B8): bounded
+	// outcome × bucket counter, no address/account/id labels.
+	sendingpolicy.SetFeedbackObserver(metrics.SendingFeedbackIngested)
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)
 	smtpRelay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
 	sender := outbound.NewSenderWithDKIM(smtpRelay, cfg.OutboundSMTP.FromDomain, store)
@@ -421,7 +424,8 @@ func main() {
 		// window, durable in Postgres): the cross-replica counterpart of the
 		// acceptance-time in-memory limiter, enforced immediately before
 		// provider submission so scheduled-send bursts can't exceed it.
-		rate: sendrate.NewStore(pool, time.Minute, 60),
+		rate:          sendrate.NewStore(pool, time.Minute, 60),
+		sharedDomains: nonEmpty(cfg.SharedDomain),
 	})
 	outboundJobs := outboundSending.jobs
 	registrars = append(registrars, outboundJobs)
@@ -440,7 +444,10 @@ func main() {
 	if err := outboundSending.module.VerifyKeyringCoverage(ctx); err != nil {
 		log.Fatalf("Sending feedback keyring coverage: %v", err)
 	}
-	store.SetFeedbackRetention(time.Duration(spPolicy.SendingFeedbackPostAcctRetention) * 24 * time.Hour)
+	// The purge seal resolves the post-deletion horizon at purge time from
+	// the EFFECTIVE policy — the same accessor the retention janitor reads —
+	// not from the config-file policy captured here at boot.
+	store.SetFeedbackRetentionResolver(outboundSending.module.EffectiveFeedbackRetention)
 	registrars = append(registrars, outboundSending.feedbackMaintenance())
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job
 	// per queue+state (docs/observability.md).

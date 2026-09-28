@@ -108,7 +108,7 @@ func (f *fixture) provenance(correlationID string) (eventID string, at time.Time
 // live message owns the row.
 func (f *fixture) repair(m *sendingpolicy.Module, res delivery.FeedbackResult) {
 	f.t.Helper()
-	if err := m.RepairSuppressions(f.ctx, res.AccountRef, res.RepairNeeded); err != nil {
+	if _, err := m.RepairSuppressions(f.ctx, res.AccountRef, res.RepairNeeded); err != nil {
 		f.t.Fatalf("repair: %v", err)
 	}
 }
@@ -552,7 +552,7 @@ func TestEqualRankProvenanceTieBreak(t *testing.T) {
 func TestSuppressionRepairRequiresALiveAccount(t *testing.T) {
 	f := newFixture(t)
 	module := sendingpolicy.NewModule(f.pool, f.secrets())
-	if err := module.RepairSuppressions(f.ctx, "usr_does_not_exist",
+	if _, err := module.RepairSuppressions(f.ctx, "usr_does_not_exist",
 		[]delivery.FeedbackRepair{{Address: "x@example.test", Source: "bounce", Reason: "bounce:General"}}); err != nil {
 		t.Fatalf("a deleted account must be a no-op, not an error: %v", err)
 	}

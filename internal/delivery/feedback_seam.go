@@ -3,6 +3,8 @@ package delivery
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // ProviderAttemptHeader is the random per-attempt correlation marker the
@@ -70,10 +72,14 @@ type FeedbackResult struct {
 // Implemented by the sending-policy module.
 type FeedbackProcessor interface {
 	ProcessProviderFeedback(context.Context, ProviderFeedback) (FeedbackResult, error)
-	// RepairSuppressions writes the account-wide suppressions a signed event
-	// proved, for the case where no live message row can own them (the
-	// message was purged, or belongs to another deployment). The live path
-	// keeps ownership whenever a message survives, so this never competes
-	// with it.
-	RepairSuppressions(ctx context.Context, accountRef string, repairs []FeedbackRepair) error
+	// RepairSuppressionsTx writes the account-wide suppressions a signed
+	// event proved, for the case where no live message row can own them
+	// (the message was purged, or belongs to another deployment), inside the
+	// caller's transaction so the rows and the events announcing them commit
+	// together. It returns only the repairs that INSERTED a row: an address
+	// already suppressed (manually, or by an earlier bounce) is refreshed but
+	// not reported, so nothing re-announces an existing suppression. The live
+	// path keeps ownership whenever a message survives, so this never
+	// competes with it.
+	RepairSuppressionsTx(ctx context.Context, tx pgx.Tx, accountRef string, repairs []FeedbackRepair) (inserted []FeedbackRepair, err error)
 }

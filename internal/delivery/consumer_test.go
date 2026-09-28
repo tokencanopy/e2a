@@ -33,6 +33,8 @@ type fakeConsumerStore struct {
 	applicable  bool
 	preflights  int
 	lockOrder   []string
+	// agentGone makes LockAgentTx report the agent purged after correlation.
+	agentGone bool
 }
 
 func newFakeConsumerStore() *fakeConsumerStore {
@@ -59,7 +61,7 @@ func (f *fakeConsumerStore) WithTx(ctx context.Context, fn func(tx pgx.Tx) error
 }
 func (f *fakeConsumerStore) LockAgentTx(context.Context, pgx.Tx, string) (bool, error) {
 	f.lockOrder = append(f.lockOrder, "agent")
-	return true, nil
+	return !f.agentGone, nil
 }
 func (f *fakeConsumerStore) HasApplicableRecipientTx(context.Context, pgx.Tx, string, []string) (bool, error) {
 	f.lockOrder = append(f.lockOrder, "preflight")

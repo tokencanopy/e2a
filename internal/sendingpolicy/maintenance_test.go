@@ -127,8 +127,8 @@ func TestFeedbackMaintenanceRegistersOnTheMaintenanceQueue(t *testing.T) {
 	f := newFixture(t)
 	module := sendingpolicy.NewModule(f.pool, f.secrets())
 	periodics := sendingpolicy.NewMaintenanceJobs(module).RegisterJobs(river.NewWorkers())
-	if len(periodics) != 1 {
-		t.Fatalf("periodic jobs = %d, want 1", len(periodics))
+	if len(periodics) != 2 {
+		t.Fatalf("periodic jobs = %d, want 2 (retention pass + reconcile)", len(periodics))
 	}
 	// River keeps the periodic's constructor unexported, so assert the two
 	// facts that are observable and load-bearing: the job kind the worker
@@ -137,6 +137,9 @@ func TestFeedbackMaintenanceRegistersOnTheMaintenanceQueue(t *testing.T) {
 	// kind rename that left the worker unreachable, both fail here.
 	if kind := (sendingpolicy.FeedbackMaintenanceArgs{}).Kind(); kind != "sending_feedback_maintenance" {
 		t.Fatalf("periodic kind = %q", kind)
+	}
+	if kind := (sendingpolicy.FeedbackReconcileArgs{}).Kind(); kind != "sending_feedback_reconcile" {
+		t.Fatalf("reconcile kind = %q", kind)
 	}
 	if _, err := jobs.New(f.pool, jobs.Config{}, sendingpolicy.NewMaintenanceJobs(module)); err != nil {
 		t.Fatalf("the registrar must produce a buildable River client: %v", err)

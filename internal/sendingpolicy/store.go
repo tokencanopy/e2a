@@ -75,6 +75,11 @@ type Module struct {
 
 	commitAttestation func(context.Context, pgx.Tx) error
 
+	// feedbackExcludedDomains are the canonical shared agent domains whose
+	// deliveries never count toward the detector denominator (see
+	// excludedFromDenominator); nil means only the SES simulator.
+	feedbackExcludedDomains map[string]struct{}
+
 	// clock is the ingestion clock the feedback path stamps aggregates with;
 	// nil means time.Now. Tests and staging drills pin it to cross UTC days.
 	clock func() time.Time

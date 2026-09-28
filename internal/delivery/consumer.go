@@ -175,6 +175,53 @@ func (c *Consumer) WithFeedbackProcessor(p FeedbackProcessor) *Consumer {
 // never sees anything. The composition root's test asserts this.
 func (c *Consumer) FeedbackProcessorWired() bool { return c.feedback != nil }
 
+// repairPending reports whether the accounting seam proved suppressions
+// that only the provenance path can write.
+func (c *Consumer) repairPending(accounted FeedbackResult) bool {
+	return c.feedback != nil && accounted.AccountRef != "" && len(accounted.RepairNeeded) > 0
+}
+
+// repairWithoutMessageTx applies the account-wide suppressions the retained
+// provenance proved when no live message can own them, and fires one
+// suppression.added per row it actually INSERTED. An address that was
+// already suppressed (a manual entry, an earlier bounce) is refreshed by the
+// upsert but never re-announced. Rows and events share tx, so a failure
+// anywhere rolls both back and the SNS retry redoes both: exactly one row and
+// one event either way. The event is keyed on the provider event, so an
+// outbox-level redelivery dedupes too.
+func (c *Consumer) repairWithoutMessageTx(ctx context.Context, tx pgx.Tx, ev *Event, accounted FeedbackResult) error {
+	if !c.repairPending(accounted) {
+		return nil
+	}
+	inserted, err := c.feedback.RepairSuppressionsTx(ctx, tx, accounted.AccountRef, accounted.RepairNeeded)
+	if err != nil {
+		return fmt.Errorf("suppression repair: %w", err)
+	}
+	if c.fire != nil {
+		// A row appearing in the customer's suppression list with no event
+		// is the state/notification desync the message-backed path avoids;
+		// the payload's message id is documented as present only when still
+		// known, which is exactly this case.
+		for _, rep := range inserted {
+			if err := c.fire(ctx, tx, FiredEvent{
+				UserID: accounted.AccountRef,
+				Type:   EventSuppressionAdded,
+				Data: eventpayload.DomainSuppressionAddedData{
+					Address: rep.Address, Source: rep.Source, Reason: rep.Reason,
+				},
+				DedupKey:   "provider-feedback:" + ev.ProviderEventID + ":" + rep.Address + ":" + EventSuppressionAdded,
+				OccurredAt: ev.OccurredAt,
+			}); err != nil {
+				return fmt.Errorf("announce repaired suppression: %w", err)
+			}
+		}
+	}
+	if len(inserted) > 0 {
+		log.Printf("[delivery] SES %s repaired %d suppression(s) for a message that no longer exists", ev.Kind, len(inserted))
+	}
+	return nil
+}
+
 // NewConsumer builds the consumer. fire may be nil (no events).
 func NewConsumer(store Store, fire Firer, finalizers ...ProviderAcceptanceFinalizer) *Consumer {
 	consumer := &Consumer{store: store, fire: fire}
@@ -232,41 +279,15 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 	if !found {
 		// No live message can own a suppression for this event, but the
 		// retained provenance may still prove one — this is the purged /
-		// deleted-message case B8 exists for. The account-wide repair is
-		// applied here, outside any message transaction, and announces
-		// nothing: there is no message for an event to reference.
-		if c.feedback != nil && accounted.AccountRef != "" && len(accounted.RepairNeeded) > 0 {
-			if err := c.feedback.RepairSuppressions(ctx, accounted.AccountRef, accounted.RepairNeeded); err != nil {
-				return fmt.Errorf("suppression repair: %w", err)
+		// deleted-message case B8 exists for. The account-wide repair and
+		// the suppression.added events for the rows it actually inserted
+		// commit in one transaction of their own (see repairWithoutMessageTx).
+		if c.repairPending(accounted) {
+			if err := c.store.WithTx(ctx, func(tx pgx.Tx) error {
+				return c.repairWithoutMessageTx(ctx, tx, ev, accounted)
+			}); err != nil {
+				return err
 			}
-			// Announce it. A row appearing in the customer's suppression
-			// list with no event is the same state/notification desync the
-			// message-backed path deliberately avoids; the payload's
-			// message id is documented as present only when still known,
-			// which is exactly this case. Keyed on the provider event, so a
-			// redelivery dedupes at the outbox and a retry after a failure
-			// here still ends with one event.
-			if c.fire != nil {
-				if err := c.store.WithTx(ctx, func(tx pgx.Tx) error {
-					for _, rep := range accounted.RepairNeeded {
-						if err := c.fire(ctx, tx, FiredEvent{
-							UserID: accounted.AccountRef,
-							Type:   EventSuppressionAdded,
-							Data: eventpayload.DomainSuppressionAddedData{
-								Address: rep.Address, Source: rep.Source, Reason: rep.Reason,
-							},
-							DedupKey:   "provider-feedback:" + ev.ProviderEventID + ":" + rep.Address + ":" + EventSuppressionAdded,
-							OccurredAt: ev.OccurredAt,
-						}); err != nil {
-							return err
-						}
-					}
-					return nil
-				}); err != nil {
-					return fmt.Errorf("announce repaired suppression: %w", err)
-				}
-			}
-			log.Printf("[delivery] SES %s repaired %d suppression(s) for a message that no longer exists", ev.Kind, len(accounted.RepairNeeded))
 		}
 		if len(ev.Recipients) == 0 {
 			return nil
@@ -289,7 +310,10 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 			return err
 		}
 		if !found {
-			return nil
+			// Purged between correlation and this lock: no live message can
+			// own the suppression any more, so the retained provenance does,
+			// exactly as in the !found branch above.
+			return c.repairWithoutMessageTx(ctx, tx, ev, accounted)
 		}
 		if ev.Kind.requiresApplicableRecipient() {
 			addresses := make([]string, 0, len(ev.Recipients))
@@ -303,7 +327,12 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 				return err
 			}
 			if !applicable {
-				return nil
+				// The message (or its recipient rows) went away under us.
+				// RepairNeeded holds only recipients whose HMAC matched the
+				// authorized envelope, so falling through to the provenance
+				// repair cannot suppress an address this account never
+				// sent to.
+				return c.repairWithoutMessageTx(ctx, tx, ev, accounted)
 			}
 		}
 		if ev.Kind.impliesProviderAcceptance() {
@@ -361,8 +390,8 @@ func (c *Consumer) Process(ctx context.Context, ev *Event) error {
 				// diagnostic the suppression API returns, and its insert
 				// must share this transaction with the event that
 				// announces it. The accounting seam deliberately does not
-				// write it here (see the !found branch below, which is the
-				// only case where no message can own the repair).
+				// write it here (see repairWithoutMessageTx, used only when
+				// no message can own the repair).
 				suppressionID, added, err := c.store.AddSuppressionTx(ctx, tx, m.UserID, r.Address, r.Detail, source, m.MessageID)
 				if err != nil {
 					return err

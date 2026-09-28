@@ -1384,7 +1384,11 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 		return correlationID, nil
 	}
 	for _, addr := range st.envelope {
-		version, mac := m.secrets.Keyring.Sign([]byte(addr))
+		// canonicalRecipient, not the envelope string: authorization accepts
+		// an internationalized domain as typed (Unicode), while the provider
+		// may report it back in A-label form. Feedback verifies against the
+		// same canonical form, so both spellings produce one HMAC.
+		version, mac := m.secrets.Keyring.Sign([]byte(canonicalRecipient(addr)))
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO sending_feedback_recipients (correlation_id, recipient_hmac, hmac_key_version)
 			VALUES ($1, $2, $3)

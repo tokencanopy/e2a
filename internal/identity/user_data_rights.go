@@ -396,28 +396,6 @@ func (s *Store) DeleteUserDataTx(ctx context.Context, userID string, perDomainIn
 		return nil, fmt.Errorf("delete: usage_events: %w", err)
 	}
 
-	// Deletion-resistant feedback provenance is retained for a bounded
-	// window AFTER the account is gone (the rows have no FK and no plaintext
-	// recipient), so a controlled recipient cannot erase a complaint by
-	// deleting the account first. Customer correlations carry no expiry
-	// while the account lives; this is where their horizon is stamped, and
-	// the sending-policy janitor honors it.
-	if _, err := tx.Exec(ctx, `
-		UPDATE sending_feedback_correlations
-		   SET expires_at = $2
-		 WHERE source_account_ref = $1 AND expires_at IS NULL`,
-		userID, time.Now().UTC().Add(s.feedbackRetention())); err != nil {
-		return nil, fmt.Errorf("delete: stamp feedback retention: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE sending_feedback_events e
-		   SET expires_at = c.expires_at
-		  FROM sending_feedback_correlations c
-		 WHERE c.correlation_id = e.correlation_id AND c.source_account_ref = $1 AND e.expires_at IS NULL`,
-		userID); err != nil {
-		return nil, fmt.Errorf("delete: stamp feedback event retention: %w", err)
-	}
-
 	// Sender-identity teardown: enqueue an SES deprovision job for every
 	// owned domain in this same tx, before the cascade removes the domain
 	// rows. The orphan reaper is the backstop, but doing it transactionally
@@ -685,17 +663,36 @@ func scanUsageEventsForUser(ctx context.Context, tx pgx.Tx, userID string) ([]Us
 // (sending_feedback_post_account_retention_days = 30).
 const DefaultFeedbackRetention = 30 * 24 * time.Hour
 
-// SetFeedbackRetention overrides the post-deletion feedback horizon from the
-// active sending-protection policy.
+// SetFeedbackRetention pins a fixed post-deletion feedback horizon. Tests
+// use it; production installs SetFeedbackRetentionResolver instead.
 func (s *Store) SetFeedbackRetention(d time.Duration) {
 	if d > 0 {
-		s.feedbackRetentionOverride = d
+		s.feedbackRetention = func(context.Context) (time.Duration, error) { return d, nil }
 	}
 }
 
-func (s *Store) feedbackRetention() time.Duration {
-	if s.feedbackRetentionOverride > 0 {
-		return s.feedbackRetentionOverride
+// SetFeedbackRetentionResolver installs the accessor the purge seal reads
+// the post-deletion horizon from, AT PURGE TIME: the sending-policy
+// module's effective policy, so a database-source deployment whose
+// activated policy differs from the config file stamps the horizon the
+// janitor and non-customer correlations use.
+func (s *Store) SetFeedbackRetentionResolver(fn func(context.Context) (time.Duration, error)) {
+	s.feedbackRetention = fn
+}
+
+// resolveFeedbackRetention returns the horizon the seal stamps. A resolver
+// error fails the seal; the purge resumes on its next pass rather than
+// stamping a horizon nobody configured.
+func (s *Store) resolveFeedbackRetention(ctx context.Context) (time.Duration, error) {
+	if s.feedbackRetention == nil {
+		return DefaultFeedbackRetention, nil
 	}
-	return DefaultFeedbackRetention
+	d, err := s.feedbackRetention(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("resolve feedback retention: %w", err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("resolve feedback retention: non-positive horizon %s", d)
+	}
+	return d, nil
 }
