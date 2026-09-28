@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/mail"
 	"net/netip"
@@ -372,6 +374,22 @@ type NotificationsConfig struct {
 	// default when from_address is itself a real mailbox. Override with
 	// E2A_NOTIFICATIONS_REPLY_TO.
 	ReplyTo string `yaml:"reply_to"`
+	// SupportEmail is the support address customers are told to contact
+	// when their account is read-only (sending paused for an abuse review —
+	// the account_read_only error and the dashboard banner). Optional: when
+	// empty the message falls back to reply_to, and with neither set it says
+	// "contact support" without an address. Override with
+	// E2A_NOTIFICATIONS_SUPPORT_EMAIL.
+	SupportEmail string `yaml:"support_email"`
+}
+
+// SupportContact is the support address named in customer-facing account
+// state messages: support_email, else reply_to, else empty.
+func (n NotificationsConfig) SupportContact() string {
+	if n.SupportEmail != "" {
+		return n.SupportEmail
+	}
+	return n.ReplyTo
 }
 
 // InboundConfig selects the inbound processing model (inbound-message-pipeline-
@@ -559,9 +577,16 @@ type SendingProtectionConfig struct {
 // Mode is disabled|shadow|enforce; AccountsCreatedAtOrAfter is the immutable
 // RFC3339 UTC cohort cutoff (for example 2026-10-01T00:00:00Z). Both are
 // validated by internal/sendingpolicy.
+//
+// Unlocks optionally narrows which routes may lift the restriction, from the
+// closed vocabulary operator_approval, verified_domain, paid_entitlement.
+// Absent (nil) means all three — the behavior before the key existed. An
+// explicit empty list, or a list without operator_approval, is a startup
+// error. Hosted e2a runs [operator_approval]: explicit approval only.
 type ExternalSendingAccessConfig struct {
-	Mode                     string `yaml:"mode"`
-	AccountsCreatedAtOrAfter string `yaml:"accounts_created_at_or_after"`
+	Mode                     string   `yaml:"mode"`
+	AccountsCreatedAtOrAfter string   `yaml:"accounts_created_at_or_after"`
+	Unlocks                  []string `yaml:"unlocks"`
 }
 
 // LimitsConfig is the operator-configured fallback applied to any user
@@ -761,6 +786,9 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	if err := checkSendingProtectionStrict(data); err != nil {
+		return nil, err
+	}
 
 	// E2A_ENV overrides `env:` in config.yaml. Every other config knob
 	// already has an env-var override; env: previously had none — the only
@@ -864,6 +892,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("E2A_NOTIFICATIONS_REPLY_TO"); v != "" {
 		cfg.Notifications.ReplyTo = v
+	}
+	if v := os.Getenv("E2A_NOTIFICATIONS_SUPPORT_EMAIL"); v != "" {
+		cfg.Notifications.SupportEmail = v
 	}
 	if v := os.Getenv("E2A_METRICS_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -1136,6 +1167,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: notifications.reply_to must be a bare email address (got %q)", v)
 		}
 	}
+	if v := c.Notifications.SupportEmail; v != "" {
+		addr, err := mail.ParseAddress(v)
+		if err != nil || addr.Address != v {
+			return fmt.Errorf("config: notifications.support_email must be a bare email address (got %q)", v)
+		}
+	}
 	return nil
 }
 
@@ -1257,4 +1294,84 @@ func absoluteHTTPURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("invalid absolute http(s) URL")
 	}
 	return parsed, nil
+}
+
+// checkSendingProtectionStrict re-decodes ONLY the `sending_protection`
+// subtree with unknown keys rejected. The rest of the file stays lenient
+// (self-hosters carry keys from older docs), but this block is a security
+// policy: a misspelled `unlock:` or `Unlocks:` under external_sending_access,
+// or a key indented one level off, would otherwise silently mean "every
+// unlock". It also rejects an explicitly null or blank `unlocks:` — yaml.v3
+// decodes `unlocks:`, `unlocks: null` and `unlocks: ~` to a nil slice without
+// ever invoking a custom unmarshaler, which would read as "absent = all
+// three" and bypass the empty-list rejection. Presence is therefore detected
+// on the YAML node itself.
+func checkSendingProtectionStrict(data []byte) error {
+	// One strict decode of the WHOLE document, so anchors, aliases and merge
+	// keys defined anywhere resolve exactly as in the lenient decode. Only
+	// sending_protection is typed; every other top-level key lands in the
+	// inline map, which keeps the rest of the file lenient.
+	var strict struct {
+		SP   SendingProtectionConfig `yaml:"sending_protection"`
+		Rest map[string]yaml.Node    `yaml:",inline"`
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&strict); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("sending_protection: %w", err)
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	if len(root.Content) == 0 {
+		return nil
+	}
+	esa := mappingValue(mappingValue(root.Content[0], "sending_protection"), "external_sending_access")
+	if esa == nil {
+		return nil
+	}
+	if v := mappingValue(esa, "unlocks"); v != nil && v.ShortTag() == "!!null" {
+		return errors.New("sending_protection.external_sending_access.unlocks is null or blank; omit the key to allow every unlock, or list the unlocks (it must contain operator_approval)")
+	}
+	return nil
+}
+
+// mappingValue returns the value node for key in a mapping node, or nil.
+// Aliases are followed, and `<<` merge keys are searched after the mapping's
+// own keys (an explicit key wins, as in YAML merge semantics).
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	m = resolveAlias(m)
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return resolveAlias(m.Content[i+1])
+		}
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != "<<" {
+			continue
+		}
+		merged := resolveAlias(m.Content[i+1])
+		sources := []*yaml.Node{merged}
+		if merged != nil && merged.Kind == yaml.SequenceNode {
+			sources = merged.Content
+		}
+		for _, src := range sources {
+			if v := mappingValue(src, key); v != nil {
+				return v
+			}
+		}
+	}
+	return nil
+}
+
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for depth := 0; n != nil && n.Kind == yaml.AliasNode && depth < 16; depth++ {
+		n = n.Alias
+	}
+	return n
 }

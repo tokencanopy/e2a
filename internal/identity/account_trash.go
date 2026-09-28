@@ -102,7 +102,9 @@ func accountRowCounts(ctx context.Context, tx pgx.Tx, userID string, res *Delete
 // counts describe rows trashed, revoked or unverified). perDomainInTx, when
 // non-nil, runs for every owned domain inside the transaction — it is how the
 // SES sender-identity teardown is enqueued; with the domain now unverified the
-// deprovision worker deletes the provider identity.
+// deprovision worker deletes the provider identity. It is skipped while the
+// account is read-only (abuse pause), so the provider identities survive as
+// evidence.
 //
 // Refuses with ErrSendInProgress while an outbound provider call holds a
 // fresh lease, ErrAccountTrashed when the account is already in the trash,
@@ -198,6 +200,20 @@ func (s *Store) TrashAccount(ctx context.Context, userID string, perDomainInTx f
 		if err != nil {
 			return fmt.Errorf("trash: load domains: %w", err)
 		}
+		// A read-only account (abuse pause) keeps its SES sender identities
+		// through the trash: they are provider-side evidence for the abuse
+		// review. The domains are still unverified below, so nothing is sent
+		// from them. The purge at the end of the trash window (the janitor's
+		// purge is not held by a pause) tears them down with the rest.
+		keepSenderIdentities := false
+		if perDomainInTx != nil {
+			if err := tx.QueryRow(ctx, accountReadOnlySQL, userID).Scan(&keepSenderIdentities); err != nil {
+				return fmt.Errorf("trash: read-only check: %w", err)
+			}
+			if keepSenderIdentities {
+				log.Printf("[account-trash] kept sender identities of read-only account user=%s (abuse review evidence)", userID)
+			}
+		}
 		for _, d := range domains {
 			// A domain another account's agents live on (the shared domain an
 			// operator's probe account adopted) is infrastructure, not this
@@ -228,7 +244,7 @@ func (s *Store) TrashAccount(ctx context.Context, userID string, perDomainInTx f
 				d.Domain, "e2a-verify="+generateID(), userID); err != nil {
 				return fmt.Errorf("trash: unverify domain %s: %w", d.Domain, err)
 			}
-			if perDomainInTx != nil {
+			if perDomainInTx != nil && !keepSenderIdentities {
 				if err := perDomainInTx(ctx, tx, d.Domain); err != nil {
 					return fmt.Errorf("trash: enqueue sender teardown for %s: %w", d.Domain, err)
 				}
@@ -471,6 +487,59 @@ func (s *Store) AccountSendingPaused(ctx context.Context, userID string) (bool, 
 		`SELECT EXISTS (SELECT 1 FROM account_sending_controls WHERE user_id = $1 AND state = 'paused')`, userID,
 	).Scan(&paused)
 	return paused, err
+}
+
+// AccountReadOnly reports whether the account is read-only: its sending is
+// paused with pause class 'abuse' (docs/design/account-read-only.md). Every
+// write on every customer surface is refused for such an account; reads, sign
+// in/out and the account trash stay available. Other pause classes (operator,
+// billing, system) refuse only sending. A missing control row is not
+// read-only. The read is a single primary-key lookup with no cache, so an
+// operator pause or resume takes effect on the very next request.
+func (s *Store) AccountReadOnly(ctx context.Context, userID string) (bool, error) {
+	var readOnly bool
+	err := s.pool.QueryRow(ctx, accountReadOnlySQL, userID).Scan(&readOnly)
+	return readOnly, err
+}
+
+// accountReadOnlySQL is the read-only predicate for one account ($1 = user id).
+const accountReadOnlySQL = `SELECT EXISTS (SELECT 1 FROM account_sending_controls
+		                 WHERE user_id = $1 AND state = 'paused' AND pause_class = 'abuse')`
+
+// readOnlyApproveHoldExclusion is the predicate the HITL expiry sweeps
+// (ListExpiredPending, ListExpiredReviews) add over agent_identities a: an
+// approve-on-expiry hold of a read-only account is not a candidate, so the
+// sweep never releases held inbound mail into the inbox/webhooks or sends held
+// outbound mail for an account frozen for an abuse review. Excluding it at
+// selection (rather than skipping it in the worker) keeps such holds from
+// sitting at the head of the ordered, LIMITed sweep and starving every other
+// account's expiries; a resume makes them candidates again on the next sweep.
+// Reject-on-expiry holds stay candidates: rejecting releases nothing. The
+// predicate must match AccountReadOnly.
+const readOnlyApproveHoldExclusion = `NOT (a.hitl_expiration_action = 'approve' AND EXISTS (
+		SELECT 1 FROM account_sending_controls asc_ro
+		 WHERE asc_ro.user_id = a.user_id AND asc_ro.state = 'paused' AND asc_ro.pause_class = 'abuse'))`
+
+// ErrAccountReadOnly refuses a write to a read-only account (abuse pause)
+// that a store method checks itself.
+var ErrAccountReadOnly = errors.New("identity: account is read-only")
+
+// AccountReadOnlyCode is the machine-checked error code every surface emits
+// when it refuses a write for a read-only account.
+const AccountReadOnlyCode = "account_read_only"
+
+// AccountReadOnlyMessage is the customer-facing message of the
+// account_read_only error, shared by every surface that emits it (/v1, the
+// legacy dashboard routes, OAuth consent, the HITL magic links, the internal
+// principal attach). It names the state and the way out, never the operator's
+// reason. supportContact is optional.
+func AccountReadOnlyMessage(supportContact string) string {
+	contact := "Contact support to appeal."
+	if supportContact != "" {
+		contact = "Contact support (" + supportContact + ") to appeal."
+	}
+	return "sending is paused for this account pending an abuse review, and the account is read-only: " +
+		"reads still work, but no changes can be made until the review is complete. " + contact
 }
 
 // userPurgeBatch bounds one janitor pass of PurgeDeletedUsers.

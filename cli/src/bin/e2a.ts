@@ -124,7 +124,7 @@ Usage:
   e2a sending-access status         Beta: show this account's external-sending restriction
                                    and its latest access request, if any
         --json                     Raw { sendingAccess, latestRequest } objects
-  e2a sending-access request        Beta: ask support to review external sending access
+  e2a sending-access request        Beta: ask an operator to review external sending access
         --use-case <text>          What you're building and why (1-2000 chars)
         --recipients <text>        Who you'll email (1-1000 chars)
         --volume <n>               Expected recipients per day (1-1000000)
@@ -882,6 +882,12 @@ function formatError(err: unknown): string {
     out +=
       "  request approval with: e2a sending-access request --use-case <text> --recipients <text> --volume <n>\n" +
       "  do not retry this request as-is — the same recipients will refuse again.\n";
+  }
+  if (err instanceof E2AError && err.code === "account_read_only") {
+    out +=
+      "  this account is read-only while its sending is paused for an abuse review.\n" +
+      "  reads (whoami, messages, listen) still work; no change will succeed until the review is complete.\n" +
+      "  do not retry or rotate keys — contact support to appeal.\n";
   }
   return out;
 }

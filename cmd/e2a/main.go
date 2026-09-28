@@ -128,6 +128,8 @@ func main() {
 	flag.BoolVar(&spFlags.approveExternal, "approve-external-sending", false, "grant an account shared-identity external sending (requires -account-id, -expected-external-sending-revision, -reason; optional -external-sending-request-id), then exit")
 	flag.BoolVar(&spFlags.revokeExternal, "revoke-external-sending", false, "revoke an account's shared-identity external sending grant (requires -account-id, -expected-external-sending-revision, -reason), then exit")
 	flag.BoolVar(&spFlags.declineExternal, "decline-external-sending-request", false, "decline a pending external sending request without changing the grant (requires -account-id, -external-sending-request-id), then exit")
+	flag.BoolVar(&spFlags.listExternal, "list-external-sending-requests", false, "list pending external sending requests (id, account, created_at, volume, current grant; add -all for every request), then exit")
+	flag.BoolVar(&spFlags.listAll, "all", false, "with -list-external-sending-requests: include decided requests")
 	flag.StringVar(&spFlags.accountID, "account-id", "", "account (user) id an external sending command acts on")
 	flag.Int64Var(&spFlags.expectedExternal, "expected-external-sending-revision", -1, "external sending access revision the operator inspected (CAS)")
 	flag.StringVar(&spFlags.requestID, "external-sending-request-id", "", "pending external sending request an approve/decline decides")
@@ -135,7 +137,7 @@ func main() {
 	flag.BoolVar(&spFlags.pauseAccount, "pause-account-sending", false, "pause an account's sending (requires -account-id, -pause-class, -reason; optional -evidence-ref); works on trashed accounts, then exit")
 	flag.BoolVar(&spFlags.resumeAccount, "resume-account-sending", false, "resume a paused account's sending (requires -account-id, -reason), then exit")
 	flag.BoolVar(&spFlags.inspectPause, "inspect-account-sending", false, "print an account's pause state and class (requires -account-id), then exit")
-	flag.StringVar(&spFlags.pauseClass, "pause-class", "", "pause class for -pause-account-sending: operator, abuse, billing or system (abuse makes a later purge write abuse tombstones)")
+	flag.StringVar(&spFlags.pauseClass, "pause-class", "", "pause class for -pause-account-sending: operator, abuse, billing or system (abuse also makes the account read-only — every customer write is refused — and makes a later purge write abuse tombstones)")
 	flag.StringVar(&spFlags.evidenceRef, "evidence-ref", "", "optional private evidence reference (e.g. an incident id, max 200 chars) recorded with a pause and kept in the deleted-account summary")
 
 	var acctFlags accountCommandFlags
@@ -147,6 +149,9 @@ func main() {
 	flag.BoolVar(&acctFlags.escalateAbuse, "escalate-deleted-account-to-abuse", false, "after purge: write abuse-class tombstones for every identifier digest in a purged account's summary and extend the summary to the abuse hold (requires -deleted-account-id, -reason), then exit")
 	flag.IntVar(&acctFlags.holdDays, "tombstone-hold-days", 0, "hold length in days for -extend-identity-tombstones")
 	flag.Parse()
+	if err := spFlags.validateStandalone(); err != nil {
+		log.Fatalf("%v", err)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1046,6 +1051,7 @@ func main() {
 		SenderIdentity:            senderEnqueuer,
 		ManagedUnsubscribeIssuer:  managedUnsubscribeIssuer,
 		AgentSuppressionAddedHook: agent.AgentSuppressionAddedHook(webhookOutbox),
+		SupportContact:            cfg.Notifications.SupportContact(),
 		// River is the sole webhook delivery engine: the /test + redelivery
 		// endpoints insert a delivery row directly (bypassing the outbox drain),
 		// so they must enqueue the River job themselves or the row never delivers.

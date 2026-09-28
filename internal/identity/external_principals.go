@@ -67,7 +67,9 @@ func (s *Store) GetUserByExternalPrincipal(ctx context.Context, issuer, subject 
 //
 // A trashed user is refused with ErrAccountTrashed, and a subject held by a
 // live identity tombstone with ErrRegistrationRefused — checked inside the
-// insert transaction after the digest advisory lock.
+// insert transaction after the digest advisory lock. A new mapping to a
+// read-only account is refused with ErrAccountReadOnly; replaying an existing
+// mapping is not.
 func (s *Store) AttachExternalPrincipal(ctx context.Context, issuer, subject, userID string) (bool, error) {
 	var created bool
 	err := s.WithTx(ctx, func(tx pgx.Tx) error {
@@ -89,6 +91,16 @@ func (s *Store) AttachExternalPrincipal(ctx context.Context, issuer, subject, us
 			return err
 		}
 		if !mapped {
+			// A read-only account (abuse pause) takes no NEW sign-in
+			// principal. A replay of an existing mapping stays idempotent
+			// (the reconciler re-sends attaches it already made).
+			var readOnly bool
+			if err := tx.QueryRow(ctx, accountReadOnlySQL, userID).Scan(&readOnly); err != nil {
+				return err
+			}
+			if readOnly {
+				return ErrAccountReadOnly
+			}
 			if err := s.checkTombstonesTx(ctx, tx, []TombstoneIdentifier{
 				{Kind: TombstoneKindLoginSubject, Value: externalPrincipalSubject(issuer, subject)},
 			}); err != nil {

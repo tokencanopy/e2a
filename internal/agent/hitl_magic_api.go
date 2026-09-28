@@ -131,6 +131,9 @@ func (a *API) handleApproveMagicLinkPost(w http.ResponseWriter, r *http.Request)
 			"This message no longer exists.")
 		return
 	}
+	if a.refuseMagicIfReadOnly(w, r, userID, approvaltoken.ActionApprove) {
+		return
+	}
 	a.magicApprove(w, r, claims.MessageID, userID, agentID)
 }
 
@@ -149,6 +152,9 @@ func (a *API) handleRejectMagicLinkPost(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeMagicMessage(w, http.StatusNotFound, "Message not found",
 			"This message no longer exists.")
+		return
+	}
+	if a.refuseMagicIfReadOnly(w, r, userID, approvaltoken.ActionReject) {
 		return
 	}
 	reason := strings.TrimSpace(r.FormValue("reason"))
@@ -964,4 +970,25 @@ func firstRecipient(rs []string) string {
 		return "the recipient"
 	}
 	return rs[0]
+}
+
+// refuseMagicIfReadOnly refuses a magic-link approve/reject for a read-only
+// account (docs/design/account-read-only.md) with a human page instead of
+// the JSON envelope, and fails closed when the state cannot be read. It is
+// the magic-link surface's one read-only check: the links are authorized by
+// their token, not by an account principal, so the /v1 guard never sees them.
+func (a *API) refuseMagicIfReadOnly(w http.ResponseWriter, r *http.Request, userID, action string) bool {
+	ro, err := a.store.AccountReadOnly(r.Context(), userID)
+	if err != nil {
+		log.Printf("[hitl] magic-link read-only check failed: %v", err)
+		writeMagicMessage(w, http.StatusServiceUnavailable, pageTitleForAction(action, "Try again"),
+			"We could not check this account right now. Try again in a moment.")
+		return true
+	}
+	if ro {
+		writeMagicMessage(w, http.StatusForbidden, pageTitleForAction(action, "Account is read-only"),
+			identity.AccountReadOnlyMessage(a.supportContact))
+		return true
+	}
+	return false
 }

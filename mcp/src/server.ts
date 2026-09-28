@@ -12,7 +12,9 @@ import { registerLegacyTools } from "./tools/legacy.js";
 import { registerContactTools } from "./tools/contacts.js";
 import { registerSuppressionTools } from "./tools/suppressions.js";
 import { registerMetricsTools } from "./tools/metrics.js";
+import { registerSendingAccessTools } from "./tools/sendingaccess.js";
 import { toolNamesForScope } from "./tools/tiers.js";
+import { isMutatingTool, MUTATING_META_KEY } from "./tools/mutating.js";
 import { resolveServerVersion } from "./version.js";
 
 export interface ToolExecutionRecord {
@@ -78,6 +80,18 @@ function wrapToolHandlerArgs(
   return copy;
 }
 
+// withMutatingMeta advertises the tool's read-only classification
+// (tools/mutating.ts) as `_meta["e2a/mutating"]` on its config object, so a
+// client can tell up front which tools an account frozen for an abuse review
+// can still call. Every registered tool is classified (pinned by tests).
+function withMutatingMeta(name: string, args: unknown[]): unknown[] {
+  if (args.length < 2 || typeof args[0] !== "object" || args[0] === null) return args;
+  const config = args[0] as { _meta?: Record<string, unknown> };
+  const copy = args.slice();
+  copy[0] = { ...config, _meta: { ...config._meta, [MUTATING_META_KEY]: isMutatingTool(name) } };
+  return copy;
+}
+
 // gateRegistration intercepts server.registerTool so a session only registers
 // the tools its credential scope is allowed to see (§6a). One seam gates every
 // tool — the per-resource register*Tools functions stay scope-agnostic, and the
@@ -97,7 +111,7 @@ function gateRegistration(
       // register*Tools callers don't use the return value.
       return undefined as unknown as ReturnType<McpServer["registerTool"]>;
     }
-    return original(name, ...wrapToolHandlerArgs(name, rest, onToolExecution)) as ReturnType<
+    return original(name, ...withMutatingMeta(name, wrapToolHandlerArgs(name, rest, onToolExecution))) as ReturnType<
       McpServer["registerTool"]
     >;
   }) as McpServer["registerTool"];
@@ -127,6 +141,7 @@ export function buildServer({
   registerContactTools(server, client);
   registerSuppressionTools(server, client);
   registerMetricsTools(server, client);
+  registerSendingAccessTools(server, client);
   registerLegacyTools(server, client);
   return server;
 }

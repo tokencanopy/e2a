@@ -237,6 +237,15 @@ def test_catalog_family_overrides():
     assert isinstance(paused, E2APermissionError)
     assert paused.retryable is False
 
+    # account_read_only: an abuse-paused account refuses every write —
+    # permission, never retryable until an operator resumes the account.
+    read_only = from_api_exception(
+        _exc(403, body='{"error":{"code":"account_read_only","message":"x"}}')
+    )
+    assert isinstance(read_only, E2APermissionError)
+    assert read_only.retryable is False
+    assert read_only.code == "account_read_only"
+
     # external_sending_not_enabled: not retryable — nothing was queued and
     # retrying the same request will not succeed. `.details` carries the open
     # set of allowed destinations plus an optional dashboard recovery URL.

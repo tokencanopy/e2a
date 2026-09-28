@@ -1952,6 +1952,31 @@ async def test_outreach_exposes_etag_and_sends_if_match(httpx_mock):
 # ── account: sending access (beta) ────────────────────────────────────────
 
 
+def test_sending_access_view_decodes_available_unlocks():
+    from e2a.v1.generated.models.sending_access_view import SendingAccessView
+
+    view = SendingAccessView.from_dict(
+        {
+            "enforcement_applies": True,
+            "shared_external_approved": False,
+            "paid_external_sending_entitled": True,
+            "owner_recipient_verified": True,
+            "available_unlocks": ["operator_approval"],
+        }
+    )
+    assert view.available_unlocks == ["operator_approval"]
+    # A server that predates the field omits it; the object still decodes.
+    legacy = SendingAccessView.from_dict(
+        {
+            "enforcement_applies": True,
+            "shared_external_approved": False,
+            "paid_external_sending_entitled": False,
+            "owner_recipient_verified": False,
+        }
+    )
+    assert legacy.available_unlocks is None
+
+
 @pytest.mark.anyio
 async def test_get_sending_access_request_reads_the_endpoint(httpx_mock):
     httpx_mock.add_response(

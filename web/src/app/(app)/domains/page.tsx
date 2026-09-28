@@ -8,6 +8,8 @@ import { listDomains, listAgents } from "../../components/onboarding/api";
 import type { DomainInfo } from "../../components/onboarding/types";
 import type { DashboardAgent } from "../../components/types";
 import { PageShell } from "../../components/loft/PageShell";
+import { useAccountReadOnly } from "../../components/hooks/useAccountReadOnly";
+import { ACCOUNT_READ_ONLY_CONTROL_TITLE } from "../../../lib/readOnly";
 import { AgentPromptCard, AGENT_PROMPTS } from "../../components/AgentPromptCard";
 import {
   agentsKey,
@@ -17,6 +19,7 @@ import {
 } from "../../../lib/swrKeys";
 
 export default function DomainsPage() {
+  const readOnly = useAccountReadOnly();
   const [showAddForm, setShowAddForm] = useState(false);
   // Share the cache with the dashboard's verified-domains stat
   // (useSWR(domainsKey) on /inboxes) so any mutation here flows
@@ -89,7 +92,9 @@ export default function DomainsPage() {
           <div className="flex flex-col items-center gap-3">
             <button
               onClick={() => setShowAddForm(true)}
-              className="px-4 py-2 text-[13px] font-medium transition"
+              disabled={readOnly}
+              title={readOnly ? ACCOUNT_READ_ONLY_CONTROL_TITLE : undefined}
+              className="px-4 py-2 text-[13px] font-medium transition disabled:opacity-50"
               style={{
                 background: "var(--accent-fill)",
                 color: "var(--accent-fg)",
@@ -129,7 +134,9 @@ export default function DomainsPage() {
       actions={
         <button
           onClick={() => setShowAddForm(!showAddForm)}
-          className="px-4 py-2 text-[13px] font-medium transition"
+          disabled={readOnly && !showAddForm}
+          title={readOnly ? ACCOUNT_READ_ONLY_CONTROL_TITLE : undefined}
+          className="px-4 py-2 text-[13px] font-medium transition disabled:opacity-50"
           style={{
             background: showAddForm ? "var(--bg-panel)" : "var(--accent-fill)",
             color: showAddForm ? "var(--fg)" : "var(--accent-fg)",

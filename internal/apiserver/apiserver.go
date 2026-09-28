@@ -103,6 +103,10 @@ type Params struct {
 	// slice is wired by the caller.
 	AgentSuppressionAddedHook identity.AgentSuppressionTxHook
 	ManagedUnsubscribeIssuer  agent.ManagedUnsubscribeIssuer
+
+	// SupportContact is the support address named in the account_read_only
+	// error (config notifications.SupportContact()). Optional.
+	SupportContact string
 }
 
 // SenderIdentityEnqueuer is the slice of *senderidentity.Manager apiserver
@@ -124,6 +128,7 @@ type SenderIdentityEnqueuer interface {
 func BuildDeps(p Params) httpapi.Deps {
 	if p.API != nil {
 		p.API.SetManagedUnsubscribeIssuer(p.ManagedUnsubscribeIssuer)
+		p.API.SetSupportContact(p.SupportContact)
 	}
 	var rampSnapshot func(context.Context, string, string, time.Time) (sendramp.Snapshot, error)
 	if p.Pool != nil {
@@ -323,6 +328,11 @@ func BuildDeps(p Params) httpapi.Deps {
 			return httpapi.DomainCheckResult{TXTFound: c.TXTFound, MX: c.MX, SPF: c.SPF, DKIM: c.DKIM}
 		},
 		EnqueueSenderProvision: enqueueSenderProvisionFunc(p),
+
+		// Read-only accounts (sending paused for abuse): the /v1 guard
+		// consults the control row on every write, uncached.
+		AccountReadOnly: p.Store.AccountReadOnly,
+		SupportContact:  p.SupportContact,
 
 		SharedDomain: p.SharedDomain,
 		PublicURL:    p.PublicURL,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -392,7 +393,8 @@ func TestExternalAccessPreflightAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != (sendingpolicy.ExternalAccessStatus{EnforcementApplies: true}) {
+	allUnlocks := []sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval, sendingpolicy.UnlockVerifiedDomain, sendingpolicy.UnlockPaidEntitlement}
+	if want := (sendingpolicy.ExternalAccessStatus{EnforcementApplies: true, AvailableUnlocks: allUnlocks}); !reflect.DeepEqual(st, want) {
 		t.Fatalf("fresh status = %+v", st)
 	}
 	if v, err := m.ExternalAccessPreflight(f.ctx, user, agent, []string{sibling}); err != nil || !v.Allowed || v.Route != sendingpolicy.RouteRestrictedRecipients {
@@ -409,8 +411,8 @@ func TestExternalAccessPreflightAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := sendingpolicy.ExternalAccessStatus{EnforcementApplies: true, SharedExternalApproved: true, PaidExternalSendingEntitled: true, OwnerRecipientVerified: true}
-	if st != want {
+	want := sendingpolicy.ExternalAccessStatus{EnforcementApplies: true, SharedExternalApproved: true, PaidExternalSendingEntitled: true, OwnerRecipientVerified: true, AvailableUnlocks: allUnlocks}
+	if !reflect.DeepEqual(st, want) {
 		t.Fatalf("status = %+v, want %+v", st, want)
 	}
 
@@ -571,6 +573,58 @@ func TestExternalAccessRequests(t *testing.T) {
 		t.Fatal("the audit event outlives the account until its retention expires")
 	}
 	_ = pgx.ErrNoRows
+}
+
+// TestPriorDecidedAccessRequests: the count and outcome the operator notice
+// shows only ever look at DECIDED history, excluding the request currently
+// being filed/notified by id (the real caller passes the fresh, still-pending
+// request's own id; here a placeholder id that matches no row exercises the
+// same exclusion without needing a real pending row).
+func TestPriorDecidedAccessRequests(t *testing.T) {
+	f := newFixture(t)
+	m := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceConfig, esaPolicy(sendingpolicy.ModeEnforce))
+	in := sendingpolicy.AccessRequestInput{UseCase: "support replies", Recipients: "our customers", ExpectedDailyVolume: 20}
+	const notifyTarget = "esar_notify_target_placeholder"
+
+	user := f.user("standard")
+	if n, outcome, err := m.PriorDecidedAccessRequests(f.ctx, user, notifyTarget); err != nil || n != 0 || outcome != "" {
+		t.Fatalf("no history yet: prior = %d %q err=%v, want 0 \"\"", n, outcome, err)
+	}
+
+	req1, _, err := m.SubmitAccessRequest(f.ctx, user, in)
+	if err != nil {
+		t.Fatalf("submit 1: %v", err)
+	}
+	if err := m.DeclineExternalAccessRequest(f.ctx, user, req1.ID, "cli:test"); err != nil {
+		t.Fatalf("decline 1: %v", err)
+	}
+	// Excluding the just-decided request by its own id (as the notify path
+	// would when it is the one currently pending) hides it from its own count.
+	if n, outcome, err := m.PriorDecidedAccessRequests(f.ctx, user, req1.ID); err != nil || n != 0 || outcome != "" {
+		t.Fatalf("excluding the only decided request, prior = %d %q err=%v, want 0 \"\"", n, outcome, err)
+	}
+	if n, outcome, err := m.PriorDecidedAccessRequests(f.ctx, user, notifyTarget); err != nil || n != 1 || outcome != "declined" {
+		t.Fatalf("after one decline, prior = %d %q err=%v, want 1 \"declined\"", n, outcome, err)
+	}
+
+	req2, _, err := m.SubmitAccessRequest(f.ctx, user, in)
+	if err != nil {
+		t.Fatalf("submit 2 (appeal): %v", err)
+	}
+	if _, err := m.SetExternalAccess(f.ctx, sendingpolicy.ExternalAccessChange{
+		AccountID: user, Approved: true, ExpectedRevision: 0, Actor: "cli:test", Reason: "approved on appeal", RequestID: req2.ID,
+	}); err != nil {
+		t.Fatalf("approve 2: %v", err)
+	}
+	if n, outcome, err := m.PriorDecidedAccessRequests(f.ctx, user, notifyTarget); err != nil || n != 2 || outcome != "approved" {
+		t.Fatalf("after decline then approve, prior = %d %q err=%v, want 2 \"approved\" (most recently decided)", n, outcome, err)
+	}
+
+	// A different account's history never leaks in.
+	other := f.user("standard")
+	if n, outcome, err := m.PriorDecidedAccessRequests(f.ctx, other, notifyTarget); err != nil || n != 0 || outcome != "" {
+		t.Fatalf("a fresh account's prior history = %d %q err=%v, want 0 \"\"", n, outcome, err)
+	}
 }
 
 func TestExternalAccessMigrationIsIdempotentAndConservative(t *testing.T) {

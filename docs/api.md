@@ -80,7 +80,8 @@ stable field are beta, `x-experimental-values` on that field):
 - **External sending access** — the `sending_access` object on
   `GET /v1/account` and the `ExternalSendingNotEnabledDetails` shape of the
   experimental `external_sending_not_enabled` error. The control ships
-  disabled; see the error-code table.
+  disabled; see the error-code table and
+  [External sending access](#external-sending-access-beta) below.
 - **Account export interior schemas** — `GET /v1/account/export` is a GA
   operation, but its interior record shapes are versioned by the export's
   `schema_version` envelope field rather than the v1 freeze, and are
@@ -322,6 +323,7 @@ retryable ones (the per-row retry notes in the table below are authoritative).
 | `sending_paused` | 403 | **Experimental.** Outbound sending is paused for the account by the platform abuse controls. Nothing was queued; queued mail is held until an operator resumes. |
 | `external_sending_not_enabled` | 403 | **Experimental.** The account may not send to one or more of the To/Cc/Bcc recipients through its sending identity. Nothing was queued. `error.details` (`ExternalSendingNotEnabledDetails`) lists the allowed destinations and the dashboard recovery URL; retrying the same request will not succeed. |
 | `registration_refused` | 403 | The sign-in identity (login subject or email) belongs to a recently deleted or abuse-closed account and cannot register a new account or restore the old one. Retrying will not succeed; see the privacy policy for the hold periods. |
+| `account_read_only` | 403 | The account is read-only: its sending is paused pending an abuse review, so every write on every surface (REST, dashboard, MCP tools, OAuth consent) is refused. Reads, exports, sign-in/out and moving the account to the trash (`DELETE /v1/account` without `permanent`) keep working. Retrying will not succeed until an operator resumes the account; contact support. `GET /v1/account` reports the state as `read_only: true`. |
 | **Validation** | | |
 | `invalid_request` | 400 / 422 | The canonical input-validation code — malformed (400) or semantically invalid (422). `error.details` carries the per-field list. |
 | `invalid_cursor` | 400 | Bad pagination cursor — drop it and re-fetch from the start. |
@@ -565,6 +567,9 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   of sent/inbound messages are inside the exported `raw_message`. A held
   draft's (`pending_review`) staged attachment bytes are internal transient
   storage and are not inlined.
+- `GET /v1/account/sending-access/request`, `POST /v1/account/sending-access/request`
+  (beta) — the account's latest external sending access request, and filing
+  one. See [External sending access](#external-sending-access-beta).
 - `GET/POST /v1/account/api-keys`, `DELETE /v1/account/api-keys/{id}?confirm=DELETE`
   — mint (plaintext shown once), list (metadata only), and revoke API keys.
   Account scope only.
@@ -592,6 +597,46 @@ Cascading deletes may additionally carry receipt counts (all additive):
 /v1/account` returns the full per-table `DeleteUserDataResult` receipt on top
 of `deleted: true`. Domain deletion adds the durable, open-set
 `sending_teardown` state described below.
+
+#### External sending access (beta)
+
+A deployment may restrict which recipients an account can reach through the
+shared sending identity. When it does, `GET /v1/account` carries an additive
+`sending_access` object (absent when the control is disabled or its state is
+unreadable):
+
+| Field | Meaning |
+| --- | --- |
+| `enforcement_applies` | The deployment enforces the restriction for this account (enforce mode, inside the cohort, not a platform account). Stays `true` after approval. |
+| `shared_external_approved` | An operator approved this account. |
+| `paid_external_sending_entitled` | The account holds the billing-issued paid base entitlement. It lifts the restriction only when `available_unlocks` contains `paid_entitlement`; otherwise it is informational. |
+| `owner_recipient_verified` | The account's sign-in email was verified by a trusted login, so it is an allowed destination while restricted. |
+| `available_unlocks` | The routes this deployment accepts for lifting the restriction, as an open set of strings: `operator_approval` (always present — file a request, an operator reviews it, and the account owner is emailed the decision), `verified_domain` (sending as the account's own verified custom domain), `paid_entitlement` (a paid base plan). Servers that predate the field omit it and accept all three. |
+
+A restricted account can always send to agent inboxes in the same account and
+to its verified account email. Any other To/Cc/Bcc recipient refuses the whole
+send with `403 external_sending_not_enabled`. To lift the restriction:
+
+```json
+POST /v1/account/sending-access/request
+{"use_case": "Order confirmations for customers who signed up on example.com",
+ "recipients": "Our own signed-up customers",
+ "expected_daily_volume": 200}
+```
+
+File **one** request. While it is pending, resubmitting returns the same
+request (`200`); after a decline a new request may be filed, up to 3 per 30
+days (`429 rate_limited` beyond that — do not retry). An account that is not
+currently restricted (already approved, outside the cohort, shadow mode, or
+lifted by an available unlock) gets `409 conflict` and nothing is filed.
+Request text may contain line breaks and tabs but no other control characters,
+Unicode line separators, or bidi override/isolate controls
+(`400 invalid_request`). The decision is emailed
+to the account owner; `GET /v1/account/sending-access/request` shows its
+`state` (`pending`, `approved`, `declined`; open set). The self-host default
+accepts all three unlocks; the hosted e2a service accepts only
+`operator_approval`. The MCP server exposes the same two operations as the
+`request_sending_access` and `get_sending_access_request` tools.
 
 ### Domains (`/v1/domains`)
 

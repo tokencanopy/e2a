@@ -3,7 +3,7 @@
 // file's fixtures untouched; this file adds the extra GET /v1/agents,
 // /v1/domains, and /v1/account fetches the preflight needs.
 
-import { render, screen, within } from "../../../../test-utils/swr";
+import { render, screen, waitFor, within } from "../../../../test-utils/swr";
 import userEvent from "@testing-library/user-event";
 import { PendingRow } from "./PendingRow";
 import type { PendingMessageSummary } from "../../../components/types";
@@ -137,6 +137,52 @@ describe("PendingRow — external sending access preflight", () => {
     render(<PendingRow summary={summary} expanded onToggle={() => {}} onResolved={() => {}} />);
 
     await screen.findByText("Hello, your refund is on the way.");
+    expect(screen.queryByText(/External sending is restricted/)).not.toBeInTheDocument();
+  });
+
+  it("hosted approval-only policy: a verified agent domain does NOT suppress the warning", async () => {
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: { ...restrictedAccount.sending_access, available_unlocks: ["operator_approval"] },
+      },
+      domains: [
+        {
+          domain: "acme.dev",
+          verified: true,
+          capabilities: { inbound: "verified", outbound: "verified" },
+        },
+      ],
+    });
+    render(<PendingRow summary={summary} expanded onToggle={() => {}} onResolved={() => {}} />);
+
+    // Wait until the domains read has settled, so the verified domain is
+    // actually known when the warning is judged.
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/v1/domains", expect.anything()));
+    await screen.findByText("Hello, your refund is on the way.");
+    await waitFor(() => {
+      const warning = screen.getByRole("alert");
+      expect(warning).toHaveTextContent("External sending is restricted for this account");
+      expect(warning).toHaveTextContent("customer@bigco.example");
+    });
+  });
+
+  it("default unlocks: a verified agent domain suppresses the warning after domains settle", async () => {
+    stage({
+      domains: [
+        {
+          domain: "acme.dev",
+          verified: true,
+          capabilities: { inbound: "verified", outbound: "verified" },
+        },
+      ],
+    });
+    render(<PendingRow summary={summary} expanded onToggle={() => {}} onResolved={() => {}} />);
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith("/v1/domains", expect.anything()));
+    await screen.findByText("Hello, your refund is on the way.");
+    // Let every pending fetch resolve, then assert no warning ever renders.
+    await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByText(/External sending is restricted/)).not.toBeInTheDocument();
   });
 

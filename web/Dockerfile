@@ -70,6 +70,13 @@ ARG NEXT_PUBLIC_E2A_SIGN_IN_URL=
 # this to the e2a.dev Umami website record id so the first-party tracker
 # loads on public marketing routes only (the dashboard excludes it).
 ARG NEXT_PUBLIC_UMAMI_WEBSITE_ID=
+# Empty hides the Privacy / Terms footer links and the sign-in consent line
+# (both render only when set; the consent line only when BOTH are set). The
+# hosted deployment sets /privacy (served by its Caddy) and its terms URL.
+# A NEXT_PUBLIC_* value that is not declared here is silently dropped by
+# `docker build`, so every key web/src/lib/site.ts reads must be listed.
+ARG NEXT_PUBLIC_PRIVACY_URL=
+ARG NEXT_PUBLIC_TERMS_URL=
 
 ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     NEXT_PUBLIC_SITE_NAME=$NEXT_PUBLIC_SITE_NAME \
@@ -79,7 +86,9 @@ ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
     NEXT_PUBLIC_PRICING_PATH=$NEXT_PUBLIC_PRICING_PATH \
     NEXT_PUBLIC_BILLING_API=$NEXT_PUBLIC_BILLING_API \
     NEXT_PUBLIC_E2A_SIGN_IN_URL=$NEXT_PUBLIC_E2A_SIGN_IN_URL \
-    NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID
+    NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID \
+    NEXT_PUBLIC_PRIVACY_URL=$NEXT_PUBLIC_PRIVACY_URL \
+    NEXT_PUBLIC_TERMS_URL=$NEXT_PUBLIC_TERMS_URL
 
 COPY web ./
 RUN npm run build

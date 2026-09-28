@@ -36,12 +36,16 @@ func main() {
 	// file with `set -a`, so the runners pick both up with no workflow change.
 	// E2A_TEST_RESTRICTED_API_KEY authenticates the only account inside the
 	// external-sending-access cohort (see testutil.ContractExternalAccessCutoff).
+	// E2A_TEST_RESTRICTED_SDK_API_KEY authenticates a second in-cohort account
+	// reserved for the SDK suites' sending-access request lifecycle.
 	// E2A_TEST_DISPOSABLE_{TRASH,ERASE}_API_KEY authenticate the two throwaway
 	// accounts the account-deletion scenarios delete (once each per server).
+	// E2A_TEST_READONLY_API_KEY authenticates the abuse-paused (read-only)
+	// account; its scenario trashes it at the end (once per server).
 	envContent := fmt.Sprintf(
-		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\nE2A_TEST_RESTRICTED_API_KEY=%s\nE2A_TEST_DISPOSABLE_TRASH_API_KEY=%s\nE2A_TEST_DISPOSABLE_ERASE_API_KEY=%s\n",
+		"E2A_TEST_BASE_URL=%s\nE2A_TEST_API_KEY=%s\nE2A_TEST_CAPPED_API_KEY=%s\nE2A_TEST_OVERCAP_API_KEY=%s\nE2A_TEST_RESTRICTED_API_KEY=%s\nE2A_TEST_DISPOSABLE_TRASH_API_KEY=%s\nE2A_TEST_DISPOSABLE_ERASE_API_KEY=%s\nE2A_TEST_READONLY_API_KEY=%s\nE2A_TEST_RESTRICTED_SDK_API_KEY=%s\n",
 		srv.BaseURL, srv.APIKey, srv.CappedAPIKey, srv.OverCapAPIKey, srv.RestrictedAPIKey,
-		srv.DisposableTrashAPIKey, srv.DisposableEraseAPIKey,
+		srv.DisposableTrashAPIKey, srv.DisposableEraseAPIKey, srv.ReadOnlyAPIKey, srv.RestrictedSDKAPIKey,
 	)
 	if envFile != "" {
 		if err := os.WriteFile(envFile, []byte(envContent), 0o600); err != nil {

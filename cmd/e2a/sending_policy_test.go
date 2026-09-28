@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -330,7 +331,7 @@ func TestSendingProtectionCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("capabilities: %v", err)
 		}
-		for _, want := range []string{`"sending_protection_contract":0`, `"runtime_policy_source":"config"`, `"operator_notice_recipient_commitments":{}`, `"runtime_policy_features":["external_sending_access"]`} {
+		for _, want := range []string{`"sending_protection_contract":0`, `"runtime_policy_source":"config"`, `"operator_notice_recipient_commitments":{}`, `"runtime_policy_features":["external_sending_access","external_sending_unlocks"]`} {
 			if !strings.Contains(out, want) {
 				t.Errorf("capabilities missing %s in %s", want, out)
 			}
@@ -408,5 +409,201 @@ func TestExternalSendingOperatorCommands(t *testing.T) {
 	out, err = run(&sendingProtectionFlags{revokeExternal: true, accountID: "usr_cmd_esa", expectedExternal: 1, reason: "abuse report"})
 	if err != nil || !strings.Contains(out, "external_sending_approved: false") || !strings.Contains(out, "paid-base entitlement") {
 		t.Fatalf("revoke = %q err=%v", out, err)
+	}
+}
+
+type fakeDecisionNotifier struct {
+	calls []string
+	err   error
+}
+
+func (f *fakeDecisionNotifier) NotifyDecision(_ context.Context, requestID string) error {
+	f.calls = append(f.calls, requestID)
+	return f.err
+}
+
+// The decision notice goes out only for a decided request, after the
+// decision committed; a failed notice is a warning line and never fails the
+// command (the decision stands).
+func TestExternalSendingDecisionNotice(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	clearEnvForTest(t)
+	policy := sendingpolicy.DisabledPolicy()
+	policy.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{Mode: sendingpolicy.ModeEnforce, AccountsCreatedAtOrAfter: "1970-01-01T00:00:00Z",
+		Unlocks: []sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval}}
+	module := sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, policy)
+	newRequest := func(user string) string {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO users (id, email, google_subject) VALUES ($1, $1 || '@notice-cmd.example.test', 'sub-' || $1)`, user); err != nil {
+			t.Fatal(err)
+		}
+		req, created, err := module.SubmitAccessRequest(ctx, user, sendingpolicy.AccessRequestInput{UseCase: "synthetic", Recipients: "synthetic", ExpectedDailyVolume: 1})
+		if err != nil || !created {
+			t.Fatalf("submit: %v", err)
+		}
+		return req.ID
+	}
+
+	// Decline, notice fails: the command succeeds and prints a warning.
+	reqA := newRequest("usr_notice_cmd_a")
+	failing := &fakeDecisionNotifier{err: errors.New("relay refused")}
+	var out bytes.Buffer
+	if err := runExternalSendingCommand(ctx, module, failing, &sendingProtectionFlags{declineExternal: true, accountID: "usr_notice_cmd_a", requestID: reqA}, &out); err != nil {
+		t.Fatalf("decline with a failing notice must still succeed: %v", err)
+	}
+	if len(failing.calls) != 1 || failing.calls[0] != reqA || !strings.Contains(out.String(), "warning:") || !strings.Contains(out.String(), "decision stands") {
+		t.Fatalf("calls=%v out=%q", failing.calls, out.String())
+	}
+	if latest, err := module.LatestAccessRequest(ctx, "usr_notice_cmd_a"); err != nil || latest.State != "declined" {
+		t.Fatalf("the decline must have committed: %+v %v", latest, err)
+	}
+
+	// Approve deciding a request: notice sent.
+	reqB := newRequest("usr_notice_cmd_b")
+	ok := &fakeDecisionNotifier{}
+	out.Reset()
+	if err := runExternalSendingCommand(ctx, module, ok, &sendingProtectionFlags{approveExternal: true, accountID: "usr_notice_cmd_b", expectedExternal: 0, reason: "reviewed", requestID: reqB}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(ok.calls) != 1 || ok.calls[0] != reqB || !strings.Contains(out.String(), "decision_notice:          sent") {
+		t.Fatalf("calls=%v out=%q", ok.calls, out.String())
+	}
+	if !strings.Contains(out.String(), "available_unlocks:        operator_approval") {
+		t.Fatalf("readback must show the unlock set: %q", out.String())
+	}
+
+	// A direct grant with no request (pre-granting before a rollout) sends
+	// nothing.
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, email, google_subject) VALUES ('usr_notice_cmd_c', 'c@notice-cmd.example.test', 'sub-c')`); err != nil {
+		t.Fatal(err)
+	}
+	direct := &fakeDecisionNotifier{}
+	out.Reset()
+	if err := runExternalSendingCommand(ctx, module, direct, &sendingProtectionFlags{approveExternal: true, accountID: "usr_notice_cmd_c", expectedExternal: 0, reason: "pre-grant"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(direct.calls) != 0 {
+		t.Fatalf("a direct grant must not send a decision notice: %v", direct.calls)
+	}
+
+	// No relay configured: warning, success.
+	reqD := newRequest("usr_notice_cmd_d")
+	out.Reset()
+	if err := runExternalSendingCommand(ctx, module, nil, &sendingProtectionFlags{declineExternal: true, accountID: "usr_notice_cmd_d", requestID: reqD}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "no outbound SMTP relay is configured") {
+		t.Fatalf("out=%q", out.String())
+	}
+}
+
+func TestListExternalSendingRequestsAndPendingWarning(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	clearEnvForTest(t)
+	cfg := spTestConfig()
+	cfg.SendingProtect.ExternalSendingAccess = &config.ExternalSendingAccessConfig{Mode: "enforce", AccountsCreatedAtOrAfter: "1970-01-01T00:00:00Z",
+		Unlocks: []string{"operator_approval"}}
+	policy, err := sendingpolicy.FromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, policy)
+	file := func(user string) string {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO users (id, email, google_subject) VALUES ($1, $1 || '@list-cmd.example.test', 'sub-' || $1)`, user); err != nil {
+			t.Fatal(err)
+		}
+		req, _, err := module.SubmitAccessRequest(ctx, user, sendingpolicy.AccessRequestInput{UseCase: "synthetic secret use case", Recipients: "synthetic", ExpectedDailyVolume: 42})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req.ID
+	}
+	reqA := file("usr_list_a")
+	reqB := file("usr_list_b")
+	if err := module.DeclineExternalAccessRequest(ctx, "usr_list_b", reqB, "cli:test"); err != nil {
+		t.Fatal(err)
+	}
+	run := func(f *sendingProtectionFlags) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runSendingProtectionCommand(ctx, cfg, pool, sendingpolicy.Secrets{}, f, &out); err != nil {
+			t.Fatalf("command: %v", err)
+		}
+		return out.String()
+	}
+
+	out := run(&sendingProtectionFlags{listExternal: true})
+	for _, want := range []string{"requests (pending, oldest first):           1", "request_id:               " + reqA, "account_id:               usr_list_a",
+		"state:                    pending", "expected_daily_volume:    42", "external_sending_approved: false", "created_at:"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("pending listing missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, reqB) {
+		t.Fatalf("a decided request must not appear without -all:\n%s", out)
+	}
+	if strings.Contains(out, "secret use case") || strings.Contains(out, "@") {
+		t.Fatalf("the listing must not print customer text or addresses:\n%s", out)
+	}
+	all := run(&sendingProtectionFlags{listExternal: true, listAll: true})
+	if !strings.Contains(all, "requests (all, newest first):           2") || strings.Index(all, reqB) > strings.Index(all, reqA) || strings.Contains(all, "truncated:") || !strings.Contains(all, "state:                    declined") || !strings.Contains(all, "decided_at:") {
+		t.Fatalf("-all listing:\n%s", all)
+	}
+
+	// A direct grant while a request is pending warns and does not decide it.
+	var buf bytes.Buffer
+	if err := runExternalSendingCommand(ctx, module, &fakeDecisionNotifier{}, &sendingProtectionFlags{approveExternal: true, accountID: "usr_list_a", expectedExternal: 0, reason: "direct"}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "warning:                  request "+reqA+" is still pending; re-run with -external-sending-request-id "+reqA) {
+		t.Fatalf("missing pending warning:\n%s", buf.String())
+	}
+	if latest, _ := module.LatestAccessRequest(ctx, "usr_list_a"); latest == nil || latest.State != "pending" {
+		t.Fatalf("a direct grant must not auto-decide the request: %+v", latest)
+	}
+}
+
+func TestAllFlagRequiresListCommand(t *testing.T) {
+	f := &sendingProtectionFlags{listAll: true}
+	if err := f.validateStandalone(); err == nil {
+		t.Fatal("-all without -list-external-sending-requests must be rejected before the server starts")
+	}
+	if err := (&sendingProtectionFlags{listAll: true, listExternal: true}).validateStandalone(); err != nil {
+		t.Fatalf("-all with the list command is valid: %v", err)
+	}
+	if err := (&sendingProtectionFlags{}).validateStandalone(); err != nil {
+		t.Fatalf("no flags is valid: %v", err)
+	}
+}
+
+func TestListExternalSendingRequestsReportsTruncation(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	module := sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, sendingpolicy.DisabledPolicy())
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id, email, google_subject)
+		SELECT 'usr_trunc_' || g, 'usr_trunc_' || g || '@trunc.example.test', 'sub_trunc_' || g FROM generate_series(1, $1) AS g`,
+		sendingpolicy.MaxAccessRequestListing+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO external_sending_access_requests (id, user_id, use_case, recipients, expected_daily_volume, created_at)
+		SELECT 'esar_trunc_' || g, 'usr_trunc_' || g, 'synthetic', 'synthetic', 1, now() - make_interval(secs => g)
+		  FROM generate_series(1, $1) AS g`, sendingpolicy.MaxAccessRequestListing+1); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runListExternalRequests(ctx, module, true, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), fmt.Sprintf("truncated:                listing stopped at %d requests", sendingpolicy.MaxAccessRequestListing)) {
+		t.Fatal("a listing that hit the bound must say so")
+	}
+	// Newest first: the most recent request (g=1) is shown, the oldest dropped.
+	if !strings.Contains(out.String(), "esar_trunc_1\n") || strings.Contains(out.String(), fmt.Sprintf("esar_trunc_%d\n", sendingpolicy.MaxAccessRequestListing+1)) {
+		t.Fatal("-all must keep the newest requests when truncating")
 	}
 }

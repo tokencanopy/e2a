@@ -339,6 +339,10 @@ const (
 	NotificationHITLMessage NotificationSource = "hitl_message"
 	// NotificationWebhookHealth is a webhook warning/disabled episode.
 	NotificationWebhookHealth NotificationSource = "webhook_health"
+	// NotificationSendingAccessDecision is an operator decision (approved
+	// or declined) on an external sending access request, reported to the
+	// account owner.
+	NotificationSendingAccessDecision NotificationSource = "sending_access_decision"
 )
 
 // NotificationRef names one supported notification source row. It has no
@@ -378,9 +382,18 @@ func HITLNotificationOperationID(messageID string) string {
 }
 
 const (
-	hitlOperationPrefix          = "op_hitl_"
-	webhookHealthOperationPrefix = "op_wh_"
+	hitlOperationPrefix           = "op_hitl_"
+	webhookHealthOperationPrefix  = "op_wh_"
+	accessDecisionOperationPrefix = "op_esad_"
 )
+
+// SendingAccessDecisionOperationID is the operation id of the decision
+// notice for one request. A request is decided exactly once, so keying the
+// operation by it makes a second preparation resume the same operation
+// instead of minting a second notice.
+func SendingAccessDecisionOperationID(requestID string) string {
+	return accessDecisionOperationPrefix + requestID
+}
 
 // IsHITLNotificationOperationID reports whether an id has the source-derived
 // shape above. An id of any other shape — migration 113 stamped adopted
@@ -419,6 +432,15 @@ func NewHITLNotificationRef(messageID string) NotificationRef {
 // sweep never stamped is ErrSourceUnavailable.
 func NewWebhookHealthNotificationRef(webhookID, kind string) NotificationRef {
 	return NotificationRef{source: NotificationWebhookHealth, id: webhookID, kind: kind}
+}
+
+// NewSendingAccessDecisionNotificationRef references a DECIDED external
+// sending access request whose outcome is being reported to the account
+// owner. PrepareNotificationTx reads the request row and refuses a request
+// that is still pending (ErrSourceUnavailable): there is no decision to
+// report, so nothing to authorize.
+func NewSendingAccessDecisionNotificationRef(requestID string) NotificationRef {
+	return NotificationRef{source: NotificationSendingAccessDecision, id: requestID}
 }
 
 // ProtectionNoticeRef names one already-committed notice event and audience.

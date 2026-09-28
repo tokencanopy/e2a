@@ -44,6 +44,9 @@ type AccountView struct {
 	// restore so a client can show a one-time notice.
 	DeletedAt  *time.Time `json:"deleted_at,omitempty" doc:"When the account was moved to the trash. Absent for a live account."`
 	PurgeAfter *time.Time `json:"purge_after,omitempty" doc:"When a trashed account becomes eligible for permanent purge. Absent for a live account."`
+	// ReadOnly is true while the account is read-only (sending paused for an
+	// abuse review): every write is refused with 403 account_read_only.
+	ReadOnly   *bool      `json:"read_only,omitempty" doc:"True while the account is read-only because its sending is paused pending an abuse review: every write is refused with 403 account_read_only, while reads and moving the account to the trash keep working. False otherwise. Absent when the deployment does not report it or its state is unavailable."`
 	RestoredAt *time.Time `json:"restored_at,omitempty" doc:"When the account was last restored from the trash. Absent if it never was. API keys and domain verification do not survive a trash: keys must be re-created and domains re-verified after a restore."`
 }
 
@@ -366,6 +369,7 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 		Usage:         usage,
 		UpgradeURL:    caps.UpgradeURL,
 		SendingAccess: s.accountSendingAccess(ctx, user.ID),
+		ReadOnly:      s.accountReadOnlyView(ctx, user.ID),
 		DeletedAt:     user.DeletedAt,
 		PurgeAfter:    user.PurgeAfter(),
 		RestoredAt:    user.RestoredAt,

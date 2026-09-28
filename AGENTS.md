@@ -313,7 +313,8 @@ manually on every API change even though the template won't remind you.
   (`cli/src/exit.ts`) are a frozen contract** — 0 ok, 1 transient, 2 usage,
   3 held-for-review, 4 auth, 5 permanent request error, 6 timeout,
   7 send-outcome, 8 warn (`doctor` warnings only), 9 config (`doctor` found a
-  definite configuration failure). Add new codes, never renumber.
+  definite configuration failure), 10 read-only (`account_read_only`: the
+  account is frozen for an abuse review). Add new codes, never renumber.
 - **MCP server** (`mcp/`): inbox tools over the REST API; hosted HTTP
   transport (image `ghcr.io/tokencanopy/e2a-mcp-http`). **npm publishing is
   retired** (`@e2a/mcp-server` frozen at 0.5.0) — do not configure a trusted

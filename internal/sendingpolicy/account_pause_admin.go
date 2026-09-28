@@ -204,6 +204,14 @@ func (m *Module) InspectAccountPause(ctx context.Context, accountID string) (Acc
 	return rec, nil
 }
 
+// ReadOnly reports whether the record describes a read-only account: sending
+// paused with pause class abuse. It mirrors identity.Store.AccountReadOnly,
+// which the request guards consult; TestAccountPauseReadbackReportsReadOnly
+// pins the two against each other.
+func (r AccountPauseRecord) ReadOnly() bool {
+	return r.State == "paused" && r.PauseClass == PauseClassAbuse
+}
+
 func nullIfEmpty(v string) any {
 	if v == "" {
 		return nil

@@ -26,6 +26,10 @@ var errorCodeCatalog = []errorCodeContract{
 	// An identity held by a live identity tombstone (a recently deleted or
 	// abuse-closed account) cannot register or be restored.
 	{Code: "registration_refused", Status: "403", Family: "auth"},
+	// The account is read-only: its sending is paused pending an abuse
+	// review, so every write is refused (reads and the account trash keep
+	// working) until an operator resumes it.
+	{Code: "account_read_only", Status: "403", Family: "auth"},
 	{Code: "invalid_request", Status: "400 / 422", Family: "validation", DetailsSchema: "ValidationErrorDetails"},
 	{Code: "invalid_cursor", Status: "400", Family: "validation"},
 	{Code: "invalid_filter", Status: "400", Family: "validation"},

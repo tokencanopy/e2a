@@ -260,6 +260,12 @@ func (a *API) handleAttachExternalPrincipal(w http.ResponseWriter, r *http.Reque
 	case errors.Is(err, identity.ErrAccountTrashed):
 		writeProvisionError(w, http.StatusConflict, "account_trashed")
 		return
+	case errors.Is(err, identity.ErrAccountReadOnly):
+		// Read-only accounts (sending paused for abuse) take no NEW sign-in
+		// principal; replaying an existing mapping stays 200. Checked in the
+		// store's attach transaction.
+		writeProvisionError(w, http.StatusForbidden, identity.AccountReadOnlyCode)
+		return
 	case errors.Is(err, identity.ErrRegistrationRefused):
 		writeProvisionError(w, http.StatusForbidden, "registration_refused")
 		return

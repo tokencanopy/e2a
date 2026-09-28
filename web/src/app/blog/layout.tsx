@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { SITE_URL } from "../../lib/site";
+import { LegalFooterLinks } from "../components/LegalFooterLinks";
 
 const TITLE = "Blog — e2a, email for AI agents";
 const DESC =
@@ -90,6 +91,10 @@ export default function BlogLayout({ children }: { children: React.ReactNode }) 
         >
           e2a
         </span>
+        <LegalFooterLinks
+          className="flex gap-3 text-[12px]"
+          linkStyle={{ color: "var(--fg-muted)" }}
+        />
         <span
           className="font-mono text-[12px]"
           style={{ color: "var(--fg-subtle)" }}

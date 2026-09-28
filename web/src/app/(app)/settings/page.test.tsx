@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "../../../test-utils/swr";
 import SettingsPage from "./page";
 
 // jsdom doesn't provide navigator.clipboard. The signing-secret Copy
@@ -37,14 +37,18 @@ beforeEach(() => {
     loading: false,
     signOut,
   };
-  // Generic fetch stub. The Settings page no longer fetches on mount
-  // (the Usage section was removed); the delete-account test overrides
-  // this with its own deferred mock.
+  // Generic fetch stub for GET /v1/account and GET
+  // /v1/account/sending-access/request (the sending-access status row's
+  // two background reads on every mount) and anything else this suite
+  // doesn't care about: an empty 200 body has no `sending_access` field,
+  // so the row renders nothing and the rest of these tests are unaffected.
+  // The delete-account tests and the dedicated sending-access-row tests
+  // below override this with their own mock.
   global.fetch = jest.fn(async () => ({
     ok: true,
     status: 200,
     json: async () => ({}),
-    text: async () => "",
+    text: async () => "{}",
   })) as unknown as typeof fetch;
 });
 
@@ -73,6 +77,122 @@ describe("Settings — Export section", () => {
   });
 });
 
+// Mirrors the mocking pattern in app/(app)/sending-access/page.test.tsx:
+// route GET /v1/account and GET /v1/account/sending-access/request off the
+// same fetch mock so the row's two background reads settle independently.
+const restrictedSendingAccess = {
+  enforcement_applies: true,
+  shared_external_approved: false,
+  paid_external_sending_entitled: false,
+  owner_recipient_verified: true,
+};
+
+const notFoundRequest = { status: 404, body: { error: { code: "not_found", message: "no request on file" } } };
+
+function requestView(state: string) {
+  return {
+    status: 200,
+    body: {
+      id: "sar_1",
+      state,
+      use_case: "Sending order confirmations to our customers.",
+      recipients: "Our own customers who signed up",
+      expected_daily_volume: 250,
+      created_at: "2026-01-01T00:00:00Z",
+      ...(state !== "pending" ? { decided_at: "2026-01-02T00:00:00Z" } : {}),
+    },
+  };
+}
+
+function stageSendingAccess(
+  sendingAccess: Record<string, unknown> | undefined,
+  requestGet: { status: number; body: unknown } = notFoundRequest,
+) {
+  global.fetch = jest.fn((url: string) => {
+    if (url === "/v1/account") {
+      const body = {
+        user: { id: "usr_abc123", email: "alice@example.com" },
+        scope: "account",
+        plan_code: "free",
+        limits: { max_agents: 3, max_domains: 1, max_messages_month: 3000, max_storage_bytes: 1_000_000 },
+        usage: { agents: 1, domains: 0, messages_month: 0, storage_bytes: 0 },
+        upgrade_url: "",
+        ...(sendingAccess ? { sending_access: sendingAccess } : {}),
+      };
+      return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+    }
+    if (url === "/v1/account/sending-access/request") {
+      return Promise.resolve({
+        ok: requestGet.status >= 200 && requestGet.status < 300,
+        status: requestGet.status,
+        text: async () => JSON.stringify(requestGet.body),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, text: async () => "{}" });
+  }) as unknown as typeof fetch;
+}
+
+describe("Settings — Sending access row", () => {
+  it("renders no row at all when the deployment has no sending_access object", async () => {
+    stageSendingAccess(undefined);
+    render(<SettingsPage />);
+
+    // Let both background reads settle before asserting absence.
+    await screen.findByText("Alice");
+    await waitFor(() => expect(screen.queryByText(/External sending/)).not.toBeInTheDocument());
+  });
+
+  it("shows Restricted with no request on file", async () => {
+    stageSendingAccess(restrictedSendingAccess, notFoundRequest);
+    render(<SettingsPage />);
+
+    const value = await screen.findByRole("link", { name: "Restricted" });
+    expect(value).toHaveAttribute("href", "/sending-access");
+    expect(screen.getByText("External sending")).toBeInTheDocument();
+  });
+
+  it("shows Restricted — request under review for a pending request", async () => {
+    stageSendingAccess(restrictedSendingAccess, requestView("pending"));
+    render(<SettingsPage />);
+
+    expect(
+      await screen.findByRole("link", { name: "Restricted — request under review" }),
+    ).toHaveAttribute("href", "/sending-access");
+  });
+
+  it("shows Restricted — request declined for the latest declined request", async () => {
+    stageSendingAccess(restrictedSendingAccess, requestView("declined"));
+    render(<SettingsPage />);
+
+    expect(
+      await screen.findByRole("link", { name: "Restricted — request declined" }),
+    ).toHaveAttribute("href", "/sending-access");
+  });
+
+  it("shows Enabled — operator approved once an operator grants access", async () => {
+    stageSendingAccess(
+      { ...restrictedSendingAccess, shared_external_approved: true },
+      requestView("approved"),
+    );
+    render(<SettingsPage />);
+
+    expect(
+      await screen.findByRole("link", { name: "Enabled — operator approved" }),
+    ).toHaveAttribute("href", "/sending-access");
+  });
+
+  it("shows Enabled — paid plan when the paid entitlement lifts the restriction", async () => {
+    stageSendingAccess(
+      { ...restrictedSendingAccess, paid_external_sending_entitled: true },
+      notFoundRequest,
+    );
+    render(<SettingsPage />);
+
+    expect(
+      await screen.findByRole("link", { name: "Enabled — paid plan" }),
+    ).toHaveAttribute("href", "/sending-access");
+  });
+});
 
 const mockHardNavigate = jest.fn();
 jest.mock("../../../lib/navigation", () => ({
@@ -119,7 +239,7 @@ describe("Settings — Danger zone (delete account)", () => {
   });
 
   it("moves the account to the trash by default (no permanent flag) and redirects home", async () => {
-    const fetchMock = jest.fn(async () => ({
+    const fetchMock = jest.fn(async (_url: string) => ({
       ok: true,
       status: 200,
       text: async () => '{"deleted":true,"mode":"trash"}',
@@ -133,7 +253,11 @@ describe("Settings — Danger zone (delete account)", () => {
     fireEvent.click(screen.getByRole("button", { name: /delete my account/i }));
 
     await waitFor(() => expect(mockHardNavigate).toHaveBeenCalledWith("/?account_deleted=1"));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Exactly one DELETE call — the sending-access status row's own
+    // background reads (GET /v1/account, GET .../sending-access/request)
+    // share this same mock and must not be confused with it.
+    const deleteCalls = fetchMock.mock.calls.filter(([url]) => url === "/v1/account?confirm=DELETE");
+    expect(deleteCalls).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledWith(
       "/v1/account?confirm=DELETE",
       expect.objectContaining({ method: "DELETE", credentials: "include" }),

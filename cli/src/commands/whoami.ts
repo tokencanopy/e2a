@@ -1,5 +1,6 @@
 import { createClient } from "../sdk.js";
 import { loadConfig } from "../config.js";
+import { isRestricted, restrictedLine } from "./sending-access.js";
 
 export interface WhoamiOptions {
   json?: boolean;
@@ -41,18 +42,25 @@ export async function whoami(opts: WhoamiOptions): Promise<void> {
   if (account.restoredAt) {
     process.stdout.write(`restored: ${account.restoredAt.toISOString()} (from trash)\n`);
   }
+  // Read-only accounts: sending is paused for an abuse review and every write
+  // is refused (account_read_only, exit 10). Say so up front so a preflight
+  // does not go on to attempt writes that cannot succeed.
+  if (account.readOnly) {
+    process.stdout.write(
+      "read-only: yes (sending is paused pending an abuse review; reads still work, " +
+        "every change is refused — contact support)\n",
+    );
+  }
 
   // Beta, additive: `sending_access` is omitted entirely on a deployment that
   // doesn't run this control, so say nothing rather than printing a
   // misleading "unrestricted". Only surface a line when this account is
   // ACTUALLY restricted right now (enforced, and neither grant applies) —
   // an unrestricted or already-approved account gets no new noise here.
+  // A paid plan counts as a grant only where the deployment's
+  // `available_unlocks` lists paid_entitlement.
   const access = account.sendingAccess;
-  if (access && access.enforcementApplies && !access.sharedExternalApproved && !access.paidExternalSendingEntitled) {
-    process.stdout.write(
-      "External sending: restricted (send to your verified account email and agent inboxes in " +
-        "this account; request approval with: e2a sending-access request --use-case <text> " +
-        "--recipients <text> --volume <n>)\n",
-    );
+  if (access && isRestricted(access)) {
+    process.stdout.write(restrictedLine(access) + "\n");
   }
 }

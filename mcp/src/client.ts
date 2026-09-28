@@ -63,6 +63,8 @@ import type {
   AgentSuppressionView,
   CreateAgentSuppressionRequest,
   DeleteSuppressionResult,
+  SendingAccessRequestInput,
+  SendingAccessRequestView,
 } from "@e2a/sdk/v1";
 import type { McpConfig } from "./config.js";
 import type { Scope } from "./tools/tiers.js";
@@ -133,6 +135,16 @@ export class McpClient {
   // agent — discover agents via list_agents.
   whoami(): Promise<AccountView> {
     return this.sdk.account.get();
+  }
+
+  // External sending access (beta) — GET/POST /v1/account/sending-access/request.
+  // Account scope only; filing never grants access by itself.
+  getSendingAccessRequest(): Promise<SendingAccessRequestView> {
+    return this.sdk.account.getSendingAccessRequest();
+  }
+
+  requestSendingAccess(body: SendingAccessRequestInput): Promise<SendingAccessRequestView> {
+    return this.sdk.account.requestSendingAccess(body);
   }
 
   // ── Agents ──────────────────────────────────────────────────────

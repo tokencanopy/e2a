@@ -60,6 +60,57 @@ export const UMAMI_COLLECTOR_ORIGIN = process.env.NEXT_PUBLIC_UMAMI_COLLECTOR_OR
 // and listing a 404 in a sitemap is a crawl-quality problem, not a no-op.
 export const PRICING_PATH = process.env.NEXT_PUBLIC_PRICING_PATH || "";
 
+// Site-relative paths or absolute URLs of the hosted deployment's Privacy
+// Policy and Terms of Service pages.
+//
+// Like pricing, these are NOT part of this app: the hosted deployment's
+// legal pages live in the private ops repo and are baked in as
+// NEXT_PUBLIC_PRIVACY_URL / NEXT_PUBLIC_TERMS_URL at image build time. A
+// self-host or staging build that hasn't set them gets an empty string —
+// every footer link and the sign-in consent line that reference these stay
+// hidden entirely rather than pointing at a 404 or making a legal claim the
+// deployment can't back up. Either value may be a same-origin path (e.g.
+// "/privacy") or an absolute URL on a different host (e.g. the ops repo's
+// own static route).
+export const PRIVACY_URL = process.env.NEXT_PUBLIC_PRIVACY_URL || "";
+export const TERMS_URL = process.env.NEXT_PUBLIC_TERMS_URL || "";
+
+// True when `url` is an absolute URL whose origin differs from this
+// deployment's own SITE_URL — i.e. it needs target="_blank" + rel=noopener
+// like the other external FOOTER_LINKS, rather than an in-app <Link>. A
+// same-origin path (e.g. "/privacy") is always internal, and an absolute URL
+// that happens to resolve to SITE_URL's own origin is treated the same way
+// so a fully-qualified same-origin value behaves identically to a path.
+// Malformed input (neither a path nor a parseable absolute URL) is treated
+// as internal — the safer default for a value that's already misconfigured.
+export function isExternalURL(url: string): boolean {
+  if (!url || url.startsWith("/")) return false;
+  try {
+    return new URL(url).origin !== new URL(SITE_URL).origin;
+  } catch {
+    return false;
+  }
+}
+
+export type LegalLink = { label: string; href: string; external: boolean };
+
+// Privacy/Terms entries for a public-page footer, in display order. Each
+// entry is present only when its URL is configured — see PRIVACY_URL /
+// TERMS_URL — so every footer that spreads this in renders nothing extra on
+// a self-host or staging build. Centralized here so the landing page, blog,
+// docs, and MCP footers all present the same pair rather than each growing
+// its own copy that can drift.
+export function legalFooterLinks(): LegalLink[] {
+  const links: LegalLink[] = [];
+  if (PRIVACY_URL) {
+    links.push({ label: "Privacy", href: PRIVACY_URL, external: isExternalURL(PRIVACY_URL) });
+  }
+  if (TERMS_URL) {
+    links.push({ label: "Terms", href: TERMS_URL, external: isExternalURL(TERMS_URL) });
+  }
+  return links;
+}
+
 // Sign-in entry point for the dashboard's "Sign in" links. Defaults to the
 // legacy Google OAuth door, which every self-host deployment has. The hosted
 // deployment bakes in NEXT_PUBLIC_E2A_SIGN_IN_URL=/api/auth/oidc/login at

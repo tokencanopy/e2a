@@ -66,7 +66,8 @@ e2a keys create --agent bot@acme.com
 Show the key identity: user, scope, bound agent, plan. When the deployment
 reports `sending_access` (beta — see `e2a sending-access` below) and this
 account is currently restricted to the narrow shared-identity allowlist, an
-extra `External sending: restricted (...)` line points at how to recover. If
+extra `External sending: restricted (...)` line points at how to recover —
+naming only the routes the deployment's `available_unlocks` honors. If
 the account was restored from the trash (`e2a account delete` below), an
 extra `restored: <timestamp> (from trash)` line appears. `--json` always
 includes the raw `sending_access` object when present.
@@ -383,10 +384,13 @@ External sending access is a platform control on the shared sending identity:
 while an account is restricted, it may only send to its verified account
 email and to agent inboxes in the same account — any other To/Cc/Bcc refuses
 the whole send with `external_sending_not_enabled` (see `e2a send`/`e2a
-reply` below). `status` shows the current restriction and the account's
-latest access request, if any; `request` files a new one for support to
-review. Filing never grants access by itself, and is capped at 3 requests per
-30 days.
+reply` below). `status` shows the current restriction, the deployment's
+`available unlocks` (`operator_approval` always; `verified_domain` and
+`paid_entitlement` only where the deployment accepts them — the hosted service
+accepts approval only), and the account's latest access request, if any;
+`request` files a new one for an operator to review. File one request: the
+decision is emailed to the account owner. Filing never grants access by
+itself, and is capped at 3 requests per 30 days.
 
 ```bash
 e2a sending-access status
@@ -519,3 +523,4 @@ only added to.
 | `7` | A persisted send failed or returned an unrecognized outcome — do not retry; inspect the returned message id |
 | `8` | Diagnostics (`doctor`) completed with warnings only — nothing broken |
 | `9` | Diagnostics (`doctor`) found a definite configuration failure — do not retry; fix the reported configuration |
+| `10` | The account is read-only (`account_read_only`): sending is paused pending an abuse review, so every write is refused — do not retry or rotate keys; contact support |

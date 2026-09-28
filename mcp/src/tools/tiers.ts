@@ -145,6 +145,10 @@ export const ADMIN_TOOLS: ReadonlySet<string> = new Set([
   // handler enforces it with requireAccountUser. An agent-scoped session sees
   // get_agent_metrics instead, which covers its own inbox.
   "get_account_metrics",
+  // External sending access requests are account-scoped on the server
+  // (requireAccountUser): an agent-scoped credential cannot file or read one.
+  "get_sending_access_request",
+  "request_sending_access",
 ]);
 
 export type Scope = "account" | "agent";

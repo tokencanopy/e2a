@@ -12,6 +12,13 @@ import {
 import type { McpClient } from "../src/client.js";
 import { buildServer } from "../src/server.js";
 import { ADMIN_TOOLS, assertToolTiersComplete, toolNamesForScope, RUNTIME_TOOLS } from "../src/tools/tiers.js";
+import {
+  assertMutatingClassificationComplete,
+  MUTATING_META_KEY,
+  MUTATING_TOOLS,
+  NON_MUTATING_TOOLS,
+  TOOL_OPERATIONS,
+} from "../src/tools/mutating.js";
 import { messageSummaryViewForTool, registerMessageTools } from "../src/tools/messages.js";
 import { registerAgentTools } from "../src/tools/agents.js";
 import { registerDomainTools } from "../src/tools/domains.js";
@@ -24,6 +31,7 @@ import { registerLegacyTools } from "../src/tools/legacy.js";
 import { registerContactTools } from "../src/tools/contacts.js";
 import { registerSuppressionTools } from "../src/tools/suppressions.js";
 import { registerMetricsTools } from "../src/tools/metrics.js";
+import { registerSendingAccessTools } from "../src/tools/sendingaccess.js";
 import { CodedError, runTool, toMcpOutput } from "../src/tools/util.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -584,7 +592,7 @@ describe("e2a MCP server", () => {
   // account scope sees the full surface; agent scope sees only the runtime tier.
 
   it("keeps the frozen v1 tool-name baseline sorted, unique, and callable", async () => {
-    expect(frozenToolNames).toHaveLength(78);
+    expect(frozenToolNames).toHaveLength(80);
     expect(frozenToolNames).toEqual([...new Set(frozenToolNames)].sort());
     const accountNames = new Set((await client.listTools()).tools.map((tool) => tool.name));
     for (const name of frozenToolNames) {
@@ -615,11 +623,41 @@ describe("e2a MCP server", () => {
     registerContactTools(recorder, stub);
     registerSuppressionTools(recorder, stub);
     registerMetricsTools(recorder, stub);
+    registerSendingAccessTools(recorder, stub);
     registerLegacyTools(recorder, stub);
 
-    expect(names).toHaveLength(78);
+    expect(names).toHaveLength(80);
     // Throws if any registered tool is untiered / double-tiered / phantom.
     expect(() => assertToolTiersComplete(names)).not.toThrow();
+  });
+
+  it("every registered tool is classified mutating or not (read-only drift guard)", () => {
+    // Same true registered set as the tier guard above: an unclassified tool
+    // would leave agents unable to know whether it works while the account
+    // is read-only (docs/design/account-read-only.md).
+    const names: string[] = [];
+    const recorder = {
+      registerTool: (name: string) => {
+        names.push(name);
+        return undefined;
+      },
+    } as unknown as McpServer;
+    const stub = makeStubClient();
+    registerMessageTools(recorder, stub);
+    registerAgentTools(recorder, stub);
+    registerDomainTools(recorder, stub);
+    registerReviewTools(recorder, stub);
+    registerWebhookTools(recorder, stub);
+    registerEventTools(recorder, stub);
+    registerTemplateTools(recorder, stub);
+    registerApiKeyTools(recorder, stub);
+    registerContactTools(recorder, stub);
+    registerSuppressionTools(recorder, stub);
+    registerMetricsTools(recorder, stub);
+    registerSendingAccessTools(recorder, stub);
+    registerLegacyTools(recorder, stub);
+    expect(() => assertMutatingClassificationComplete(names)).not.toThrow();
+    expect(() => assertMutatingClassificationComplete([...names, "brand_new_tool"])).toThrow(/unclassified: brand_new_tool/);
   });
 
   it("unrecognized scope falls back to the runtime tier (least privilege)", () => {
@@ -627,14 +665,14 @@ describe("e2a MCP server", () => {
     expect(toolNamesForScope("")).toBe(RUNTIME_TOOLS);
     expect(toolNamesForScope("agent")).toBe(RUNTIME_TOOLS);
     expect(RUNTIME_TOOLS.size).toBe(21);
-    expect(ADMIN_TOOLS.size).toBe(57);
-    expect(toolNamesForScope("account").size).toBe(78);
+    expect(ADMIN_TOOLS.size).toBe(59);
+    expect(toolNamesForScope("account").size).toBe(80);
   });
 
-  it("account scope exposes all 78 canonical and compatibility tools", async () => {
+  it("account scope exposes all 80 canonical and compatibility tools", async () => {
     const acct = await connect(makeStubClient({ scope: "account" }));
     const { tools } = await acct.listTools();
-    expect(tools).toHaveLength(78);
+    expect(tools).toHaveLength(80);
     const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["list_reviews", "get_review", "approve_review", "reject_review"]) {
       expect(names.has(name), `account review tool ${name} should be visible`).toBe(true);
@@ -1134,6 +1172,96 @@ describe("e2a MCP server", () => {
       expect(byName.get(n)?.readOnlyHint ?? false, `${n} not read-only`).toBe(false);
     }
     expect(byName.get("get_message")?.readOnlyHint, "get_message not read-only").toBe(false);
+  });
+
+  it("the mutating flag agrees with the annotations", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      if (MUTATING_TOOLS.has(t.name)) {
+        expect(t.annotations?.readOnlyHint ?? false, `${t.name} mutates, so it cannot be readOnlyHint`).toBe(false);
+      }
+      if (t.annotations?.readOnlyHint === true) {
+        expect(NON_MUTATING_TOOLS.has(t.name), `${t.name} is readOnlyHint, so it must be non-mutating`).toBe(true);
+      }
+    }
+  });
+
+  it("every destructiveHint tool is mutating", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      if (t.annotations?.destructiveHint === true) {
+        expect(MUTATING_TOOLS.has(t.name), `${t.name} is destructiveHint, so it must be mutating`).toBe(true);
+      }
+    }
+  });
+
+  it("every tool advertises its mutating flag as _meta[\"e2a/mutating\"]", async () => {
+    const { tools } = await client.listTools(); // account scope → full surface
+    for (const t of tools) {
+      expect(t._meta?.[MUTATING_META_KEY], `${t.name} _meta["${MUTATING_META_KEY}"]`).toBe(MUTATING_TOOLS.has(t.name));
+    }
+  });
+
+  it("the mutating flag matches the HTTP methods of the /v1 operations each tool calls", async () => {
+    // Walk api/openapi.yaml for operationId → method (the committed spec is
+    // golden-tested against the live handlers, so it is the server's truth).
+    const spec = readFileSync(new URL("../../api/openapi.yaml", import.meta.url), "utf8");
+    const methodOf = new Map<string, string>();
+    let inPaths = false;
+    let method = "";
+    for (const line of spec.split("\n")) {
+      if (/^paths:\s*$/.test(line)) { inPaths = true; continue; }
+      if (inPaths && /^\S/.test(line)) inPaths = false;
+      if (!inPaths) continue;
+      const m = /^ {4}(get|put|post|patch|delete|head|options):\s*$/.exec(line);
+      if (m) { method = m[1]!.toUpperCase(); continue; }
+      const op = /^ {6}operationId:\s*(\S+)\s*$/.exec(line);
+      if (op && method) methodOf.set(op[1]!, method);
+    }
+    expect(methodOf.get("sendMessage")).toBe("POST");
+    expect(methodOf.get("listAgents")).toBe("GET");
+    // Independent derivation of the server's rule (classifyOperation):
+    // GET/HEAD read, everything else a write, except validateTemplate.
+    const isWrite = (opId: string) => {
+      const mth = methodOf.get(opId);
+      if (!mth) throw new Error(`TOOL_OPERATIONS names ${opId}, which api/openapi.yaml does not define`);
+      if (opId === "validateTemplate") return false;
+      return mth !== "GET" && mth !== "HEAD";
+    };
+    const { tools } = await client.listTools(); // account scope → full surface
+    const registered = new Set(tools.map((t) => t.name));
+    expect(new Set(Object.keys(TOOL_OPERATIONS))).toEqual(registered);
+    for (const name of registered) {
+      const ops = TOOL_OPERATIONS[name] ?? [];
+      expect(ops.length, `${name} names at least one operation`).toBeGreaterThan(0);
+      const writes = ops.some(isWrite);
+      expect(MUTATING_TOOLS.has(name), `${name} calls ${ops.join(", ")}: mutating must be ${writes}`).toBe(writes);
+    }
+  });
+
+  it("a mutating tool refused for a read-only account surfaces account_read_only", async () => {
+    // The /v1 guard is the MCP surface's enforcement point: the tool call
+    // reaches the API with the caller's credential and the 403 comes back as
+    // a non-retryable tool error an agent can branch on.
+    (stub.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new E2AError({
+        code: "account_read_only",
+        message:
+          "sending is paused for this account pending an abuse review, and the account is read-only: reads still work, but no changes can be made until the review is complete. Contact support to appeal.",
+        status: 403,
+        retryable: false,
+      }),
+    );
+    const res = await client.callTool({
+      name: "send_message",
+      arguments: { to: ["x@example.com"], subject: "s", text: "b" },
+    });
+    expect(res.isError).toBe(true);
+    const text = (res.content as Array<{ text: string }>)[0]?.text ?? "";
+    expect(text).toContain("[account_read_only]");
+    expect(text).toContain("read-only");
+    expect(text).not.toContain("(retryable)");
+    expect(res.structuredContent).toMatchObject({ code: "account_read_only", retryable: false, status: 403 });
   });
 
   it("send_message forwards args to client.send", async () => {

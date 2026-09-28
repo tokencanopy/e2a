@@ -17,6 +17,7 @@
 import Link from "next/link";
 import {
   isSendingRestricted,
+  offeredUnlocks,
   sendingAccessEligibilityLabel,
   sendingAccessNoticeCopy,
   type SendingAccessStatus,
@@ -24,7 +25,10 @@ import {
 
 // Hosted-only billing gate (AGENTS.md: billing UI stays inert on self-host).
 // A self-host build never has this set, so "Choose a paid plan" and the
-// paid-plan clause in the body copy only ever appear on the hosted service.
+// paid-plan clause in the body copy only ever appear on the hosted service —
+// and only where the deployment's `available_unlocks` lists paid_entitlement.
+// Likewise "Verify a domain" appears only where verified_domain is listed.
+// Approval is always offered, and leads.
 const BILLING_API = (process.env.NEXT_PUBLIC_BILLING_API ?? "").replace(/\/$/, "");
 
 export function SendingAccessNotice({
@@ -48,9 +52,9 @@ export function SendingAccessNotice({
     );
   }
 
-  const { headline, body } = sendingAccessNoticeCopy(status, {
-    billingEnabled: Boolean(BILLING_API),
-  });
+  const billingEnabled = Boolean(BILLING_API);
+  const { headline, body } = sendingAccessNoticeCopy(status, { billingEnabled });
+  const offered = offeredUnlocks(status, { billingEnabled });
 
   return (
     <div
@@ -71,20 +75,22 @@ export function SendingAccessNotice({
       </p>
       <div className="flex items-center gap-4 mt-3 flex-wrap">
         <Link
-          href="/domains"
-          className="text-[12px] font-medium underline"
-          style={{ color: "var(--warn-strong)" }}
-        >
-          Verify a domain
-        </Link>
-        <Link
           href="/sending-access"
           className="text-[12px] font-medium underline"
           style={{ color: "var(--warn-strong)" }}
         >
           Request approval
         </Link>
-        {BILLING_API && (
+        {offered.domain && (
+          <Link
+            href="/domains"
+            className="text-[12px] font-medium underline"
+            style={{ color: "var(--warn-strong)" }}
+          >
+            Verify a domain
+          </Link>
+        )}
+        {offered.paid && (
           <Link
             href="/billing"
             className="text-[12px] font-medium underline"

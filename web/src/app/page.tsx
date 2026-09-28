@@ -7,7 +7,8 @@ import { Eyebrow } from "@e2a/ui";
 import { JsonLd } from "./components/JsonLd";
 import { TokenCanopyBadge } from "./components/loft/TokenCanopyBadge";
 import { faqPage, type FaqEntry } from "../lib/jsonld";
-import { PRICING_PATH, SIGN_IN_URL } from "../lib/site";
+import { PRICING_PATH, SIGN_IN_URL, legalFooterLinks } from "../lib/site";
+import { SignInConsent } from "./components/SignInConsent";
 
 // Agent onboarding surfaces: install the plugin in a coding agent, or point
 // any MCP runtime at the hosted server. Application integrations use the SDK
@@ -133,6 +134,10 @@ const FOOTER_LINKS: { label: string; href: string; external?: boolean }[] = [
   { label: "CLI", href: "https://www.npmjs.com/package/@e2a/cli", external: true },
   { label: "Plugin", href: "https://github.com/tokencanopy/e2a/tree/main/plugins/e2a", external: true },
   { label: "Feedback", href: "/feedback" },
+  // Privacy/Terms are hosted-deployment-only — see PRIVACY_URL/TERMS_URL in
+  // lib/site. Each is present only when its URL is configured, so a
+  // self-host or staging footer renders exactly as it did before.
+  ...legalFooterLinks(),
 ];
 
 // The landing page's answer surface. Every entry is rendered twice: as visible
@@ -282,14 +287,25 @@ export default function Home() {
                    already have an account; the primary CTA beside it starts a
                    new one. Signed IN there is no such pair — both would just
                    be doors into the app — so the primary becomes the only
-                   one and points at the dashboard. */
-                <a
-                  href={SIGN_IN_URL}
-                  className="px-3 py-1.5 rounded-md transition hover:bg-[var(--bg-elev)]"
-                  style={{ color: "var(--fg-muted)" }}
-                >
-                  Sign in
-                </a>
+                   one and points at the dashboard.
+                   `relative` + the consent line's `absolute` positioning
+                   (same pattern as NavMenu's dropdown below) keeps the
+                   overlay out of the flex row's layout — it renders only on
+                   the hosted build where both legal URLs are set, and must
+                   not change nav height or wrap the other items. */
+                <div className="relative">
+                  <a
+                    href={SIGN_IN_URL}
+                    className="px-3 py-1.5 rounded-md transition hover:bg-[var(--bg-elev)]"
+                    style={{ color: "var(--fg-muted)" }}
+                  >
+                    Sign in
+                  </a>
+                  <SignInConsent
+                    className="absolute top-full right-0 z-10 mt-1 whitespace-nowrap text-[10px]"
+                    style={{ color: "var(--fg-subtle)" }}
+                  />
+                </div>
               )}
             </div>
             <Link

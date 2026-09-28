@@ -172,6 +172,8 @@ type API struct {
 	store             *identity.Store
 	sender            *outbound.Sender
 	unsubscribeIssuer ManagedUnsubscribeIssuer
+	// supportContact is named in account_read_only refusals (read_only.go).
+	supportContact string
 	// screen runs outbound content screening (Slice 5). Stateless heuristics
 	// engine; mirrors the relay's inbound piguard engine.
 	screen *piguard.Engine
@@ -702,6 +704,10 @@ func (a *API) RegisterRoutes(r *mux.Router) {
 	r.MethodNotAllowedHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	})
+
+	// Read-only accounts: the single enforcement point for this router's
+	// account-write routes (read_only.go). Runs on matched routes only.
+	r.Use(a.legacyReadOnlyMiddleware)
 
 	// Internal machine-to-machine endpoint: the external limits
 	// provisioner (hosted billing sidecar) calls this to bust the

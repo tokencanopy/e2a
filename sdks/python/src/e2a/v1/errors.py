@@ -204,6 +204,11 @@ _CODE_MAP: "dict[str, tuple[type[E2AError], bool]]" = {
     # deleted or closed account and cannot register or be restored (account
     # trash / purge). Not retryable — the same identity will refuse again.
     "registration_refused": (E2APermissionError, False),
+    # 403 — the account is read-only: its sending is paused pending an abuse
+    # review, so every write is refused (reads and moving the account to the
+    # trash keep working). Not retryable until an operator resumes the
+    # account; contact support. GET /v1/account reports it as read_only.
+    "account_read_only": (E2APermissionError, False),
     # 404/410 family — also covers *_not_found via the suffix check in _resolve.
     "not_found": (E2ANotFoundError, False),
     "gone": (E2ANotFoundError, False),

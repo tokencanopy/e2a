@@ -7,7 +7,8 @@ import { EXIT, fail } from "../exit.js";
 // identity. `status` reads GET /v1/account's additive `sending_access` object
 // plus the account's latest request (if any); `request` files a new one via
 // POST /v1/account/sending-access/request. Filing never grants access by
-// itself — only support (or a paid plan) does that.
+// itself — an operator's approval does (or, where the deployment's
+// `available_unlocks` lists them, a verified domain or a paid plan).
 
 export interface SendingAccessStatusOptions {
   json?: boolean;
@@ -23,11 +24,40 @@ export interface SendingAccessRequestOptions {
 export const SENDING_ACCESS_REQUEST_USAGE =
   "usage: e2a sending-access request --use-case <text> --recipients <text> --volume <n> [--json]";
 
+/** The deployment's unlock set. A server that predates `available_unlocks`
+ *  omits it and accepts all three, so absence reads as all three. */
+export function availableUnlocks(access: SendingAccessView): string[] {
+  return access.availableUnlocks ?? ["operator_approval", "verified_domain", "paid_entitlement"];
+}
+
+/** True when the paid entitlement actually lifts the restriction here. */
+function paidUnlocks(access: SendingAccessView): boolean {
+  return access.paidExternalSendingEntitled && availableUnlocks(access).includes("paid_entitlement");
+}
+
 /** True exactly when the account is restricted to the narrow allowed-recipient
- *  set right now — enforcement applies and neither grant (operator approval or
- *  a paid plan) is in effect. Mirrors the server's own decision at send time. */
-function isRestricted(access: SendingAccessView): boolean {
-  return access.enforcementApplies && !access.sharedExternalApproved && !access.paidExternalSendingEntitled;
+ *  set right now — enforcement applies and no account-level grant in effect
+ *  (operator approval, or a paid plan where the deployment accepts one).
+ *  Mirrors the server's own decision at send time. */
+export function isRestricted(access: SendingAccessView): boolean {
+  return access.enforcementApplies && !access.sharedExternalApproved && !paidUnlocks(access);
+}
+
+const REQUEST_HINT =
+  "e2a sending-access request --use-case <text> --recipients <text> --volume <n>";
+
+/** The one-line restricted summary shared by `whoami` and `status`: what the
+ *  account can still reach, and only the recovery routes the deployment
+ *  honors. */
+export function restrictedLine(access: SendingAccessView): string {
+  const unlocks = availableUnlocks(access);
+  const routes = [`request approval with: ${REQUEST_HINT}`];
+  if (unlocks.includes("verified_domain")) routes.push("or send from your own verified domain");
+  if (unlocks.includes("paid_entitlement")) routes.push("or choose a paid plan");
+  return (
+    "External sending: restricted (send to your verified account email and agent inboxes in " +
+    `this account; ${routes.join(" ")})`
+  );
 }
 
 function describeAccess(access: SendingAccessView | undefined): string {
@@ -39,17 +69,13 @@ function describeAccess(access: SendingAccessView | undefined): string {
   if (!access.enforcementApplies) {
     return "External sending: unrestricted (this control does not apply to this account).";
   }
-  if (access.paidExternalSendingEntitled) {
-    return "External sending: allowed (paid plan entitlement).";
-  }
   if (access.sharedExternalApproved) {
     return "External sending: allowed (approved by an operator).";
   }
-  return (
-    "External sending: restricted (send to your verified account email and agent inboxes in " +
-    "this account; request approval with: e2a sending-access request --use-case <text> " +
-    "--recipients <text> --volume <n>)"
-  );
+  if (paidUnlocks(access)) {
+    return "External sending: allowed (paid plan entitlement).";
+  }
+  return restrictedLine(access);
 }
 
 function describeRequest(req: SendingAccessRequestView): string {
@@ -81,6 +107,9 @@ export async function sendingAccessStatus(opts: SendingAccessStatusOptions): Pro
   }
 
   process.stdout.write(describeAccess(account.sendingAccess) + "\n");
+  if (account.sendingAccess) {
+    process.stdout.write(`available unlocks: ${availableUnlocks(account.sendingAccess).join(", ")}\n`);
+  }
   if (latest) process.stdout.write(describeRequest(latest) + "\n");
 }
 
@@ -105,7 +134,7 @@ export async function sendingAccessRequest(opts: SendingAccessRequestOptions): P
   process.stdout.write(`${result.id}\t${result.state}\n`);
   process.stderr.write(
     result.state === "pending"
-      ? "Filed (or already pending) — support will review it. Check back with: e2a sending-access status\n"
+      ? "Filed (or already pending) — an operator will review it and the account owner will get an email with the decision. Do not re-file. Check back with: e2a sending-access status\n"
       : `Note: the account's latest request is already ${result.state}; this filing may be a new appeal.\n`,
   );
 }

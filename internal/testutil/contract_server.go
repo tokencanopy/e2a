@@ -89,6 +89,11 @@ type ContractServer struct {
 	// owner-mailbox proof for its sign-in address.
 	RestrictedAPIKey string
 	RestrictedUserID string
+	// RestrictedSDKAPIKey authenticates a second in-cohort (restricted)
+	// account reserved for the SDK contract suites' sending-access request
+	// lifecycle, so they never race the raw-HTTP scenario that must be the
+	// first filer on the scenario restricted account. No scenario uses it.
+	RestrictedSDKAPIKey string
 	// DisposableTrashAPIKey and DisposableEraseAPIKey authenticate two
 	// throwaway accounts that exist only to be deleted: the account-deletion
 	// scenarios trash one (DELETE /v1/account) and permanently erase the
@@ -96,13 +101,20 @@ type ContractServer struct {
 	// which is one contract run; no other scenario may use them.
 	DisposableTrashAPIKey string
 	DisposableEraseAPIKey string
-	DBPool                *pgxpool.Pool
-	Store                 *identity.Store
-	WSHub                 *ws.Hub
-	SMTPAddr              string
-	httpServer            *http.Server
-	httpLn                net.Listener
-	smtpServer            *relay.Server
+	// ReadOnlyAPIKey authenticates an account paused for abuse
+	// (pause_class abuse), which makes it read-only: every write is refused
+	// with 403 account_read_only. The read-only scenario ends by moving it to
+	// the trash, so like the disposable accounts it serves exactly one
+	// contract run and no other scenario may use it.
+	ReadOnlyAPIKey string
+	ReadOnlyUserID string
+	DBPool         *pgxpool.Pool
+	Store          *identity.Store
+	WSHub          *ws.Hub
+	SMTPAddr       string
+	httpServer     *http.Server
+	httpLn         net.Listener
+	smtpServer     *relay.Server
 }
 
 func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, error) {
@@ -381,6 +393,26 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 		return nil, err
 	}
 
+	restrictedSDKKey, err := seedRestrictedSDKAccount(ctx, pool, store)
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+
+	readOnlyUser, readOnlyKey, err := seedReadOnlyAccount(ctx, pool, store)
+	if err != nil {
+		_ = smtpServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpLn.Close()
+		wsHub.Close()
+		pool.Close()
+		return nil, err
+	}
+
 	disposable := make([]string, 0, 2)
 	for _, label := range []string{"trash", "erase"} {
 		u, err := store.CreateOrGetUser(ctx, "disposable-"+label+"@example.test", "Contract Disposable", "google-contract-disposable-"+label)
@@ -404,8 +436,11 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	return &ContractServer{
 		DisposableTrashAPIKey: disposable[0],
 		DisposableEraseAPIKey: disposable[1],
+		ReadOnlyAPIKey:        readOnlyKey,
+		ReadOnlyUserID:        readOnlyUser,
 		RestrictedAPIKey:      restrictedKey,
 		RestrictedUserID:      restrictedUser,
+		RestrictedSDKAPIKey:   restrictedSDKKey,
 		BaseURL:               "http://" + httpLn.Addr().String(),
 		APIKey:                key.PlaintextKey,
 		UserID:                user.ID,
@@ -461,6 +496,28 @@ func seedRestrictedAccount(ctx context.Context, pool *pgxpool.Pool, store *ident
 	if err != nil {
 		return "", "", err
 	}
+	return restrictAccount(ctx, pool, store, user, []string{ContractRestrictedAgent, ContractRestrictedPeer}, "contract-restricted-key")
+}
+
+// ContractRestrictedSDKOwner is the synthetic owner of the SDK-only
+// restricted account.
+const ContractRestrictedSDKOwner = "restricted-sdk-owner@example.test"
+
+// seedRestrictedSDKAccount seeds the second restricted account used only by
+// the SDK contract suites' request lifecycle.
+func seedRestrictedSDKAccount(ctx context.Context, pool *pgxpool.Pool, store *identity.Store) (string, error) {
+	user, err := store.CreateOrGetUser(ctx, ContractRestrictedSDKOwner, "Contract Restricted SDK", "google-contract-restricted-sdk")
+	if err != nil {
+		return "", err
+	}
+	_, key, err := restrictAccount(ctx, pool, store, user, nil, "contract-restricted-sdk-key")
+	return key, err
+}
+
+// restrictAccount dates the account after the contract cohort cutoff (so the
+// rule binds it), gives it owner-mailbox proof, creates its agents, and mints
+// a key.
+func restrictAccount(ctx context.Context, pool *pgxpool.Pool, store *identity.Store, user *identity.User, agents []string, keyName string) (string, string, error) {
 	if _, err := pool.Exec(ctx, `
 		UPDATE users
 		   SET created_at = '3000-01-01T00:00:00Z',
@@ -470,13 +527,43 @@ func seedRestrictedAccount(ctx context.Context, pool *pgxpool.Pool, store *ident
 		 WHERE id = $1`, user.ID); err != nil {
 		return "", "", err
 	}
-	for _, addr := range []string{ContractRestrictedAgent, ContractRestrictedPeer} {
+	for _, addr := range agents {
 		if _, err := store.CreateAgentWithLimit(ctx, addr, "agents.localhost", "Restricted Bot", user.ID, 0); err != nil {
 			return "", "", err
 		}
 	}
-	key, err := store.CreateAPIKey(ctx, user.ID, "contract-restricted-key", nil)
+	key, err := store.CreateAPIKey(ctx, user.ID, keyName, nil)
 	if err != nil {
+		return "", "", err
+	}
+	return user.ID, key.PlaintextKey, nil
+}
+
+// Synthetic fixtures of the read-only account: an owner with one shared-domain
+// agent, paused for abuse (docs/design/account-read-only.md).
+const (
+	ContractReadOnlyOwner = "readonly-owner@example.test"
+	ContractReadOnlyAgent = "readonly-bot@agents.localhost"
+)
+
+func seedReadOnlyAccount(ctx context.Context, pool *pgxpool.Pool, store *identity.Store) (string, string, error) {
+	user, err := store.CreateOrGetUser(ctx, ContractReadOnlyOwner, "Contract Read-Only", "google-contract-readonly")
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := store.CreateAgentWithLimit(ctx, ContractReadOnlyAgent, "agents.localhost", "Read-Only Bot", user.ID, 0); err != nil {
+		return "", "", err
+	}
+	key, err := store.CreateAPIKey(ctx, user.ID, "contract-readonly-key", nil)
+	if err != nil {
+		return "", "", err
+	}
+	// The row an operator's `-pause-account-sending -pause-class abuse`
+	// writes; seeded directly because the contract server runs no operator
+	// commands.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO account_sending_controls (user_id, state, reason, actor, pause_class)
+		VALUES ($1, 'paused', 'contract read-only fixture', 'contract-server', 'abuse')`, user.ID); err != nil {
 		return "", "", err
 	}
 	return user.ID, key.PlaintextKey, nil

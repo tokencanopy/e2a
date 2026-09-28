@@ -320,8 +320,9 @@ func sharedFromSentAs(sentAs *string) bool {
 //
 // These are attributed to and budgeted against the triggering customer, not the
 // platform, because a customer controls how much of this mail exists: every
-// held message is an approval email and every failing webhook is a health
-// warning. Their From identity is platform-owned, so they also carry the shared
+// held message is an approval email, every failing webhook is a health
+// warning, and every filed access request (at most three per 30 days) can
+// earn one decision notice. Their From identity is platform-owned, so they also carry the shared
 // reputation class and the stricter shared-domain cap that comes with it.
 func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref NotificationRef) (OperationRef, error) {
 	if strings.TrimSpace(ref.id) == "" {
@@ -363,6 +364,22 @@ func (m *Module) PrepareNotificationTx(ctx context.Context, tx pgx.Tx, ref Notif
 			}
 			operationID = WebhookHealthOperationID(ref.id, ref.kind, *episode)
 		}
+	case NotificationSendingAccessDecision:
+		// The operator command decided the request in its own committed
+		// transaction; the notice is owed only for a request that is no
+		// longer pending. The request row is the source: it names the
+		// account, and its decided state is what the notice reports.
+		var state string
+		err = tx.QueryRow(ctx,
+			`SELECT user_id, state FROM external_sending_access_requests WHERE id = $1 FOR SHARE`, ref.id,
+		).Scan(&userID, &state)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = ErrSourceUnavailable
+		}
+		if err == nil && state != "approved" && state != "declined" {
+			return OperationRef{}, ErrSourceUnavailable
+		}
+		operationID = SendingAccessDecisionOperationID(ref.id)
 	default:
 		return OperationRef{}, ErrSourceUnavailable
 	}

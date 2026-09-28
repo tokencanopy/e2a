@@ -404,6 +404,15 @@ type Deps struct {
 	// restricted cookie was short-lived), and an erase expires it (maxAge < 0).
 	WriteSessionCookie func(w http.ResponseWriter, token string, maxAge time.Duration)
 
+	// AccountReadOnly reports whether the account is read-only (sending
+	// paused with pause class abuse). The readOnlyGuard middleware consults it
+	// on every write; nil disables read-only enforcement (minimal test
+	// setups). Production wires identity.Store.AccountReadOnly.
+	AccountReadOnly func(ctx context.Context, userID string) (bool, error)
+	// SupportContact is the support address named in the account_read_only
+	// message. Optional; empty says "contact support" without an address.
+	SupportContact string
+
 	// events (delivery log). EventQuery carries the filters + cursor
 	// position; the closures bind the events pool in main.
 	ListEvents func(ctx context.Context, q EventQuery) ([]agent.EventView, error)
@@ -631,6 +640,9 @@ func New(deps Deps) *Server {
 	// RateLimit-* headers on the response and short-circuit a 429 before the
 	// handler. Registered once; applies to every operation.
 	api.UseMiddleware(s.rateLimit)
+	// Read-only accounts: the single /v1 enforcement point that refuses every
+	// write for an account paused for abuse (read_only.go).
+	api.UseMiddleware(s.readOnlyGuard)
 	s.registerOperations()
 	s.applyAuthenticationNullability()
 	// Post-registration document passes, in order: drop the phantom

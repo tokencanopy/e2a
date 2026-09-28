@@ -130,6 +130,47 @@ describe("sending-access commands", () => {
       expect(out).toContain("allowed (paid plan entitlement)");
     });
 
+    it("status lists available unlocks and offers only honored routes", async () => {
+      for (const [unlocks, wantDomain, wantPaid] of [
+        [["operator_approval"], false, false],
+        [["operator_approval", "verified_domain"], true, false],
+        [["operator_approval", "paid_entitlement"], false, true],
+        [undefined, true, true],
+      ] as const) {
+        stdout.mockClear();
+        mockAccountGet.mockResolvedValue(
+          makeAccount({ ...RESTRICTED, ...(unlocks ? { availableUnlocks: [...unlocks] } : {}) }),
+        );
+        mockGetRequest.mockRejectedValue(
+          new E2ANotFoundError({ code: "not_found", message: "none", status: 404, retryable: false }),
+        );
+        const { sendingAccessStatus } = await import("../commands/sending-access.js");
+        await sendingAccessStatus({});
+        const out = stdout.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+        expect(out).toContain("External sending: restricted");
+        expect(out).toContain("request approval");
+        expect(out.includes("verified domain")).toBe(wantDomain);
+        expect(out.includes("paid plan")).toBe(wantPaid);
+        expect(out).toContain(
+          `available unlocks: ${(unlocks ?? ["operator_approval", "verified_domain", "paid_entitlement"]).join(", ")}`,
+        );
+      }
+    });
+
+    it("a paid entitlement is not reported as a grant under approval-only unlocks", async () => {
+      mockAccountGet.mockResolvedValue(
+        makeAccount({ ...RESTRICTED, paidExternalSendingEntitled: true, availableUnlocks: ["operator_approval"] }),
+      );
+      mockGetRequest.mockRejectedValue(
+        new E2ANotFoundError({ code: "not_found", message: "none", status: 404, retryable: false }),
+      );
+      const { sendingAccessStatus } = await import("../commands/sending-access.js");
+      await sendingAccessStatus({});
+      const out = stdout.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+      expect(out).toContain("External sending: restricted");
+      expect(out).not.toContain("allowed (paid plan entitlement)");
+    });
+
     it("reports the operator-approved grant", async () => {
       mockAccountGet.mockResolvedValue(
         makeAccount({ ...RESTRICTED, sharedExternalApproved: true }),

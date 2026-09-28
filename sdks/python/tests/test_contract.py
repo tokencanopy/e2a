@@ -46,7 +46,7 @@ import httpx
 import pytest
 import yaml
 
-from e2a.v1 import E2AClient, E2ANotFoundError
+from e2a.v1 import E2AClient, E2AConflictError, E2ANotFoundError
 from e2a.v1.generated.models import PageMessageLifecycleTransition
 
 # NOTE: the runner drives the server over raw HTTP (a thin scenario interpreter,
@@ -61,11 +61,18 @@ API_KEY = os.environ.get("E2A_TEST_API_KEY", "")
 CAPPED_API_KEY = os.environ.get("E2A_TEST_CAPPED_API_KEY", "")
 OVERCAP_API_KEY = os.environ.get("E2A_TEST_OVERCAP_API_KEY", "")
 RESTRICTED_API_KEY = os.environ.get("E2A_TEST_RESTRICTED_API_KEY", "")
+# A second in-cohort account reserved for the SDK request lifecycle (no shared
+# scenario uses it). Absent against a deployed server — that test skips.
+RESTRICTED_SDK_API_KEY = os.environ.get("E2A_TEST_RESTRICTED_SDK_API_KEY", "")
 # The contract server's two throwaway accounts that exist only to be deleted by
 # the account-deletion scenarios (once each per server). Absent against a
 # deployed server — those scenarios then skip.
 DISPOSABLE_TRASH_API_KEY = os.environ.get("E2A_TEST_DISPOSABLE_TRASH_API_KEY", "")
 DISPOSABLE_ERASE_API_KEY = os.environ.get("E2A_TEST_DISPOSABLE_ERASE_API_KEY", "")
+# The contract server's abuse-paused (read-only) account; its scenario trashes
+# it at the end (once per server). Absent against a deployed server — the
+# scenario then skips.
+READONLY_API_KEY = os.environ.get("E2A_TEST_READONLY_API_KEY", "")
 
 # tests/test_contract.py -> sdks/python/tests/ -> sdks/python/ -> sdks/ -> repo root
 SCENARIOS_PATH = Path(__file__).resolve().parents[3] / "tests" / "contract" / "scenarios.yaml"
@@ -159,6 +166,7 @@ OVERCAP_KEY_PLACEHOLDER = "{overcap_api_key}"
 RESTRICTED_KEY_PLACEHOLDER = "{restricted_api_key}"
 DISPOSABLE_TRASH_KEY_PLACEHOLDER = "{disposable_trash_api_key}"
 DISPOSABLE_ERASE_KEY_PLACEHOLDER = "{disposable_erase_api_key}"
+READONLY_KEY_PLACEHOLDER = "{readonly_api_key}"
 
 
 def _scenario_uses_placeholder(sc: dict[str, Any], placeholder: str) -> bool:
@@ -247,6 +255,8 @@ class Runner:
             self.vars["disposable_trash_api_key"] = DISPOSABLE_TRASH_API_KEY
         if DISPOSABLE_ERASE_API_KEY:
             self.vars["disposable_erase_api_key"] = DISPOSABLE_ERASE_API_KEY
+        if READONLY_API_KEY:
+            self.vars["readonly_api_key"] = READONLY_API_KEY
         self._http = httpx.Client(base_url=base_url, timeout=30)
 
     def close(self):
@@ -1296,6 +1306,10 @@ def test_contract_scenario(scenario):
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_DISPOSABLE_TRASH_API_KEY")
     if _scenario_uses_placeholder(scenario, DISPOSABLE_ERASE_KEY_PLACEHOLDER) and not DISPOSABLE_ERASE_API_KEY:
         pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_DISPOSABLE_ERASE_API_KEY")
+    # The read-only scenario runs only against the contract server's seeded
+    # abuse-paused account (and trashes it).
+    if _scenario_uses_placeholder(scenario, READONLY_KEY_PLACEHOLDER) and not READONLY_API_KEY:
+        pytest.skip(f"scenario {scenario['name']}: needs E2A_TEST_READONLY_API_KEY")
 
     runner = Runner(BASE_URL, API_KEY, scenario)
     try:
@@ -1381,13 +1395,13 @@ def test_client_send_managed_unsubscribe_is_accepted_and_held():
 
 
 @requires_contract_server
+@pytest.mark.skipif(not RESTRICTED_SDK_API_KEY, reason="needs E2A_TEST_RESTRICTED_SDK_API_KEY")
 def test_client_sending_access_request_lifecycle():
-    # Runs as the PRIMARY account (not the restricted cohort account): no
-    # scenario in scenarios.yaml files a sending-access request as the primary
-    # account (external_sending_access_request_intake deliberately reserves
-    # the restricted account for that, "which no other scenario files
-    # requests for"), so the primary account starts with none filed here.
-    with E2AClient(API_KEY, base_url=BASE_URL) as client:
+    # Runs as the contract server's SDK-only RESTRICTED account: inside the
+    # external-sending-access cohort, never used by any shared scenario, so
+    # it starts with no request and this test is its only filer. (Only a
+    # restricted account may file; see the conflict test below.)
+    with E2AClient(RESTRICTED_SDK_API_KEY, base_url=BASE_URL) as client:
         with pytest.raises(E2ANotFoundError) as ei:
             client.account.get_sending_access_request()
         assert ei.value.code == "not_found"
@@ -1418,3 +1432,21 @@ def test_client_sending_access_request_lifecycle():
         assert resubmitted.id == created.id
         assert resubmitted.use_case == "sdk contract probe"
         assert resubmitted.expected_daily_volume == 250
+
+
+@requires_contract_server
+def test_client_sending_access_request_unrestricted_account_is_conflict():
+    # The PRIMARY account is outside the contract cohort (unrestricted), so
+    # there is nothing to request: 409 conflict mapped to E2AConflictError,
+    # and nothing is filed.
+    with E2AClient(API_KEY, base_url=BASE_URL) as client:
+        with pytest.raises(E2AConflictError) as ei:
+            client.account.request_sending_access(
+                use_case="sdk contract probe",
+                recipients="our own customers who signed up",
+                expected_daily_volume=1,
+            )
+        assert ei.value.code == "conflict"
+        assert ei.value.status == 409
+        with pytest.raises(E2ANotFoundError):
+            client.account.get_sending_access_request()

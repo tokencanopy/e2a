@@ -330,6 +330,14 @@ describe("Navigation auth state", () => {
     expect(screen.queryByText("Go to Dashboard")).not.toBeInTheDocument();
   });
 
+  // No legal URLs configured in jest (self-host/staging default) — the
+  // consent line must not render at all. The hosted branch is covered in
+  // page.legal-links.hosted.test.tsx.
+  it("renders no sign-in consent line when no legal URLs are configured", () => {
+    render(<Home />);
+    expect(screen.queryByTestId("sign-in-consent")).not.toBeInTheDocument();
+  });
+
   it("shows loading indicator while checking auth", () => {
     mockAuthValue = { user: null, loading: true, signOut: mockSignOut };
     render(<Home />);
@@ -374,6 +382,17 @@ describe("Footer", () => {
     expect(screen.getAllByText("Plugin").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Feedback").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Apache 2.0").length).toBeGreaterThan(0);
+  });
+
+  // Self-host and staging builds have no legal pages configured
+  // (lib/site.PRIVACY_URL / TERMS_URL are unset in jest, matching a build
+  // without NEXT_PUBLIC_PRIVACY_URL / NEXT_PUBLIC_TERMS_URL), so the footer
+  // must render neither link rather than pointing at a 404. The hosted
+  // branch is covered in page.legal-links.hosted.test.tsx.
+  it("renders no Privacy or Terms links when no legal URLs are configured", () => {
+    render(<Home />);
+    expect(screen.queryByRole("link", { name: "Privacy" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Terms" })).toBeNull();
   });
 
   it("links the GitHub repo from the footer", () => {

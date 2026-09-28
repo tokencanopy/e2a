@@ -17,6 +17,12 @@
   `userDeleted` is `true` only for `mode: "permanent"`.
 
 ### Added
+- **`SendingAccessView.availableUnlocks`** (beta, optional `string[]`): the
+  routes the deployment accepts for lifting the external-sending restriction —
+  `"operator_approval"` (always present), `"verified_domain"`,
+  `"paid_entitlement"`; open set. Undefined from servers that predate the
+  field, which accept all three. `paidExternalSendingEntitled` now lifts the
+  restriction only when `"paid_entitlement"` is listed.
 - **`AccountView` (`account.get()`)** gains optional `deletedAt`, `purgeAfter`,
   and `restoredAt` (`Date`), reflecting the authenticated account's trash
   state.

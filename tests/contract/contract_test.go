@@ -149,6 +149,8 @@ type testEnv struct {
 	// throwaway accounts the account-deletion scenarios delete.
 	disposableTrashAPIKey string
 	disposableEraseAPIKey string
+	// readOnlyAPIKey authenticates the abuse-paused (read-only) account.
+	readOnlyAPIKey string
 }
 
 func setupEnv(t *testing.T) *testEnv {
@@ -180,6 +182,8 @@ func setupEnv(t *testing.T) *testEnv {
 
 		disposableTrashAPIKey: cs.DisposableTrashAPIKey,
 		disposableEraseAPIKey: cs.DisposableEraseAPIKey,
+
+		readOnlyAPIKey: cs.ReadOnlyAPIKey,
 	}
 }
 
@@ -378,6 +382,7 @@ func (r *runner) resolve(s string) string {
 	s = strings.ReplaceAll(s, restrictedKeyPlaceholder, r.env.restrictedAPIKey)
 	s = strings.ReplaceAll(s, "{disposable_trash_api_key}", r.env.disposableTrashAPIKey)
 	s = strings.ReplaceAll(s, "{disposable_erase_api_key}", r.env.disposableEraseAPIKey)
+	s = strings.ReplaceAll(s, readOnlyKeyPlaceholder, r.env.readOnlyAPIKey)
 	for k, v := range r.vars {
 		s = strings.ReplaceAll(s, "{"+k+"}", v)
 	}
@@ -1067,6 +1072,7 @@ func TestScenarios(t *testing.T) {
 			requireCappedKey(t, env, sc)
 			requireOverCapKey(t, env, sc)
 			requireRestrictedKey(t, env, sc)
+			requireReadOnlyKey(t, env, sc)
 			r := newRunner(env, sc)
 			t.Cleanup(func() { r.cleanup(t) })
 			r.executeSetup(t)
@@ -1269,6 +1275,30 @@ func requireRestrictedKey(t *testing.T, env *testEnv, sc scenario) {
 	for _, o := range overrides {
 		if o != nil && strings.Contains(*o, restrictedKeyPlaceholder) {
 			t.Fatalf("scenario %s uses %s but the contract server supplied no restricted API key", sc.Name, restrictedKeyPlaceholder)
+		}
+	}
+}
+
+const readOnlyKeyPlaceholder = "{readonly_api_key}"
+
+// requireReadOnlyKey is requireRestrictedKey for the abuse-paused (read-only)
+// account: a scenario that names it fails, never skips, when the contract
+// server supplied no key.
+func requireReadOnlyKey(t *testing.T, env *testEnv, sc scenario) {
+	t.Helper()
+	if env.readOnlyAPIKey != "" {
+		return
+	}
+	overrides := []*string{sc.AuthOverride}
+	for _, s := range sc.Steps {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, s := range sc.Cleanup {
+		overrides = append(overrides, s.AuthOverride)
+	}
+	for _, o := range overrides {
+		if o != nil && strings.Contains(*o, readOnlyKeyPlaceholder) {
+			t.Fatalf("scenario %s uses %s but the contract server supplied no read-only API key", sc.Name, readOnlyKeyPlaceholder)
 		}
 	}
 }

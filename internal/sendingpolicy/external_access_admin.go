@@ -34,6 +34,11 @@ var (
 	ErrAccessRequestRateLimited = errors.New("sendingpolicy: too many sending access requests")
 	// ErrInvalidAccessRequest means a request field failed validation.
 	ErrInvalidAccessRequest = errors.New("sendingpolicy: invalid sending access request")
+	// ErrSendingAccessNotRestricted means the account is not currently
+	// restricted (enforcement does not bind it, it is already approved, or
+	// an available unlock already lifts it): there is nothing to request,
+	// so no row is written and no operator is notified.
+	ErrSendingAccessNotRestricted = errors.New("sendingpolicy: external sending is not restricted for this account")
 )
 
 // NewPolicyModule binds a module to a pool, the trust roots and the
@@ -58,6 +63,10 @@ type ExternalAccessRecord struct {
 	OwnerVerified      bool
 	EnforcementApplies bool
 	PendingRequestID   string
+	// AvailableUnlocks is the effective unlock set of the governing policy
+	// (nil when the control is disabled), so the operator sees whether the
+	// paid entitlement or a verified domain would lift the restriction.
+	AvailableUnlocks []ExternalUnlock
 }
 
 // InspectExternalAccess reads the grant, its revision and every other fact an
@@ -99,6 +108,9 @@ func (m *Module) InspectExternalAccess(ctx context.Context, accountID string) (E
 		return ExternalAccessRecord{}, err
 	}
 	rec.EnforcementApplies = applies && policy.ExternalSendingMode() == ModeEnforce
+	if policy.ExternalSendingMode() != ModeDisabled {
+		rec.AvailableUnlocks = policy.ExternalSendingAccess.AvailableUnlocks()
+	}
 	err = m.pool.QueryRow(ctx, `
 		SELECT id FROM external_sending_access_requests
 		 WHERE user_id = $1 AND state = 'pending'`, accountID,
@@ -288,6 +300,11 @@ type AccessRequest struct {
 	ExpectedDailyVolume int
 	CreatedAt           time.Time
 	DecidedAt           *time.Time
+	// FromExemptAccount is set by SubmitAccessRequest when the filing
+	// account's server-owned account_class is exempt from the rule
+	// (system/internal). Such a request needs no operator decision, so the
+	// caller skips the operator notification. Not part of the customer view.
+	FromExemptAccount bool
 }
 
 // AccessRequestInput is the bounded customer-supplied part of a request. The
@@ -310,10 +327,39 @@ const (
 	accessRequestMax    = 3
 )
 
+// normalizeRequestText converts CRLF line endings to LF — the one line-break
+// form the operator email's quoting fence is built around — and trims.
+func normalizeRequestText(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
+}
+
+// hasForbiddenRequestRune reports a control character other than LF and TAB,
+// a Unicode line/paragraph separator, or a bidi override/isolate control. Either could break out of the
+// "> " fence that marks customer text as untrusted in the operator email.
+func hasForbiddenRequestRune(s string) bool {
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			continue
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			return true
+		case r == '\u2028' || r == '\u2029':
+			return true
+		case (r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069'):
+			// Bidi embedding/override/isolate controls can visually reorder
+			// the operator email so customer text reads as operator text.
+			return true
+		}
+	}
+	return false
+}
+
 func (in AccessRequestInput) validate() error {
-	useCase := strings.TrimSpace(in.UseCase)
-	recipients := strings.TrimSpace(in.Recipients)
+	useCase := normalizeRequestText(in.UseCase)
+	recipients := normalizeRequestText(in.Recipients)
 	switch {
+	case hasForbiddenRequestRune(useCase) || hasForbiddenRequestRune(recipients):
+		return fmt.Errorf("%w: use_case and recipients must not contain control characters or Unicode line separators (line breaks and tabs are fine)", ErrInvalidAccessRequest)
 	case useCase == "" || len([]rune(useCase)) > MaxAccessRequestUseCase:
 		return fmt.Errorf("%w: use_case must be 1-%d characters", ErrInvalidAccessRequest, MaxAccessRequestUseCase)
 	case recipients == "" || len([]rune(recipients)) > MaxAccessRequestRecipients:
@@ -337,8 +383,12 @@ func scanAccessRequest(row pgx.Row) (AccessRequest, error) {
 // is therefore idempotent while a request is pending; after a decline a new
 // request (an appeal) may be filed within the rolling-window cap.
 func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in AccessRequestInput) (AccessRequest, bool, error) {
-	if err := m.requireExternalAccessEnabled(ctx); err != nil {
+	policy, err := m.policyForRead(ctx, m.pool)
+	if err != nil {
 		return AccessRequest{}, false, err
+	}
+	if policy.ExternalSendingMode() == ModeDisabled {
+		return AccessRequest{}, false, ErrExternalAccessDisabled
 	}
 	if err := in.validate(); err != nil {
 		return AccessRequest{}, false, err
@@ -354,16 +404,42 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 	// unique index (one pending request per account) is the serialization
 	// point; a concurrent duplicate submit loses the insert and reads back the
 	// winner's pending request.
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT true FROM users WHERE id = $1`, userID).Scan(&exists); err != nil {
+	var class string
+	if err := tx.QueryRow(ctx, `SELECT account_class FROM users WHERE id = $1`, userID).Scan(&class); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AccessRequest{}, false, ErrAccountNotFound
 		}
 		return AccessRequest{}, false, fmt.Errorf("sendingpolicy: read user: %w", err)
 	}
+	exempt := accountClassExempt(class)
+	if !exempt {
+		// Only an account the rule actually restricts right now may file:
+		// enforce mode, inside the cohort, not approved, and no available
+		// unlock already lifting it. Anything else would only mint operator
+		// mail with nothing to decide. System/internal classes are exempt
+		// from the rule; they may still file (first-party conformance) and
+		// are never notified.
+		facts, err := loadAccountAccessFacts(ctx, tx, userID)
+		if errors.Is(err, errAccountMissing) {
+			return AccessRequest{}, false, ErrAccountNotFound
+		}
+		if err != nil {
+			return AccessRequest{}, false, err
+		}
+		applies, err := externalAccessApplies(policy, facts)
+		if err != nil {
+			return AccessRequest{}, false, err
+		}
+		esa := policy.ExternalSendingAccess
+		if !applies || policy.ExternalSendingMode() != ModeEnforce || facts.approved ||
+			(facts.entitled && esa.Allows(UnlockPaidEntitlement)) {
+			return AccessRequest{}, false, ErrSendingAccessNotRestricted
+		}
+	}
 	existing, err := scanAccessRequest(tx.QueryRow(ctx,
 		`SELECT `+accessRequestColumns+` FROM external_sending_access_requests WHERE user_id = $1 AND state = 'pending'`, userID))
 	if err == nil {
+		existing.FromExemptAccount = exempt
 		return existing, false, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -384,7 +460,7 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 		INSERT INTO external_sending_access_requests (id, user_id, use_case, recipients, expected_daily_volume)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING `+accessRequestColumns,
-		randomID("esar_"), userID, strings.TrimSpace(in.UseCase), strings.TrimSpace(in.Recipients), in.ExpectedDailyVolume))
+		randomID("esar_"), userID, normalizeRequestText(in.UseCase), normalizeRequestText(in.Recipients), in.ExpectedDailyVolume))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -394,6 +470,7 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 			if rerr != nil {
 				return AccessRequest{}, false, fmt.Errorf("sendingpolicy: read concurrent pending request: %w", rerr)
 			}
+			winner.FromExemptAccount = exempt
 			return winner, false, nil
 		}
 		return AccessRequest{}, false, fmt.Errorf("sendingpolicy: insert access request: %w", err)
@@ -401,6 +478,7 @@ func (m *Module) SubmitAccessRequest(ctx context.Context, userID string, in Acce
 	if err := tx.Commit(ctx); err != nil {
 		return AccessRequest{}, false, fmt.Errorf("sendingpolicy: commit access request: %w", err)
 	}
+	created.FromExemptAccount = exempt
 	return created, true, nil
 }
 
@@ -419,4 +497,94 @@ func (m *Module) LatestAccessRequest(ctx context.Context, userID string) (*Acces
 		return nil, fmt.Errorf("sendingpolicy: read latest request: %w", err)
 	}
 	return &r, nil
+}
+
+// PriorDecidedAccessRequests reports how many of the account's OTHER
+// requests have already been decided, and the outcome ("approved" or
+// "declined") of the most recently decided one. excludeRequestID omits the
+// request currently being filed/notified (it is not yet decided, but is
+// excluded defensively in case it somehow already has a terminal state by
+// the time this is read). decidedCount is 0 and lastOutcome is "" when the
+// account has no decided history. It is a plain read with no enablement
+// gate: a caller composing an operator notice already knows the control is
+// enabled (the request row it is about could not exist otherwise).
+func (m *Module) PriorDecidedAccessRequests(ctx context.Context, userID, excludeRequestID string) (decidedCount int, lastOutcome string, err error) {
+	if err := m.pool.QueryRow(ctx, `
+		SELECT count(*) FROM external_sending_access_requests
+		 WHERE user_id = $1 AND state != 'pending' AND id != $2`, userID, excludeRequestID,
+	).Scan(&decidedCount); err != nil {
+		return 0, "", fmt.Errorf("sendingpolicy: count prior access requests: %w", err)
+	}
+	if decidedCount == 0 {
+		return 0, "", nil
+	}
+	if err := m.pool.QueryRow(ctx, `
+		SELECT state FROM external_sending_access_requests
+		 WHERE user_id = $1 AND state != 'pending' AND id != $2
+		 ORDER BY decided_at DESC NULLS LAST, created_at DESC LIMIT 1`, userID, excludeRequestID,
+	).Scan(&lastOutcome); err != nil {
+		return 0, "", fmt.Errorf("sendingpolicy: read latest decided access request: %w", err)
+	}
+	return decidedCount, lastOutcome, nil
+}
+
+// AccessRequestListing is one row of the operator's request queue. Account
+// id, state and numbers only — no customer free text and no address.
+type AccessRequestListing struct {
+	ID                  string
+	AccountID           string
+	State               string
+	CreatedAt           time.Time
+	DecidedAt           *time.Time
+	ExpectedDailyVolume int
+	// Approved is the account's CURRENT shared-identity grant.
+	Approved bool
+}
+
+// maxAccessRequestListing bounds one listing; the queue is a review
+// worklist, not an export.
+const maxAccessRequestListing = 500
+
+// MaxAccessRequestListing exposes the listing bound for callers that report
+// truncation.
+const MaxAccessRequestListing = maxAccessRequestListing
+
+// ListAccessRequests returns the operator's queue, each row with the
+// account's current grant: pending requests oldest first (review order), or
+// with all every request NEWEST first, so the bound drops the oldest history
+// rather than the latest activity. truncated reports that more rows exist
+// than the bound returned. The new-request email is a notification, not the
+// system of record.
+func (m *Module) ListAccessRequests(ctx context.Context, all bool) (reqs []AccessRequestListing, truncated bool, err error) {
+	order := "r.created_at, r.id"
+	if all {
+		order = "r.created_at DESC, r.id DESC"
+	}
+	rows, err := m.pool.Query(ctx, `
+		SELECT r.id, r.user_id, r.state, r.created_at, r.decided_at, r.expected_daily_volume,
+		       COALESCE(c.external_sending_approved, false)
+		  FROM external_sending_access_requests AS r
+		  LEFT JOIN account_sending_controls AS c ON c.user_id = r.user_id
+		 WHERE $1 OR r.state = 'pending'
+		 ORDER BY `+order+`
+		 LIMIT $2`, all, maxAccessRequestListing+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
+	}
+	defer rows.Close()
+	var out []AccessRequestListing
+	for rows.Next() {
+		var l AccessRequestListing
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.State, &l.CreatedAt, &l.DecidedAt, &l.ExpectedDailyVolume, &l.Approved); err != nil {
+			return nil, false, fmt.Errorf("sendingpolicy: scan sending access request: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("sendingpolicy: list sending access requests: %w", err)
+	}
+	if len(out) > maxAccessRequestListing {
+		return out[:maxAccessRequestListing], true, nil
+	}
+	return out, false, nil
 }

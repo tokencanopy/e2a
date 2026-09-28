@@ -19,6 +19,12 @@
   gain the keyword-only ``permanent`` argument.
 
 ### Added
+- **``SendingAccessView.available_unlocks``** (beta, optional
+  ``list[str]``): the routes the deployment accepts for lifting the
+  external-sending restriction — ``operator_approval`` (always present),
+  ``verified_domain``, ``paid_entitlement``; open set. ``None`` from servers
+  that predate the field, which accept all three. ``paid_external_sending_entitled``
+  now lifts the restriction only when ``paid_entitlement`` is listed.
 - **``AccountView`` (``account.get()``)** gains optional ``deleted_at``,
   ``purge_after``, and ``restored_at`` (``datetime``), reflecting the
   authenticated account's trash state.

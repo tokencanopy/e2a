@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -158,6 +159,71 @@ type RuntimePolicy struct {
 type ExternalSendingAccessPolicy struct {
 	Mode                     Mode   `json:"mode"`
 	AccountsCreatedAtOrAfter string `json:"accounts_created_at_or_after"`
+	// Unlocks is the set of routes that may lift the restriction, drawn from
+	// the closed ExternalUnlock vocabulary. It is optional with omitempty on
+	// purpose: absent means every unlock (the behavior before the key
+	// existed), so a policy that never mentions it keeps its reviewed hash.
+	// Present, it must be non-empty and must contain operator_approval — an
+	// empty set would make the restriction unreachable by any route, and the
+	// request/approve path must always be able to lift it.
+	Unlocks []ExternalUnlock `json:"unlocks,omitempty"`
+}
+
+// ExternalUnlock names one route that can lift the external-sending
+// restriction for an account inside the cohort. Closed vocabulary.
+type ExternalUnlock string
+
+const (
+	// UnlockOperatorApproval is the audited operator grant
+	// (account_sending_controls.external_sending_approved). Always present.
+	UnlockOperatorApproval ExternalUnlock = "operator_approval"
+	// UnlockVerifiedDomain lets a message sent as the account's own
+	// currently verified custom domain reach external recipients.
+	UnlockVerifiedDomain ExternalUnlock = "verified_domain"
+	// UnlockPaidEntitlement lets the billing-issued paid-base entitlement
+	// (account_limits.external_sending_entitled) lift the restriction.
+	UnlockPaidEntitlement ExternalUnlock = "paid_entitlement"
+)
+
+// externalUnlockOrder is the vocabulary in its canonical order. The
+// normalized form sorts a configured set into this order, so two spellings
+// of one set (different order) produce one reviewed hash.
+var externalUnlockOrder = []ExternalUnlock{UnlockOperatorApproval, UnlockVerifiedDomain, UnlockPaidEntitlement}
+
+func (u ExternalUnlock) valid() bool {
+	for _, known := range externalUnlockOrder {
+		if u == known {
+			return true
+		}
+	}
+	return false
+}
+
+// Allows reports whether the policy lets the given route lift the
+// restriction. An absent set allows every route (the legacy behavior).
+func (p ExternalSendingAccessPolicy) Allows(u ExternalUnlock) bool {
+	if p.Unlocks == nil {
+		return u.valid()
+	}
+	for _, have := range p.Unlocks {
+		if have == u {
+			return true
+		}
+	}
+	return false
+}
+
+// AvailableUnlocks returns the effective unlock set in canonical order: the
+// configured set, or the whole vocabulary when the key is absent. Always a
+// fresh slice.
+func (p ExternalSendingAccessPolicy) AvailableUnlocks() []ExternalUnlock {
+	out := make([]ExternalUnlock, 0, len(externalUnlockOrder))
+	for _, u := range externalUnlockOrder {
+		if p.Allows(u) {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // Cutoff parses the validated cohort cutoff.
@@ -183,6 +249,34 @@ func (p ExternalSendingAccessPolicy) validate() error {
 	}
 	if canonical := t.UTC().Format(time.RFC3339); canonical != p.AccountsCreatedAtOrAfter {
 		return fmt.Errorf("sendingpolicy: external_sending_access.accounts_created_at_or_after must be written as %s", canonical)
+	}
+	return validateUnlocks(p.Unlocks)
+}
+
+// validateUnlocks enforces the unlock set's invariants. Absent (nil) is the
+// legacy "every unlock" meaning. A present set must be non-empty, drawn from
+// the closed vocabulary, free of duplicates, and must contain
+// operator_approval: a policy no route can satisfy has to fail loudly at
+// startup rather than silently deny every account forever.
+func validateUnlocks(unlocks []ExternalUnlock) error {
+	if unlocks == nil {
+		return nil
+	}
+	if len(unlocks) == 0 {
+		return errors.New("sendingpolicy: external_sending_access.unlocks must not be empty (omit the key to allow every unlock)")
+	}
+	seen := make(map[ExternalUnlock]struct{}, len(unlocks))
+	for _, u := range unlocks {
+		if !u.valid() {
+			return fmt.Errorf("sendingpolicy: external_sending_access.unlocks entry %q must be one of operator_approval, verified_domain, paid_entitlement", u)
+		}
+		if _, dup := seen[u]; dup {
+			return fmt.Errorf("sendingpolicy: external_sending_access.unlocks must not contain duplicate entry %q", u)
+		}
+		seen[u] = struct{}{}
+	}
+	if _, ok := seen[UnlockOperatorApproval]; !ok {
+		return errors.New("sendingpolicy: external_sending_access.unlocks must contain operator_approval (the request/approve path must always be able to lift the restriction)")
 	}
 	return nil
 }
@@ -349,6 +443,49 @@ func (p RuntimePolicy) normalized() RuntimePolicy {
 	p.TenantHeaderCanaryAccountIDs = nonNilCopy(p.TenantHeaderCanaryAccountIDs)
 	if p.ExternalSendingAccess != nil {
 		copied := *p.ExternalSendingAccess
+		if copied.Unlocks != nil {
+			// Canonical vocabulary order, and a copy independent of the
+			// caller's array. Unlike the plan-code list there is no seeded
+			// generation to stay byte-compatible with, so the set is sorted:
+			// its order carries no meaning and must not change the hash.
+			present := make(map[ExternalUnlock]int, len(copied.Unlocks))
+			for _, u := range copied.Unlocks {
+				present[u]++
+			}
+			sorted := make([]ExternalUnlock, 0, len(copied.Unlocks))
+			for _, u := range externalUnlockOrder {
+				for i := 0; i < present[u]; i++ {
+					sorted = append(sorted, u)
+				}
+				delete(present, u)
+			}
+			// Unknown entries (only reachable on an unvalidated value) keep
+			// their relative position at the end rather than vanishing, so
+			// Validate still sees and rejects them.
+			for _, u := range copied.Unlocks {
+				if n, ok := present[u]; ok {
+					for i := 0; i < n; i++ {
+						sorted = append(sorted, u)
+					}
+					delete(present, u)
+				}
+			}
+			copied.Unlocks = sorted
+			// The full vocabulary means exactly what an omitted key means,
+			// so it canonicalizes to omitted: one policy, one reviewed hash.
+			// Validation runs on the value as written, before this.
+			if len(sorted) == len(externalUnlockOrder) {
+				full := true
+				for i, u := range externalUnlockOrder {
+					if sorted[i] != u {
+						full = false
+					}
+				}
+				if full {
+					copied.Unlocks = nil
+				}
+			}
+		}
 		p.ExternalSendingAccess = &copied
 	}
 	return p

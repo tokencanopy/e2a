@@ -1175,3 +1175,54 @@ func loadConfigFromYAML(t *testing.T, yaml string) *Config {
 	}
 	return cfg
 }
+
+func TestNotificationsSupportContact(t *testing.T) {
+	load := func(t *testing.T, yaml string) (*Config, error) {
+		t.Helper()
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return Load(cfgPath)
+	}
+	t.Run("support_email wins over reply_to", func(t *testing.T) {
+		cfg, err := load(t, "notifications:\n  reply_to: replies@notify.example\n  support_email: help@notify.example\n")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.Notifications.SupportContact(); got != "help@notify.example" {
+			t.Errorf("SupportContact = %q, want support_email", got)
+		}
+	})
+	t.Run("falls back to reply_to, then empty", func(t *testing.T) {
+		cfg, err := load(t, "notifications:\n  reply_to: replies@notify.example\n")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.Notifications.SupportContact(); got != "replies@notify.example" {
+			t.Errorf("SupportContact = %q, want reply_to fallback", got)
+		}
+		cfg, err = load(t, "{}\n")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.Notifications.SupportContact(); got != "" {
+			t.Errorf("SupportContact = %q, want empty", got)
+		}
+	})
+	t.Run("env override", func(t *testing.T) {
+		t.Setenv("E2A_NOTIFICATIONS_SUPPORT_EMAIL", "help@env.example")
+		cfg, err := load(t, "{}\n")
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Notifications.SupportEmail != "help@env.example" {
+			t.Errorf("SupportEmail = %q, want env override", cfg.Notifications.SupportEmail)
+		}
+	})
+	t.Run("rejects a display-name address", func(t *testing.T) {
+		if _, err := load(t, "notifications:\n  support_email: \"Help <help@notify.example>\"\n"); err == nil {
+			t.Fatal("Load accepted a non-bare support_email")
+		}
+	})
+}

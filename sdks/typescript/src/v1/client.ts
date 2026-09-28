@@ -906,6 +906,14 @@ class AccountResource {
     this.suppressions = new SuppressionsResource(api);
     this.apiKeys = new APIKeysResource(api);
   }
+  /**
+   * The authenticated account (whoami). On a deployment that restricts
+   * external sending, `sendingAccess` (beta) reports the account's state; its
+   * `availableUnlocks` lists the routes that deployment accepts for lifting
+   * the restriction (`"operator_approval"` — see {@link requestSendingAccess}
+   * — is always among them; `"verified_domain"` and `"paid_entitlement"` only
+   * where configured). Undefined from servers that predate the field.
+   */
   get(): Promise<AccountView> {
     return call(() => this.api.getAccount());
   }
@@ -962,11 +970,15 @@ class AccountResource {
   /**
    * Beta: files a request for support to review this account's external
    * sending access — the recovery path named by an
-   * `external_sending_not_enabled` error's `details.recovery_url (raw wire key)`. Idempotent
+   * `external_sending_not_enabled` error's `details.recovery_url (raw wire key)`.
+   * File ONE request; the decision is emailed to the account owner. Idempotent
    * while a request is pending: submitting again returns the SAME pending
    * request instead of creating a second one. Capped at 3 requests per 30
-   * days (`E2ARateLimitError` beyond that). Filing never grants access by
-   * itself. Account-scoped credentials only.
+   * days (`E2ARateLimitError` beyond that). Throws `E2AError` with code
+   * `conflict` (409) when the account is not currently restricted (already
+   * approved, outside the rollout, or lifted by an available unlock) —
+   * nothing is filed; do not retry. Filing never grants access by itself.
+   * Account-scoped credentials only.
    */
   requestSendingAccess(body: SendingAccessRequestInput): Promise<SendingAccessRequestView> {
     return call(() => this.api.createSendingAccessRequest(body));

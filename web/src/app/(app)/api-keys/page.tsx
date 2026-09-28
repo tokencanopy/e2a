@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import type { APIKeyData } from "../../components/types";
 import { useAgents } from "../../components/hooks/useAgents";
 import { PageShell } from "../../components/loft/PageShell";
+import { useAccountReadOnly } from "../../components/hooks/useAccountReadOnly";
+import { ACCOUNT_READ_ONLY_CONTROL_TITLE, readOnlyMessageFromBody } from "../../../lib/readOnly";
 import { Chip } from "@e2a/ui";
 
 type SortKey = "last_used" | "created" | "name";
@@ -52,6 +54,7 @@ function formatExpiresIn(iso: string): { label: string; expired: boolean; immine
 }
 
 export default function APIKeysPage() {
+  const readOnly = useAccountReadOnly();
   const [keys, setKeys] = useState<APIKeyData[]>([]);
   const [loading, setLoading] = useState(true);
   const [newKeyName, setNewKeyName] = useState("");
@@ -154,7 +157,7 @@ export default function APIKeysPage() {
         fetchKeys();
       } else {
         const msg = await res.text();
-        setCreateError(msg || `Could not create the key (HTTP ${res.status}).`);
+        setCreateError(readOnlyMessageFromBody(msg) ?? (msg || `Could not create the key (HTTP ${res.status}).`));
       }
     } catch {
       setCreateError("Network error — check your connection and try again.");
@@ -348,7 +351,8 @@ export default function APIKeysPage() {
         </div>
         <button
           onClick={handleCreate}
-          disabled={creating || (scope === "agent" && !agentEmail)}
+          disabled={readOnly || creating || (scope === "agent" && !agentEmail)}
+          title={readOnly ? ACCOUNT_READ_ONLY_CONTROL_TITLE : undefined}
           className="w-full md:w-auto px-4 py-2 text-[13px] font-medium transition disabled:opacity-50"
           style={{
             background: "var(--accent-fill)",
