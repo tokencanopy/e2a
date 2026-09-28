@@ -515,11 +515,13 @@ func (m *Module) ExternalAccessStatus(ctx context.Context, userID string) (Exter
 	}, nil
 }
 
-// ExternalAccess is the narrow role the API surface uses: preflight and the
-// status readback. It carries no mutation.
+// ExternalAccess is the narrow role the API surface uses: preflight, the
+// status readback, and the prior-request history the operator notice
+// surfaces. It carries no mutation.
 type ExternalAccess interface {
 	ExternalAccessPreflight(ctx context.Context, userID, agentID string, recipients []string) (ExternalAccessVerdict, error)
 	ExternalAccessStatus(ctx context.Context, userID string) (ExternalAccessStatus, error)
+	PriorDecidedAccessRequests(ctx context.Context, userID, excludeRequestID string) (decidedCount int, lastOutcome string, err error)
 }
 
 var _ ExternalAccess = (*Module)(nil)

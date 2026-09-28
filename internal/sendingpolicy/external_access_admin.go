@@ -499,6 +499,35 @@ func (m *Module) LatestAccessRequest(ctx context.Context, userID string) (*Acces
 	return &r, nil
 }
 
+// PriorDecidedAccessRequests reports how many of the account's OTHER
+// requests have already been decided, and the outcome ("approved" or
+// "declined") of the most recently decided one. excludeRequestID omits the
+// request currently being filed/notified (it is not yet decided, but is
+// excluded defensively in case it somehow already has a terminal state by
+// the time this is read). decidedCount is 0 and lastOutcome is "" when the
+// account has no decided history. It is a plain read with no enablement
+// gate: a caller composing an operator notice already knows the control is
+// enabled (the request row it is about could not exist otherwise).
+func (m *Module) PriorDecidedAccessRequests(ctx context.Context, userID, excludeRequestID string) (decidedCount int, lastOutcome string, err error) {
+	if err := m.pool.QueryRow(ctx, `
+		SELECT count(*) FROM external_sending_access_requests
+		 WHERE user_id = $1 AND state != 'pending' AND id != $2`, userID, excludeRequestID,
+	).Scan(&decidedCount); err != nil {
+		return 0, "", fmt.Errorf("sendingpolicy: count prior access requests: %w", err)
+	}
+	if decidedCount == 0 {
+		return 0, "", nil
+	}
+	if err := m.pool.QueryRow(ctx, `
+		SELECT state FROM external_sending_access_requests
+		 WHERE user_id = $1 AND state != 'pending' AND id != $2
+		 ORDER BY decided_at DESC NULLS LAST, created_at DESC LIMIT 1`, userID, excludeRequestID,
+	).Scan(&lastOutcome); err != nil {
+		return 0, "", fmt.Errorf("sendingpolicy: read latest decided access request: %w", err)
+	}
+	return decidedCount, lastOutcome, nil
+}
+
 // AccessRequestListing is one row of the operator's request queue. Account
 // id, state and numbers only — no customer free text and no address.
 type AccessRequestListing struct {
