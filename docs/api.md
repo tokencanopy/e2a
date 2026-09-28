@@ -541,7 +541,10 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   a human-readable `message`; the owner can restore until `purge_after`. A
   paused account still answers `409 erase_held`, which takes precedence. The
   same rule applies to permanent agent and message deletes (below), so the
-  sent-mail evidence cannot be removed inside the window. The
+  sent-mail evidence cannot be removed inside the window. A deferred account,
+  agent or message keeps counting toward `usage.storage_bytes` until it is
+  purged, and a deferred agent keeps its address and blocks deleting its
+  domain until then. The
   receipt carries `mode` (`trash` | `permanent`), `purge_after` (trash only),
   `erase_deferred` (deferred erase only) and per-table counts. After any deletion the sign-in identity may be held for a
   period and cannot immediately register a new account (`registration_refused`).

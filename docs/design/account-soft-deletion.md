@@ -40,24 +40,44 @@ account trash window.
 - **External recipient** uses the external-sending-access notion: any
   recipient other than an agent of the same account, the account's verified
   owner mailbox (valid proof for its current email), or an address on one of
-  the deployment's shared agent domains (verified `domains` rows with no
-  owning account).
+  the deployment's shared agent domains. Shared domains match by name (the
+  configured `shared_domain`, even when its `domains` row has been adopted by
+  an account such as the probe account) or as verified `domains` rows with no
+  owner. Provider test domains in `trash.erase_defer_exempt_domains` (default
+  `simulator.amazonses.com`, which the standing prober and the e2e harness
+  mail every run) are exempt as well. The domain is the part after the LAST
+  `@`, so a quoted local part containing `@` cannot pose as an internal
+  domain.
+- **Exempt accounts.** System and internal account classes (synthetic probe
+  traffic, internal dogfooding) are never deferred — the same classes the
+  sending budgets exempt.
 - **Source of truth** is `message_recipients`: a row is written exactly when
   the provider (or relay) accepted the message, one per normalized envelope
   recipient (to/cc/bcc). It therefore records real sends only — never drafts,
-  review holds, refusals or queued mail — and is reached through the
-  account's agents and `idx_messages_agent_created`, with an `EXISTS` that
-  stops at the first hit. The send instant is the latest of the message's
-  `created_at`, `provider_accepted_at`, `reviewed_at` and `scheduled_at`, so a
-  scheduled or review-held message submitted recently counts even if it was
-  created long ago. `usage_events` was rejected as the source because it
+  review holds, refusals or queued mail. A message the provider accepted
+  that has not settled yet (a provider message id with no recipient rows, or
+  a send claimed inside the window) is classified by its own to/cc/bcc lists.
+  The send instant is the latest of `created_at`, `provider_accepted_at`,
+  `reviewed_at`, `scheduled_at` and `send_claimed_at`, so a scheduled or
+  review-held message submitted recently counts even if it was created long
+  ago. `usage_events` was rejected as the source because it
   carries no recipient addresses (it cannot tell an external send from an
   agent-to-agent one) and is not written for non-standard account classes;
   the deletion-resistant `sending_feedback_*` ledger was rejected because it
   stores recipients only as keyed digests.
-- **Ordering.** The decision is taken *after* the trash commits, so no send
-  can settle between the check and the purge — a trashed account cannot send.
-  If the check itself fails, the erase is deferred (the account is already in
+- **Cost.** The lookup is two index range scans per agent: ordinary sends
+  through `idx_messages_agent_created` bounded below by the window start minus
+  a 14-day retry lag (covers the 7-day budget hold), and scheduled/held sends
+  through the partial expression index `idx_messages_agent_delayed_outbound`
+  on `(agent_id, GREATEST(scheduled_at, reviewed_at))` (migration 125), with
+  an `EXISTS` that stops at the first hit. On an agent seeded with 300,000
+  old outbound messages (5% scheduled) and no recent send, `EXPLAIN ANALYZE`
+  shows both arms as index scans touching 3 and 2 buffers; the whole query
+  took 0.6 ms.
+- **Ordering.** The account decision is taken inside the purge claim
+  transaction, under the user row lock and next to the pause re-check, after
+  the trash committed — a trashed account cannot send. If the check itself
+  fails, the erase is deferred (the account is already in
   the trash and will be purged at the end of the window): the failure mode
   keeps evidence rather than destroying it.
 - **Precedence.** The paused-account refusal (`409 erase_held`) is checked
@@ -112,7 +132,10 @@ that purges sent mail:
 - The agent check is the same predicate scoped to one agent, the message
   check scoped to one message. The agent decision runs under the agent row
   lock after the send-lease check, and the deferral trashes the agent in the
-  same transaction; the message decision runs under the message row lock.
+  same transaction and cancels its pending scheduled sends (finalized as
+  failed with a submission-cancelled reason and an `email.failed` event), so
+  a later restore cannot re-arm mail the owner asked to delete permanently.
+  The message decision runs under the message row lock.
 - The paused-account refusal (`409 erase_held`) still comes first on the
   agent path. A read-only (abuse-paused) account cannot reach any of these
   writes at all.
@@ -131,12 +154,23 @@ that purges sent mail:
 - Operator force-purge (runbook: backdate `deleted_at` past the window and
   let the janitor run) still purges a deferred account, agent or message.
 
+### Costs of a deferral for the owner
+
+- A deferred account, agent or message keeps counting toward the account's
+  storage (`usage.storage_bytes`) until it is purged.
+- A deferred agent keeps its address reserved (`address_in_trash`) and,
+  like any trashed agent, blocks deleting its domain (`domain_has_agents`)
+  until it is purged.
+- An operator can force the purge per the runbook: backdate `deleted_at` past
+  the trash window and let the janitor run.
+
 ### Remaining limits
 
-- The account check counts only sends recorded in `message_recipients`, i.e.
-  mail the provider or relay accepted. A deployment whose trash windows are
-  configured shorter than `recent_sender_erase_defer_days` lets the janitor
-  purge a trashed agent or message before the look-back window ends; the
-  janitor's time-based purge is intentionally not deferred. Keep
-  `trash.retention_days` at least as long as the defer window (the defaults,
-  30 and 14, satisfy this).
+- The check counts mail the provider or relay accepted (settled recipient
+  rows, or an accepted-but-unsettled message's own recipient lists); mail that
+  never left is not evidence. An unsettled message's recipient lists may carry
+  display-name forms, which are compared verbatim and so count as external —
+  the conservative direction.
+- The janitor's time-based purge is intentionally not deferred. The server
+  therefore refuses an explicit `recent_sender_erase_defer_days` longer than
+  either trash window, and lowers the unset default to the shortest window.
