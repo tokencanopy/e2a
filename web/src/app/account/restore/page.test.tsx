@@ -238,6 +238,29 @@ describe("/account/restore", () => {
       expect(mockHardNavigate).not.toHaveBeenCalled();
     });
 
+    it("keeps the account restorable when the erase is deferred for a recent external sender", async () => {
+      const purgeAfter = new Date(Date.now() + 24 * DAY).toISOString();
+      installFetch({
+        erase: jsonResponse(200, {
+          deleted: true,
+          mode: "trash",
+          erase_deferred: true,
+          purge_after: purgeAfter,
+          user_deleted: false,
+        }),
+      });
+      await renderReady();
+      fireEvent.click(screen.getByRole("button", { name: /erase now/i }));
+      fireEvent.click(screen.getByRole("button", { name: /erase permanently/i }));
+      const status = await screen.findByText(/emailed people outside e2a recently/i);
+      expect(status).toHaveTextContent(/stays in the trash and is erased permanently after/i);
+      expect(status).toHaveTextContent(/can still\s+restore it/i);
+      // Still on the trashed-account screen, with the restore offer intact.
+      expect(screen.queryByRole("heading", { name: /were erased/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /restore account/i })).toBeEnabled();
+      expect(screen.queryByRole("region", { name: /erase this account permanently/i })).not.toBeInTheDocument();
+    });
+
     it("disables the confirm while erasing", async () => {
       installFetch({ erase: new Promise(() => {}) });
       await renderReady();

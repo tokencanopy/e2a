@@ -303,6 +303,33 @@ describe("Settings — Danger zone (delete account)", () => {
     );
   });
 
+  it("tells the user a deferred erase left the account in the trash until purge_after", async () => {
+    const purgeAfter = "2026-10-26T12:00:00Z";
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ deleted: true, mode: "trash", erase_deferred: true, purge_after: purgeAfter }),
+    })) as unknown as typeof fetch;
+
+    render(<SettingsPage />);
+    openDeleteFlow();
+    fireEvent.click(screen.getByRole("radio", { name: /erase permanently now/i }));
+    fireEvent.change(screen.getByPlaceholderText("DELETE"), { target: { value: "DELETE" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /can.t be recovered/i }));
+    fireEvent.click(screen.getByRole("button", { name: /erase my account permanently/i }));
+
+    const heading = await screen.findByText(/was deleted and moved to the trash/i);
+    const status = heading.closest('[role="status"]') as HTMLElement;
+    expect(status).toHaveTextContent(/emailed people outside e2a recently/i);
+    expect(status).toHaveTextContent(/stays in the trash/i);
+    expect(status).toHaveTextContent(/2026/);
+    expect(status).toHaveTextContent(/sign in again/i);
+    expect(mockHardNavigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    expect(mockHardNavigate).toHaveBeenCalledWith("/?account_deleted=1");
+  });
+
   it("switching back to trash clears the permanent acknowledgement", () => {
     render(<SettingsPage />);
     openDeleteFlow();

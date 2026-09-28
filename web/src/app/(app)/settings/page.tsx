@@ -10,7 +10,7 @@ import {
   getSendingAccessRequest,
   type SendingAccessRequest,
 } from "../../components/onboarding/api";
-import { readApiError } from "../../../lib/accountDeletion";
+import { formatLongDate, readApiError } from "../../../lib/accountDeletion";
 import { hardNavigate } from "../../../lib/navigation";
 import { sendingAccessRequestKey } from "../../../lib/swrKeys";
 import { sendingAccessSettingsSummary } from "../../../lib/sendingAccess";
@@ -287,13 +287,16 @@ function ExportSection() {
   );
 }
 
-type DeleteState = "idle" | "deleting" | "error";
+type DeleteState = "idle" | "deleting" | "error" | "deferred";
 type DeleteMode = "trash" | "permanent";
 
 // Delete account. DELETE /v1/account?confirm=DELETE moves the account to the
 // trash (restorable by signing in again for the trash window); adding
 // permanent=true erases it immediately. Erasing is a separate choice with its
-// own acknowledgement, never the default.
+// own acknowledgement, never the default. A permanent erase of an account that
+// emailed external recipients recently comes back as a trash receipt with
+// erase_deferred: the account is deleted but kept in the trash until
+// purge_after, so we say so (and when) before leaving the page.
 function DangerZone() {
   const [open, setOpen] = useState(false);
   const [confirmText, setConfirmText] = useState("");
@@ -301,6 +304,7 @@ function DangerZone() {
   const [acknowledged, setAcknowledged] = useState(false);
   const [state, setState] = useState<DeleteState>("idle");
   const [errorMessage, setErrorMessage] = useState("");
+  const [deferredUntil, setDeferredUntil] = useState("");
 
   const permanent = mode === "permanent";
   const ready = confirmText === "DELETE" && (!permanent || acknowledged);
@@ -338,6 +342,15 @@ function DangerZone() {
         } else {
           setErrorMessage(err.message || `HTTP ${res.status}`);
         }
+        return;
+      }
+      const receipt = (await res.json().catch(() => null)) as {
+        erase_deferred?: boolean;
+        purge_after?: string;
+      } | null;
+      if (receipt?.erase_deferred) {
+        setDeferredUntil(formatLongDate(receipt.purge_after));
+        setState("deferred");
         return;
       }
       // Every session is revoked server-side; a full navigation makes the
@@ -396,7 +409,39 @@ function DangerZone() {
             can&apos;t register a new account until it&apos;s released.
           </li>
         </ul>
-        {!open ? (
+        {state === "deferred" ? (
+          <div
+            role="status"
+            className="max-w-2xl p-4 space-y-3 text-[13px] leading-[1.6]"
+            style={{
+              background: "var(--bg-elev)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--r-md)",
+              color: "var(--fg)",
+            }}
+          >
+            <p className="font-medium">Your account was deleted and moved to the trash.</p>
+            <p style={{ color: "var(--fg-muted)" }}>
+              It emailed people outside e2a recently, so it isn&apos;t erased
+              right away: it stays in the trash
+              {deferredUntil ? <> until {deferredUntil}</> : <> until the trash window ends</>}
+              , then it&apos;s erased permanently. To restore it, sign in again
+              before then.
+            </p>
+            <button
+              onClick={() => hardNavigate("/?account_deleted=1")}
+              className="px-4 py-2 text-[13px] font-medium transition"
+              style={{
+                background: "var(--bg-panel)",
+                color: "var(--fg)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--r-md)",
+              }}
+            >
+              Continue
+            </button>
+          </div>
+        ) : !open ? (
           <button
             onClick={() => setOpen(true)}
             className="px-4 py-2 text-[13px] font-medium transition"
@@ -465,7 +510,9 @@ function DangerZone() {
                       Erase permanently now
                     </span>
                     <span style={{ color: "var(--fg-muted)" }}>
-                      Skips the trash. Nothing can be restored.
+                      Skips the trash. Nothing can be restored. If this account
+                      emailed people outside e2a recently, it&apos;s kept in the
+                      trash until the window ends instead.
                     </span>
                   </span>
                 </label>
