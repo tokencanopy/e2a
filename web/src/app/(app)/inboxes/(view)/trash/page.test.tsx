@@ -169,4 +169,39 @@ describe("AgentTrashPage", () => {
       );
     });
   });
+  it("explains a deferred Delete forever and keeps the message in the trash", async () => {
+    mockFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === LIST_URL && !init?.method) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ items: [trashedMessage] }),
+        });
+      }
+      if (init?.method === "DELETE") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: () =>
+            Promise.resolve(
+              JSON.stringify({
+                deleted: true,
+                id: "msg_1",
+                erase_deferred: true,
+                purge_after: "2026-10-28T12:00:00Z",
+              }),
+            ),
+        });
+      }
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("not found") });
+    });
+
+    render(<AgentTrashPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /Delete forever/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Click again to confirm/ }));
+    const notice = await screen.findByText(/went to people outside e2a recently/i);
+    expect(notice).toHaveTextContent(/stays in the trash until .*2026/i);
+    expect(notice).toHaveTextContent(/still restore it/i);
+    expect(screen.getByRole("button", { name: /^Restore$/ })).toBeInTheDocument();
+  });
 });

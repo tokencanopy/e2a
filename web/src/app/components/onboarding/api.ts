@@ -173,10 +173,21 @@ export async function restoreAgent(email: string): Promise<DashboardAgent> {
   );
 }
 
+// The deferral fields of a permanent agent/message delete receipt. A
+// recipient of external mail within the deployment's window is not purged
+// on demand: it stays in the trash until purge_after (erase_deferred).
+export interface PermanentDeleteReceipt {
+  deleted: boolean;
+  erase_deferred?: boolean;
+  purge_after?: string;
+  message?: string;
+}
+
 // DELETE /v1/agents/{email}?permanent=true — irreversible ("delete
-// forever" from the trash view).
-export async function permanentDeleteAgent(email: string): Promise<void> {
-  return request(
+// forever" from the trash view), unless the agent emailed external
+// recipients recently (erase_deferred: it stays in the trash).
+export async function permanentDeleteAgent(email: string): Promise<PermanentDeleteReceipt> {
+  return request<PermanentDeleteReceipt>(
     "/v1/agents/" +
       encodeURIComponent(email) +
       "?confirm=DELETE&permanent=true",
@@ -326,9 +337,10 @@ export async function restoreMessage(email: string, id: string): Promise<void> {
 }
 
 // DELETE …?permanent=true&confirm=DELETE — permanently delete a message
-// that is already in the trash ("delete forever").
-export async function purgeMessage(email: string, id: string): Promise<void> {
-  return request(
+// that is already in the trash ("delete forever"), unless it was sent to
+// external recipients recently (erase_deferred: it stays in the trash).
+export async function purgeMessage(email: string, id: string): Promise<PermanentDeleteReceipt> {
+  return request<PermanentDeleteReceipt>(
     "/v1/agents/" +
       encodeURIComponent(email) +
       "/messages/" +
