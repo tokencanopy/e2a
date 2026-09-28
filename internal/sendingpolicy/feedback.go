@@ -184,7 +184,13 @@ func (m *Module) ProcessProviderFeedback(ctx context.Context, fb delivery.Provid
 		return delivery.FeedbackResult{}, err
 	}
 	if !found {
+		expired := false
 		if validAttemptMarker(fb.AttemptCorrelationID) {
+			if expired, err = pastRetention(ctx, tx, fb.AttemptCorrelationID); err != nil {
+				return delivery.FeedbackResult{}, err
+			}
+		}
+		if validAttemptMarker(fb.AttemptCorrelationID) && !expired {
 			// e2a stamped this mail, yet no retained correlation answers
 			// it: a correlation GC'd early, a write that never landed, or a
 			// forged marker. Spec: count and alert, never treat as healthy.
@@ -549,10 +555,15 @@ func lookupCorrelation(ctx context.Context, tx pgx.Tx, providerMessageID, attemp
 	}
 	if id := NormalizeProviderMessageID(providerMessageID); id != "" {
 		// provider_message_id is not unique (a re-driven send can bind a new
-		// id to a new attempt), so order deterministically and prefer a row
-		// that is still retained over one already past its horizon.
+		// id to a new attempt), so order deterministically. Rows past their
+		// horizon are excluded outright rather than merely ordered last: the
+		// janitor deletes exactly those rows, and a LIMIT 1 FOR SHARE whose
+		// chosen row is deleted concurrently returns NO row instead of the
+		// next one — a spurious uncorrelated result. An unexpired row is
+		// never a GC target, so the lock cannot lose it.
 		c, ok, err := scan(tx.QueryRow(ctx, cols+`WHERE provider_message_id = $1
-			ORDER BY (expires_at IS NULL OR expires_at > now()) DESC, created_at DESC, correlation_id
+			  AND (expires_at IS NULL OR expires_at > now())
+			ORDER BY created_at DESC, correlation_id
 			LIMIT 1
 			  FOR SHARE`, id))
 		if err != nil || ok {
@@ -560,9 +571,25 @@ func lookupCorrelation(ctx context.Context, tx pgx.Tx, providerMessageID, attemp
 		}
 	}
 	if attemptID = strings.TrimSpace(attemptID); attemptID != "" {
-		return scan(tx.QueryRow(ctx, cols+`WHERE correlation_id = $1 FOR SHARE`, attemptID))
+		return scan(tx.QueryRow(ctx, cols+`WHERE correlation_id = $1
+			  AND (expires_at IS NULL OR expires_at > now())
+			  FOR SHARE`, attemptID))
 	}
 	return feedbackCorrelation{}, false, nil
+}
+
+// pastRetention reports whether the marker names a correlation that still
+// exists but is past its horizon (or is being removed by the janitor right
+// now — this unlocked read sees the pre-delete snapshot). Feedback for it is
+// retention working as designed, not the lost-correlation alert.
+func pastRetention(ctx context.Context, tx pgx.Tx, attemptID string) (bool, error) {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM sending_feedback_correlations WHERE correlation_id = $1)`,
+		strings.TrimSpace(attemptID)).Scan(&exists); err != nil {
+		return false, fmt.Errorf("sendingpolicy: check expired correlation: %w", err)
+	}
+	return exists, nil
 }
 
 func loadFeedbackRecipients(ctx context.Context, tx pgx.Tx, correlationID string) ([]*feedbackRecipient, error) {

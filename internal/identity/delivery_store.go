@@ -1136,7 +1136,7 @@ func (s *Store) SuppressedAddresses(ctx context.Context, userID string, addrs []
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT address FROM suppressions WHERE user_id = $1 AND address = ANY($2)`,
-		userID, norm,
+		userID, suppressionLookupSet(norm),
 	)
 	if err != nil {
 		return nil, err

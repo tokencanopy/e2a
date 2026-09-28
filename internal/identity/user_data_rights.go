@@ -298,6 +298,13 @@ func (s *Store) DeleteUserData(ctx context.Context, userID string) (*DeleteUserD
 // delete. A nil hook is a plain account delete (dev / no SES). The DB FK
 // cascade still removes the domain rows; the hook only schedules the remote
 // SES cleanup that the cascade cannot do.
+//
+// TEST-ONLY: production account deletion goes DeleteUserDataCore →
+// EraseAccount / TrashAccount, whose purge seal also stamps the retained
+// feedback-provenance horizon; this path does not. Nothing outside tests
+// calls DeleteUserData or DeleteUserDataTx.
+// TODO(tokencanopy/e2a#1013): remove both, porting their tests to
+// EraseAccount.
 func (s *Store) DeleteUserDataTx(ctx context.Context, userID string, perDomainInTx func(ctx context.Context, tx pgx.Tx, domain string) error) (*DeleteUserDataResult, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {

@@ -2,6 +2,7 @@ package sendingpolicy_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -309,11 +310,13 @@ func TestLateComplaintAfterRealAccountEraseIsProvenanceOnly(t *testing.T) {
 	_, corrID, sesID := f.authorizedSend(g, msg, []string{"late@example.test"})
 
 	// The purge reads its horizon from a DATABASE-source module whose
-	// config-file policy says 5 days; the effective (singleton) policy says
-	// the 30-day default, and that is what must be stamped.
+	// config-file policy says 5 days, while the activated (effective) policy
+	// says 45 — neither is the 30-day default, so the stamp proves which
+	// source the seal read.
 	short := sendingpolicy.DisabledPolicy()
 	short.SendingFeedbackPostAcctRetention = 5
 	dbSourced := sendingpolicy.NewPolicyModule(f.pool, f.secrets(), sendingpolicy.PolicySourceDatabase, short)
+	f.activateRetention(dbSourced, 45)
 	store := identity.NewStore(f.pool)
 	store.SetFeedbackRetentionResolver(dbSourced.EffectiveFeedbackRetention)
 	if _, err := store.EraseAccount(f.ctx, user, nil); err != nil {
@@ -327,8 +330,8 @@ func TestLateComplaintAfterRealAccountEraseIsProvenanceOnly(t *testing.T) {
 		t.Fatal("EraseAccount must purge the user row")
 	}
 	corrExp := f.correlationExpiry(corrID)
-	if corrExp == nil || corrExp.Before(time.Now().Add(29*24*time.Hour)) || corrExp.After(time.Now().Add(31*24*time.Hour)) {
-		t.Fatalf("seal stamped %v, want ~30 days (the effective policy), not the config's 5", corrExp)
+	if corrExp == nil || corrExp.Before(time.Now().Add(44*24*time.Hour)) || corrExp.After(time.Now().Add(46*24*time.Hour)) {
+		t.Fatalf("seal stamped %v, want ~45 days (the effective policy), not the config's 5 or the default 30", corrExp)
 	}
 
 	res, err := module.ProcessProviderFeedback(f.ctx, feedback("late-evt", time.Now().UTC(), delivery.KindComplaint, sesID, "", "late@example.test"))
@@ -356,6 +359,159 @@ func TestLateComplaintAfterRealAccountEraseIsProvenanceOnly(t *testing.T) {
 	}
 	if c, r, e := f.provenanceRows(corrID); c+r+e != 0 {
 		t.Fatalf("after the horizon: correlations=%d recipients=%d events=%d, want none", c, r, e)
+	}
+}
+
+// activateRetention activates a database policy whose post-account
+// feedback retention is `days`.
+func (f *fixture) activateRetention(m *sendingpolicy.Module, days int) {
+	f.t.Helper()
+	before, err := m.InspectPolicy(f.ctx)
+	if err != nil {
+		f.t.Fatalf("inspect policy: %v", err)
+	}
+	next := before.Policy
+	next.SendingFeedbackPostAcctRetention = days
+	if _, err := m.ActivatePolicy(f.ctx, sendingpolicy.ActivationRequest{
+		ExpectedGeneration: before.Generation, Policy: next,
+		Actor: "integration-test", Reason: "non-default feedback retention",
+	}); err != nil {
+		f.t.Fatalf("activate policy: %v", err)
+	}
+}
+
+// TestPurgeRetentionResolverErrorLeavesTheAccountUnpurged: a seal that
+// cannot resolve its horizon must not stamp a guess — it fails, the user row
+// survives for the purge's next pass, and nothing is stamped.
+func TestPurgeRetentionResolverErrorLeavesTheAccountUnpurged(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(sendingpolicy.DisabledPolicy())
+	user := f.user("standard")
+	agent := f.agent(user)
+	msg := f.messageTo(agent, "relay", []string{"unresolved@example.test"})
+	_, corrID, _ := f.authorizedSend(g, msg, []string{"unresolved@example.test"})
+
+	store := identity.NewStore(f.pool)
+	store.SetFeedbackRetentionResolver(func(context.Context) (time.Duration, error) {
+		return 0, errors.New("policy store unavailable")
+	})
+	if _, err := store.EraseAccount(f.ctx, user, nil); err == nil {
+		t.Fatal("EraseAccount must fail when the retention horizon cannot be resolved")
+	}
+	var users int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM users WHERE id = $1`, user).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if users != 1 {
+		t.Fatal("the user row must survive a seal that could not resolve its horizon")
+	}
+	if at := f.correlationExpiry(corrID); at != nil {
+		t.Fatalf("nothing may be stamped without a resolved horizon, got %v", at)
+	}
+}
+
+// TestLegacyRawFormHMACStillMatches: a recipient row signed before
+// canonicalization (over the raw Unicode spelling, which differs from the
+// canonical A-label form) is still matched through the raw-form fallback.
+func TestLegacyRawFormHMACStillMatches(t *testing.T) {
+	f := newFixture(t)
+	g := f.gate(sendingpolicy.DisabledPolicy())
+	module := sendingpolicy.NewModule(f.pool, f.secrets())
+	user := f.user("standard")
+	agent := f.agent(user)
+	raw := "alt@bücher.example"
+	msg := f.messageTo(agent, "relay", []string{raw})
+	_, corrID, sesID := f.authorizedSend(g, msg, []string{raw})
+
+	keyring, err := sendingpolicy.LoadKeyring(fxHMAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, legacy := keyring.Sign([]byte(raw))
+	_, canonical := keyring.Sign([]byte("alt@xn--bcher-kva.example"))
+	if string(legacy) == string(canonical) {
+		t.Fatal("fixture must sign two distinct subjects")
+	}
+	f.exec(`UPDATE sending_feedback_recipients SET recipient_hmac = $2, hmac_key_version = $3 WHERE correlation_id = $1`, corrID, legacy, version)
+
+	if _, err := module.ProcessProviderFeedback(f.ctx, feedback("legacy-1", time.Now().UTC(), delivery.KindDelivery, sesID, "", raw)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _, _ := f.recipientRow(corrID); b != "delivered" {
+		t.Fatalf("a legacy raw-form row must still match: bucket %s", b)
+	}
+}
+
+// TestFeedbackMetricCarriesAppliedBucketAndOnlyAfterCommit: the bucket label
+// is the one actually APPLIED (a simulator delivery is correlated/none, not
+// delivered), and a pass whose transaction rolls back emits nothing.
+func TestFeedbackMetricCarriesAppliedBucketAndOnlyAfterCommit(t *testing.T) {
+	f := newFixture(t)
+	metrics := recordFeedbackMetrics(t)
+	g := f.gate(sendingpolicy.DisabledPolicy())
+	module := sendingpolicy.NewModule(f.pool, f.secrets())
+	user := f.user("standard")
+	agent := f.agent(user)
+	sim := "bounce-check@simulator.amazonses.com"
+	msg := f.messageTo(agent, "relay", []string{sim})
+	_, _, sesID := f.authorizedSend(g, msg, []string{sim})
+	if _, err := module.ProcessProviderFeedback(f.ctx, feedback("applied-1", time.Now().UTC(), delivery.KindDelivery, sesID, "", sim)); err != nil {
+		t.Fatal(err)
+	}
+	if got := metrics(); len(got) != 1 || got["correlated/none"] != 1 {
+		t.Fatalf("metrics = %v, want exactly one correlated/none sample", got)
+	}
+
+	// Rollback: the simulator recipient is processed first (a sample is
+	// collected, no aggregate write); the ordinary one's aggregate insert
+	// then fails, rolling the whole pass back.
+	f.exec(`
+		CREATE OR REPLACE FUNCTION fx_fail_outcome_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'fixture: aggregate write refused'; END $$`)
+	f.exec(`CREATE TRIGGER fx_fail_outcome_insert BEFORE INSERT ON account_sending_outcomes_daily
+	        FOR EACH ROW EXECUTE FUNCTION fx_fail_outcome_insert()`)
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS fx_fail_outcome_insert ON account_sending_outcomes_daily`)
+		_, _ = f.pool.Exec(context.Background(), `DROP FUNCTION IF EXISTS fx_fail_outcome_insert()`)
+	})
+	both := []string{sim, "ordinary@example.test"}
+	msg2 := f.messageTo(agent, "relay", both)
+	_, _, ses2 := f.authorizedSend(g, msg2, both)
+	before := metrics()
+	if _, err := module.ProcessProviderFeedback(f.ctx, feedback("rollback-1", time.Now().UTC(), delivery.KindDelivery, ses2, "", both...)); err == nil {
+		t.Fatal("the fixture trigger must fail the pass")
+	}
+	if after := metrics(); len(after) != len(before) || after["correlated/none"] != before["correlated/none"] {
+		t.Fatalf("a rolled-back pass emitted samples: before=%v after=%v", before, after)
+	}
+}
+
+// TestProvenanceRepairInALabelBlocksAUnicodeTypedSend: SES reports an IDN
+// recipient in A-label form, so that is the spelling the repair stores; the
+// send-time suppression lookup must still block the customer's next send to
+// the Unicode spelling they typed.
+func TestProvenanceRepairInALabelBlocksAUnicodeTypedSend(t *testing.T) {
+	f := newFixture(t)
+	module := sendingpolicy.NewModule(f.pool, f.secrets())
+	user := f.user("standard")
+	agent := f.agent(user)
+	if _, err := module.RepairSuppressions(f.ctx, user, []delivery.FeedbackRepair{
+		{Address: "leser@xn--bcher-kva.example", Source: "bounce", Reason: "bounce:General"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := identity.NewStore(f.pool)
+	typed := []string{"Leser@Bücher.example"}
+	eff, err := store.EffectiveSuppressions(f.ctx, user, agent, typed)
+	if err != nil || len(eff) != 1 {
+		t.Fatalf("EffectiveSuppressions(%v) = %v (err %v), want the A-label row", typed, eff, err)
+	}
+	acct, err := store.SuppressedAddresses(f.ctx, user, typed)
+	if err != nil || len(acct) != 1 {
+		t.Fatalf("SuppressedAddresses(%v) = %v (err %v), want the A-label row", typed, acct, err)
+	}
+	if other, err := store.EffectiveSuppressions(f.ctx, user, agent, []string{"leser@bucher.example"}); err != nil || len(other) != 0 {
+		t.Fatalf("a different domain matched: %v (err %v)", other, err)
 	}
 }
 
@@ -455,6 +611,9 @@ func TestSelfAddressedDeliveriesDoNotDiluteTheDenominator(t *testing.T) {
 	if _, err := module.ProcessProviderFeedback(f.ctx, soft); err != nil {
 		t.Fatal(err)
 	}
+	if c := f.outcomes(user)[todayKey(1, true)]; c != [4]int{2, 0, 0, 0} {
+		t.Fatalf("aggregate after an excluded soft bounce = %v, want terminal_other still 0", c)
+	}
 	// Complaints and hard bounces from every excluded class still count.
 	for i, addr := range excluded {
 		kind := delivery.KindComplaint
@@ -529,5 +688,32 @@ func TestRepairReportsOnlyInsertedRows(t *testing.T) {
 	again, err := module.RepairSuppressions(f.ctx, user, []delivery.FeedbackRepair{{Address: "fresh@example.test", Source: "bounce", Reason: "bounce:General"}})
 	if err != nil || len(again) != 0 {
 		t.Fatalf("a repeated repair reported %+v (err %v), want nothing", again, err)
+	}
+}
+
+// TestExpiredCorrelationIsPastRetentionNotLost: a correlation past its
+// horizon is never matched (the janitor may be deleting it), and feedback
+// carrying its marker counts as plain uncorrelated — retention working —
+// not as the lost-correlation alert.
+func TestExpiredCorrelationIsPastRetentionNotLost(t *testing.T) {
+	f := newFixture(t)
+	metrics := recordFeedbackMetrics(t)
+	g := f.gate(sendingpolicy.DisabledPolicy())
+	module := sendingpolicy.NewModule(f.pool, f.secrets())
+	user := f.user("standard")
+	agent := f.agent(user)
+	msg := f.messageTo(agent, "relay", []string{"aged@example.test"})
+	_, corrID, sesID := f.authorizedSend(g, msg, []string{"aged@example.test"})
+	f.exec(`UPDATE sending_feedback_correlations SET expires_at = now() - interval '1 minute' WHERE correlation_id = $1`, corrID)
+
+	res, err := module.ProcessProviderFeedback(f.ctx, feedback("aged-1", time.Now().UTC(), delivery.KindComplaint, sesID, corrID, "aged@example.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Correlated {
+		t.Fatal("an expired correlation must not be matched")
+	}
+	if got := metrics(); got["uncorrelated/complaint"] != 1 || got["uncorrelated_with_marker/complaint"] != 0 {
+		t.Fatalf("metrics = %v, want uncorrelated (past retention), not the alert", got)
 	}
 }

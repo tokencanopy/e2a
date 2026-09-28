@@ -408,9 +408,11 @@ provider retries. The seam never reads `messages`, `agent_identities`, or
   before, keeping the `source_message_id` and diagnostic reason the
   suppression API returns and keeping the row's insert atomic with the
   `suppression_added` event that announces it. Only when no message can own
-  the row — the purged-message case this slice exists for — does the
-  consumer apply the repair through the seam, and that repair announces
-  nothing because there is no message for an event to reference. Repair is
+  the row — the purged-message case this slice exists for, including a
+  message purged between correlation and the live transaction's lock — does
+  the consumer apply the repair through the seam, in one transaction with a
+  `suppression.added` (no message id) for each row it actually inserted; an
+  address already suppressed is refreshed but not re-announced. Repair is
   limited to customer messages: a bounce on an approval notice must not
   suppress the account owner's own address. Upserts go through
   `internal/suppressionsync`, which advances the row's `sync_generation` and
@@ -422,9 +424,18 @@ provider retries. The seam never reads `messages`, `agent_identities`, or
   transaction that makes the account irrecoverable), not at the user's delete
   click: a trashed account stays restorable for the trash window and is not
   stamped, so provenance for a self-deleted account can live for the trash
-  window plus 30 days after purge. The hourly `sending_feedback_maintenance`
-  job removes expired provenance and daily outcome rows older than the
-  detector window plus one day.
+  window plus 30 days after purge. The horizon is read at purge time from the
+  effective (database-source when configured) policy. Correlation lookups take
+  `FOR SHARE` and skip rows past their horizon, so feedback racing the seal
+  inherits its expiry and a concurrent janitor delete cannot produce a
+  spurious "uncorrelated" result. The hourly `sending_feedback_maintenance`
+  job removes expired correlations together with their recipients and events,
+  and daily outcome rows older than the detector window plus one day. The
+  daily `sending_feedback_reconcile` job stamps the horizon on customer
+  provenance whose account no longer exists (a purge before B8, or a
+  correlation authorized in a race with a purge) and sweeps events whose
+  correlation is gone. Migration 124 ran that stamp once for the backlog with
+  a **fixed 30 days** (the policy default), not the effective policy value.
 - **Keyring coverage is a startup gate**: a server that HAS a keyring
   refuses to start if any unexpired recipient row was signed under a version
   that keyring does not hold. Rotation is superset-first: add the new key
@@ -435,6 +446,27 @@ provider retries. The seam never reads `messages`, `agent_identities`, or
   at all is not checked: it signs and matches nothing by design, and
   bricking it over rows an earlier configuration wrote would turn a disabled
   feature into an outage.
+
+- **Denominator exclusion.** A delivery or terminal non-hard bounce to a
+  recipient a sender can generate at will is bucket `none`: the SES mailbox
+  simulator, the configured `shared_domain`, platform-owned verified
+  `domains` rows, and the sending account's own verified domains. Hard
+  bounces and complaints from those recipients still count. Known limits:
+  the match is on the exact recipient domain (a subdomain of an excluded
+  domain still counts), domains verified by *other* accounts still count
+  (a two-account dilution is not closed), and there is no DNS/MX lookup at
+  ingestion, so a customer domain whose MX points at this deployment is not
+  recognized as hosted.
+- **IDN recipients.** Authorization accepts internationalized domains as
+  typed; both the recipient HMAC and feedback matching use the IDNA
+  lookup-profile ASCII form of the domain (raw form as a fallback for rows
+  signed earlier), and the send-time suppression lookup checks the A-label
+  and Unicode spellings, so a suppression repaired from provider feedback in
+  A-label form still blocks a Unicode-typed recipient.
+- **Metric.** `e2a_sending_feedback_ingested_total{outcome,bucket}` (see
+  `docs/observability.md`); `uncorrelated_with_marker` is the alert signal,
+  and `dead_account` with bucket `complaint` is the operator's cue to consider
+  a manual `-escalate-deleted-account-to-abuse`.
 
 The detector itself (thresholds, pauses, notices) is B9. B8 captures
 evidence; the one new customer-visible behavior is that a hard bounce or
