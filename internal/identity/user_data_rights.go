@@ -273,6 +273,11 @@ type DeleteUserDataResult struct {
 	OAuthAccessTokensDeleted      int64      `json:"oauth_access_tokens_deleted,omitempty"`
 	OAuthRefreshTokensDeleted     int64      `json:"oauth_refresh_tokens_deleted,omitempty"`
 	UserDeleted                   bool       `json:"user_deleted" doc:"True only when the account row itself was erased (mode permanent)."`
+	// EraseDeferred marks a permanent erase that was deferred to the trash
+	// because the account recently emailed external recipients
+	// (identity.RecentSenderEraseDefer); Message explains it.
+	EraseDeferred bool   `json:"erase_deferred,omitempty" doc:"True when permanent=true was requested but the account emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being erased now: mode is trash and the account is purged at purge_after. The account is already unusable; the owner can restore it by signing in before purge_after. Absent otherwise."`
+	Message       string `json:"message,omitempty" doc:"Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred."`
 } // @name DeleteUserDataResult
 
 // DeleteUserData wipes everything tied to a user in a single transaction.

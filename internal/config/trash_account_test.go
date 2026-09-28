@@ -59,3 +59,39 @@ func TestAccountTrashEnvOverridesFailClosedWhenMalformed(t *testing.T) {
 		t.Fatalf("env overrides = %d/%v", cfg.Trash.AccountRetention(), cfg.Trash.IdentityTombstones)
 	}
 }
+
+func TestRecentSenderEraseDeferDefaultsTo14AndZeroDisables(t *testing.T) {
+	cfg, err := Load(writeTrashConfig(t, "trash:\n  retention_days: 30\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Trash.RecentSenderEraseDeferDays != 14 {
+		t.Fatalf("recent_sender_erase_defer_days default = %d, want 14", cfg.Trash.RecentSenderEraseDeferDays)
+	}
+	cfg, err = Load(writeTrashConfig(t, "trash:\n  retention_days: 30\n  recent_sender_erase_defer_days: 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Trash.RecentSenderEraseDeferDays != 0 {
+		t.Fatalf("explicit 0 = %d, want 0 (disabled)", cfg.Trash.RecentSenderEraseDeferDays)
+	}
+	if _, err := Load(writeTrashConfig(t, "trash:\n  retention_days: 30\n  recent_sender_erase_defer_days: -1\n")); err == nil {
+		t.Fatal("a negative recent_sender_erase_defer_days was accepted")
+	}
+}
+
+func TestRecentSenderEraseDeferEnvOverride(t *testing.T) {
+	p := writeTrashConfig(t, "")
+	t.Setenv("E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS", "two weeks")
+	if _, err := Load(p); err == nil {
+		t.Fatal("a malformed E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS was ignored")
+	}
+	t.Setenv("E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS", "3")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Trash.RecentSenderEraseDeferDays != 3 {
+		t.Fatalf("env override = %d, want 3", cfg.Trash.RecentSenderEraseDeferDays)
+	}
+}

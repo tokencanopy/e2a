@@ -672,6 +672,16 @@ type TrashConfig struct {
 	// account soft deletion existed. Override with
 	// E2A_TRASH_ACCOUNT_RETENTION_DAYS.
 	AccountRetentionDays *int `yaml:"account_retention_days"`
+	// RecentSenderEraseDeferDays defers an on-demand permanent account
+	// erase (DELETE /v1/account?permanent=true, or the restore
+	// interstitial's "erase now") for an account that emailed an external
+	// recipient within this many days: the account is moved to the trash
+	// instead and purged at the end of the normal account trash window, so
+	// late provider feedback (complaints, bounces) still lands on its sending
+	// controls and aggregates. Default 14; 0 disables the deferral. It has no
+	// effect when account trash is disabled (account_retention_days: 0).
+	// Override with E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS.
+	RecentSenderEraseDeferDays int `yaml:"recent_sender_erase_defer_days"`
 	// IdentityTombstones enables identity tombstones: every account purge
 	// holds the account's login subject(s) and email (and, for an
 	// abuse-paused account, its verified domains) as keyed digests so the
@@ -758,7 +768,7 @@ func Load(path string) (*Config, error) {
 		},
 		RateLimits: RateLimitsConfig{PollPerMinute: 240},
 		Metrics:    MetricsConfig{ListenAddr: "127.0.0.1:9091"},
-		Trash:      TrashConfig{RetentionDays: 30},
+		Trash:      TrashConfig{RetentionDays: 30, RecentSenderEraseDeferDays: 14},
 		// An absent sender_identity block keeps the fixture expiry default;
 		// an explicit `fixture_ttl: 0` survives unmarshal and disables it.
 		// The reclaim defaults are the SAFE ones: disarmed, no zones (which
@@ -993,6 +1003,13 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.Trash.AccountRetentionDays = &d
 	}
+	if v := os.Getenv("E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS"); v != "" {
+		d, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("config: E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS must be a whole number of days, got %q", v)
+		}
+		cfg.Trash.RecentSenderEraseDeferDays = d
+	}
 	if v := os.Getenv("E2A_TRASH_IDENTITY_TOMBSTONES"); v != "" {
 		b, err := strconv.ParseBool(strings.TrimSpace(v))
 		if err != nil {
@@ -1063,6 +1080,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Trash.AccountRetentionDays != nil && *c.Trash.AccountRetentionDays < 0 {
 		return fmt.Errorf("config: trash.account_retention_days must be 0 (erase immediately) or a positive number of days (got %d)", *c.Trash.AccountRetentionDays)
+	}
+	if c.Trash.RecentSenderEraseDeferDays < 0 {
+		return fmt.Errorf("config: trash.recent_sender_erase_defer_days must be 0 (never defer) or a positive number of days (got %d)", c.Trash.RecentSenderEraseDeferDays)
 	}
 	if c.Trash.RetentionDays < 1 {
 		return fmt.Errorf("config: trash.retention_days must be at least 1 (got %d) — the stable API promises soft-deleted resources stay restorable", c.Trash.RetentionDays)

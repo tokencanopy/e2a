@@ -474,9 +474,21 @@ rate_limits:
 # -inspect-tombstone-keys shows the active version, the known versions and
 # how many live tombstones depend on each.
 # E2A_TRASH_IDENTITY_TOMBSTONES=true overrides the flag.
+#
+# recent_sender_erase_defer_days (default 14; 0 disables): an on-demand
+# permanent erase (DELETE /v1/account?permanent=true, or "erase now" on the
+# restore screen) of an account that emailed an external recipient — anyone
+# other than its own agents, its verified owner mailbox, or an address on the
+# shared agent domain — within this many days is deferred: the account goes
+# to the trash instead (receipt mode "trash", erase_deferred: true) and is
+# purged at the end of account_retention_days, so complaints and bounces that
+# arrive days after a send still land on its sending controls. No effect when
+# account trash is disabled. E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS
+# overrides it.
 trash:
   retention_days: 30
   # account_retention_days: 30
+  recent_sender_erase_defer_days: 14
   identity_tombstones: false
 
 # — Metrics (Prometheus) ——————————————————————————————————————————————————————

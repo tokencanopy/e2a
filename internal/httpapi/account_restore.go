@@ -143,7 +143,10 @@ func (s *Server) handleAccountErase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.Deleted = true
-	if s.deps.ClearRestoreSessionCookie != nil {
+	// A deferred erase (the account recently emailed external recipients)
+	// leaves the account in the trash, still restorable: keep the restricted
+	// session so the interstitial can still offer the restore.
+	if s.deps.ClearRestoreSessionCookie != nil && !res.EraseDeferred {
 		s.deps.ClearRestoreSessionCookie(w)
 	}
 	writeAccountJSON(w, http.StatusOK, res)

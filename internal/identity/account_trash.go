@@ -434,6 +434,11 @@ func accountLoginIdentifiersTx(ctx context.Context, tx pgx.Tx, userID, email, su
 // with ErrEraseHeld so an operator can classify the pause before the content
 // goes (the account can still be trashed; the janitor purges it after the
 // window, writing abuse tombstones when the history says abuse).
+//
+// An account that sent to an external recipient within
+// RecentSenderEraseDefer is not purged: it stays in the trash (trashed here
+// if it was live) and the receipt is mode "trash" with erase_deferred — see
+// account_erase_defer.go. The pause refusal above takes precedence.
 func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx func(ctx context.Context, tx pgx.Tx, domain string) error) (*DeleteUserDataResult, error) {
 	res := &DeleteUserDataResult{Mode: AccountDeleteModePermanent}
 	// Fast path with no side effects; the authoritative check runs under the
@@ -454,16 +459,52 @@ func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx f
 	if s.tombstones.Enabled && s.tombstones.Keyring == nil {
 		return nil, ErrTombstoneKeyUnavailable
 	}
+	var trashRes *DeleteUserDataResult
 	if u.DeletedAt == nil {
-		if _, err := s.TrashAccount(ctx, userID, perDomainInTx); err != nil && !errors.Is(err, ErrAccountTrashed) {
+		if trashRes, err = s.TrashAccount(ctx, userID, perDomainInTx); err != nil && !errors.Is(err, ErrAccountTrashed) {
 			return nil, err
 		}
+	}
+	// Deferred erase for recent external senders. Decided AFTER the trash
+	// commits, so no send can settle between the check and the purge: the
+	// trashed account can no longer send.
+	deferred, err := s.eraseDeferralApplies(ctx, userID)
+	if err != nil {
+		// Fail toward keeping the evidence: the account is already trashed
+		// and the janitor purges it at the end of the window.
+		log.Printf("[identity] erase deferral check failed; keeping the account in the trash: user=%s err=%v", userID, err)
+		deferred = true
+	}
+	if deferred {
+		return s.deferredEraseReceipt(ctx, userID, trashRes)
 	}
 	purged, err := s.purgeAccount(ctx, userID, true, perDomainInTx)
 	if err != nil {
 		return nil, err
 	}
 	res.UserDeleted = purged
+	return res, nil
+}
+
+// deferredEraseReceipt is the receipt of a permanent erase deferred to the
+// trash: mode "trash" with erase_deferred and purge_after. When this request
+// trashed the account the trash counts are kept; for an account that was
+// already in the trash (the restore interstitial's "erase now") nothing new
+// was trashed and the counts are zero.
+func (s *Store) deferredEraseReceipt(ctx context.Context, userID string, trashRes *DeleteUserDataResult) (*DeleteUserDataResult, error) {
+	res := trashRes
+	if res == nil {
+		res = &DeleteUserDataResult{Mode: AccountDeleteModeTrash}
+	}
+	if res.PurgeAfter == nil {
+		u, err := s.GetUserByIDAnyState(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		res.PurgeAfter = u.PurgeAfter()
+	}
+	res.EraseDeferred = true
+	res.Message = EraseDeferredMessage
 	return res, nil
 }
 

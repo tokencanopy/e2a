@@ -184,6 +184,9 @@ func main() {
 	// Account trash window (trash.account_retention_days, default =
 	// retention_days; 0 = DELETE /v1/account erases immediately).
 	identity.AccountTrashRetention = time.Duration(cfg.Trash.AccountRetention()) * 24 * time.Hour
+	// Deferred erase for recent external senders
+	// (trash.recent_sender_erase_defer_days, default 14; 0 = never defer).
+	identity.RecentSenderEraseDefer = time.Duration(cfg.Trash.RecentSenderEraseDeferDays) * 24 * time.Hour
 	// Identity tombstones (hosted policy). The key is env-only; a malformed
 	// value is fatal, an absent one leaves tombstone operations failing
 	// closed (signup 503, purge skipped) while the flag is on.

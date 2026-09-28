@@ -61,7 +61,10 @@ func (a *API) ExportUserDataCore(ctx context.Context, userID string) (*identity.
 // signing in until purge_after, after which the janitor purges it. With
 // permanent=true — or on a deployment that disabled account trash
 // (trash.account_retention_days: 0) — it erases immediately
-// (identity.EraseAccount), tombstones first.
+// (identity.EraseAccount), tombstones first — unless the account emailed
+// external recipients within trash.recent_sender_erase_defer_days, in which
+// case the erase is deferred and the account stays in the trash (receipt mode
+// "trash" with erase_deferred).
 //
 // The billing hook is notified only after the database change commits (a
 // send_in_progress refusal must not touch billing for an account that still
@@ -93,7 +96,13 @@ func (a *API) DeleteUserDataCore(ctx context.Context, user *identity.User, perma
 			return nil, err
 		}
 	}
-	if erase {
+	if erase && res.EraseDeferred {
+		// The account recently emailed external recipients: the erase was
+		// deferred and the account is in the trash (identity.EraseAccount).
+		// Billing hears "trash", exactly as for a default delete; the purge
+		// notice follows from the janitor at the end of the window.
+		a.notifyBilling(ctx, user.ID, billingModeTrash)
+	} else if erase {
 		res.OAuthAuthCodesDeleted = oauthCounts.AuthCodes
 		res.OAuthAccessTokensDeleted = oauthCounts.AccessTokens
 		res.OAuthRefreshTokensDeleted = oauthCounts.RefreshTokens
