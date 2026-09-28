@@ -540,6 +540,8 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   200 receipt with `mode: "trash"`, `erase_deferred: true`, `purge_after` and
   a human-readable `message`; the owner can restore until `purge_after`. A
   paused account still answers `409 erase_held`, which takes precedence. The
+  same rule applies to permanent agent and message deletes (below), so the
+  sent-mail evidence cannot be removed inside the window. The
   receipt carries `mode` (`trash` | `permanent`), `purge_after` (trash only),
   `erase_deferred` (deferred erase only) and per-table counts. After any deletion the sign-in identity may be held for a
   period and cannot immediately register a new account (`registration_refused`).
@@ -725,7 +727,11 @@ or on the deployment's shared domain (see `GET /v1/info`).
   retention window (30 days by default, deployment-configurable), after which
   it's purged permanently. Pass `?permanent=true` to skip the trash and delete
   irreversibly right away (accepts live and trashed agents; `409 erase_held`
-  while the account's sending is paused).
+  while the account's sending is paused). An agent that emailed an external
+  recipient within `trash.recent_sender_erase_defer_days` (14 days by default)
+  is not purged on demand: it is moved to the trash (or stays there) and the
+  200 receipt adds `erase_deferred: true`, `purge_after` and a `message`; it
+  can be restored until `purge_after`.
 - `POST /v1/agents/{email}/restore` — bring a trashed agent back into service,
   messages and configuration intact. For drafts still held for review,
   `approval_expires_at` is shifted forward by the time the agent spent in trash
@@ -836,6 +842,12 @@ declared stable.
   deployment-configurable).
   Ordinary message lists, conversations, reply targets, and forward targets hide
   trashed messages; use `GET …/messages?deleted=true` to enumerate the trash.
+- `DELETE …/messages/{id}` — move a message to the trash (no confirmation).
+  `?permanent=true&confirm=DELETE` deletes an already-trashed message forever —
+  except a message sent to an external recipient within
+  `trash.recent_sender_erase_defer_days` (14 days by default), which stays in
+  the trash; the 200 receipt then adds `erase_deferred: true`, `purge_after`
+  and a `message`.
 - `POST …/messages/{id}/restore` — bring a trashed message back into the inbox.
   Restored message data is retained indefinitely unless deleted again. `409
   not_in_trash` if the message isn't in the trash.
