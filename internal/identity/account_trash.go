@@ -465,20 +465,13 @@ func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx f
 			return nil, err
 		}
 	}
-	// Deferred erase for recent external senders. Decided AFTER the trash
-	// commits, so no send can settle between the check and the purge: the
-	// trashed account can no longer send.
-	deferred, err := s.eraseDeferralApplies(ctx, userID)
-	if err != nil {
-		// Fail toward keeping the evidence: the account is already trashed
-		// and the janitor purges it at the end of the window.
-		log.Printf("[identity] erase deferral check failed; keeping the account in the trash: user=%s err=%v", userID, err)
-		deferred = true
-	}
-	if deferred {
+	// Deferred erase for recent external senders: decided inside the purge
+	// claim, under the user row lock, after the trash committed (a trashed
+	// account can no longer send).
+	purged, err := s.purgeAccount(ctx, userID, true, perDomainInTx)
+	if errors.Is(err, errAccountEraseDeferred) {
 		return s.deferredEraseReceipt(ctx, userID, trashRes)
 	}
-	purged, err := s.purgeAccount(ctx, userID, true, perDomainInTx)
 	if err != nil {
 		return nil, err
 	}
@@ -687,6 +680,18 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 			}
 			if paused {
 				return ErrEraseHeld
+			}
+			// Deferred erase for recent external senders, under the same
+			// lock. A failed check fails toward keeping the evidence: the
+			// account is already trashed and the janitor purges it at the
+			// end of the window.
+			deferred, err := accountEraseDeferredTx(ctx, tx, userID)
+			if err != nil {
+				log.Printf("[identity] erase deferral check failed; keeping the account in the trash: user=%s err=%v", userID, err)
+				deferred = true
+			}
+			if deferred {
+				return errAccountEraseDeferred
 			}
 		}
 		if purgeToken != nil {

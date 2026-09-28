@@ -186,7 +186,11 @@ func main() {
 	identity.AccountTrashRetention = time.Duration(cfg.Trash.AccountRetention()) * 24 * time.Hour
 	// Deferred erase for recent external senders
 	// (trash.recent_sender_erase_defer_days, default 14; 0 = never defer).
-	identity.RecentSenderEraseDefer = time.Duration(cfg.Trash.RecentSenderEraseDeferDays) * 24 * time.Hour
+	identity.RecentSenderEraseDefer = time.Duration(cfg.Trash.RecentSenderEraseDefer()) * 24 * time.Hour
+	// Recipient domains that never count as external: the configured test
+	// domains plus the shared agent domain by name (its domains row may be
+	// owned by the probe account, so the unowned-row rule alone misses it).
+	identity.EraseDeferExemptDomains = append(append([]string(nil), cfg.Trash.EraseDeferExemptDomains...), cfg.SharedDomain)
 	// Identity tombstones (hosted policy). The key is env-only; a malformed
 	// value is fatal, an absent one leaves tombstone operations failing
 	// closed (signup 503, purge skipped) while the flag is on.

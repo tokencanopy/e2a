@@ -619,7 +619,7 @@ type OutboundJobCanceller interface {
 // scheduled send restored after its cutoff. It is implemented by the outbound
 // adapter so identity does not duplicate provider-evidence and webhook logic.
 type ScheduledSendFinalizer interface {
-	FinalizeScheduledCancellationTx(ctx context.Context, tx pgx.Tx, messageID string, jobID int64, occurredAt time.Time) error
+	FinalizeScheduledCancellationTx(ctx context.Context, tx pgx.Tx, messageID string, jobID int64, occurredAt time.Time, detail string) error
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -687,7 +687,20 @@ type pastDueScheduledJob struct {
 	jobID     int64
 }
 
+// Delivery details recorded when a scheduled send is canceled.
+const (
+	ScheduledCancelRestoredLate  = "scheduled send canceled because it was restored after scheduled_at"
+	ScheduledCancelDeferredPurge = "scheduled send canceled because its agent was permanently deleted (deletion deferred to the trash)"
+)
+
 func (s *Store) cancelPastDueScheduledJobsTx(ctx context.Context, tx pgx.Tx, jobs []pastDueScheduledJob) error {
+	return s.cancelScheduledJobsTx(ctx, tx, jobs, ScheduledCancelRestoredLate)
+}
+
+// cancelScheduledJobsTx cancels scheduled sends' River jobs and finalizes
+// each message through the canonical guarded terminal transition (settled
+// as sent on provider evidence, otherwise failed with detail).
+func (s *Store) cancelScheduledJobsTx(ctx context.Context, tx pgx.Tx, jobs []pastDueScheduledJob, detail string) error {
 	if len(jobs) == 0 {
 		return nil
 	}
@@ -704,7 +717,7 @@ func (s *Store) cancelPastDueScheduledJobsTx(ctx context.Context, tx pgx.Tx, job
 	now := time.Now().UTC()
 	for _, job := range jobs {
 		if err := s.scheduledSendFinalizer.FinalizeScheduledCancellationTx(
-			ctx, tx, job.messageID, job.jobID, now,
+			ctx, tx, job.messageID, job.jobID, now, detail,
 		); err != nil {
 			return err
 		}
@@ -2718,7 +2731,7 @@ func (s *Store) PermanentDeleteAgentIncarnation(ctx context.Context, agentID, us
 		var decisionErr error
 		token, chunked, decisionErr = s.agentPurgeDecisionTx(ctx, tx, agentID, userID, createdAt)
 		if errors.Is(decisionErr, errAgentPurgeDeferred) {
-			purgeAfter, err := trashAgentForDeferredPurgeTx(ctx, tx, agentID, userID)
+			purgeAfter, err := s.trashAgentForDeferredPurgeTx(ctx, tx, agentID, userID)
 			if err != nil {
 				return err
 			}

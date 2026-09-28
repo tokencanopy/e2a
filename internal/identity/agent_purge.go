@@ -128,8 +128,10 @@ func (s *Store) agentPurgeDecisionTx(
 var errAgentPurgeDeferred = errors.New("identity: agent purge deferred")
 
 // trashAgentForDeferredPurgeTx moves the (locked) agent to the trash if it
-// is live and returns when the janitor will purge it.
-func trashAgentForDeferredPurgeTx(ctx context.Context, tx pgx.Tx, agentID, userID string) (time.Time, error) {
+// is live, cancels its pending scheduled sends — an agent the owner asked to
+// delete permanently must not have them re-armed by a later restore — and
+// returns when the janitor will purge it.
+func (s *Store) trashAgentForDeferredPurgeTx(ctx context.Context, tx pgx.Tx, agentID, userID string) (time.Time, error) {
 	var deletedAt time.Time
 	err := tx.QueryRow(ctx,
 		`UPDATE agent_identities SET deleted_at = COALESCE(deleted_at, now())
@@ -139,6 +141,35 @@ func trashAgentForDeferredPurgeTx(ctx context.Context, tx pgx.Tx, agentID, userI
 		return time.Time{}, ErrAgentNotFound
 	}
 	if err != nil {
+		return time.Time{}, err
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT id, send_job_id
+		   FROM messages
+		  WHERE agent_id = $1
+		    AND direction = 'outbound'
+		    AND delivery_status = 'accepted'
+		    AND scheduled_at IS NOT NULL
+		    AND send_job_id IS NOT NULL
+		  ORDER BY id
+		  FOR UPDATE`, agentID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var scheduled []pastDueScheduledJob
+	for rows.Next() {
+		var j pastDueScheduledJob
+		if err := rows.Scan(&j.messageID, &j.jobID); err != nil {
+			rows.Close()
+			return time.Time{}, err
+		}
+		scheduled = append(scheduled, j)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return time.Time{}, err
+	}
+	if err := s.cancelScheduledJobsTx(ctx, tx, scheduled, ScheduledCancelDeferredPurge); err != nil {
 		return time.Time{}, err
 	}
 	return deletedAt.Add(TrashRetention), nil

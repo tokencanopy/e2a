@@ -1186,6 +1186,10 @@ func TestSendWorker_RetryBackoffReleasesClaimForPurge(t *testing.T) {
 }
 
 func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
+	// A claimed send to an external recipient inside the window is evidence
+	// for the deferred-erase rule (identity.RecentSenderEraseDefer); this test
+	// pins the stale-lease path only, so it runs with the deferral disabled.
+	disableEraseDeferral(t)
 	api, store, _, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncstalepurge")
@@ -1218,6 +1222,10 @@ func TestPurgeMessage_AllowsStaleOrphanedSendClaim(t *testing.T) {
 }
 
 func TestDeleteAgent_AllowsStaleOrphanedSendClaim(t *testing.T) {
+	// A claimed send to an external recipient inside the window is evidence
+	// for the deferred-erase rule (identity.RecentSenderEraseDefer); this test
+	// pins the stale-lease path only, so it runs with the deferral disabled.
+	disableEraseDeferral(t)
 	api, store, _, enq := setupAsyncAPI(t)
 	ctx := context.Background()
 	user, ag := selfAgent(t, store, "asyncstaleagent")
@@ -1391,4 +1399,13 @@ func TestSendWorker_ClaimCarriesSubmissionGatesIntoTerminalLatency(t *testing.T)
 			}
 		})
 	}
+}
+
+// disableEraseDeferral turns off the recent-external-sender purge deferral for
+// one test (package tests do not run in parallel).
+func disableEraseDeferral(t *testing.T) {
+	t.Helper()
+	prev := identity.RecentSenderEraseDefer
+	identity.RecentSenderEraseDefer = 0
+	t.Cleanup(func() { identity.RecentSenderEraseDefer = prev })
 }

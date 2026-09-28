@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -39,65 +40,139 @@ const EraseDeferredMessage = "This account emailed external recipients recently,
 	"until purge_after before it is permanently erased (late delivery feedback such as spam complaints must " +
 	"still reach it). The account is already unusable; the owner can restore it by signing in before purge_after."
 
-// sentExternallySinceSQL reports whether the account ($1) had an outbound
-// message settled as sent to an external recipient at or after $2, within
-// the given scope (the whole account, one agent, or one message).
+// EraseDeferExemptDomains are recipient domains that never count as
+// external: the deployment's shared agent domain(s) by name — matched even
+// when a shared domain's domains row has been adopted by an account (e.g. the
+// probe account) — and provider test domains such as the SES mailbox
+// simulator, which the standing prober and the e2e harness send to on every
+// run. cmd/e2a assigns it at startup from shared_domain plus
+// trash.erase_defer_exempt_domains (default [simulator.amazonses.com]).
+// Entries are lower-case domain names.
+var EraseDeferExemptDomains = []string{"simulator.amazonses.com"}
+
+// eraseDeferExemptClasses are the account classes never deferred: synthetic
+// probe traffic and internal dogfooding (the same classes sendingpolicy
+// exempts from sending budgets).
+const eraseDeferExemptClassesSQL = `('system', 'internal')`
+
+// eraseDeferRetryLag bounds how long after created_at an ordinary
+// (unscheduled, never-held) message can still be submitted to the provider:
+// the budget hold (budget_hold_max_days, 7 by default) plus retries, with
+// margin. It is the lower bound that lets the recent-send lookup range-scan
+// idx_messages_agent_created instead of every outbound message of the agent.
+const eraseDeferRetryLag = 14 * 24 * time.Hour
+
+// sentExternallySinceSQL reports whether the account ($1) sent to an external
+// recipient at or after $2 within the given scope (the whole account, one
+// agent: agentScope, or one message: messageScope). $3 is the exempt domain
+// list, $4 is $2 minus eraseDeferRetryLag, and $5 the scope id.
 //
-// Source: message_recipients. A row there is written exactly when the
-// provider (or relay) accepted the message — one per envelope recipient
-// (to/cc/bcc), normalized — so it records real sends, never drafts, holds,
-// refusals or queued mail. It is reached through the account's agents and
-// idx_messages_agent_created (or the messages primary key for one message),
-// and the EXISTS stops at the first hit.
+// Sends considered (per agent of the account, outbound only):
+//   - arm A: created at or after $4 (a bounded range on
+//     idx_messages_agent_created), whose send instant — the latest of
+//     created_at, provider_accepted_at, reviewed_at, scheduled_at and
+//     send_claimed_at — is at or after $2;
+//   - arm B: an older scheduled or review-held message, found through the
+//     partial expression index idx_messages_agent_delayed_outbound on
+//     (agent_id, GREATEST(scheduled_at, reviewed_at)) bounded below by $4 (a
+//     hold's TTL and a schedule's horizon are long, so created_at cannot bound
+//     it; the fire/approval instant can, give or take the same retry lag),
+//     whose send instant is at or after $2.
 //
-// The send instant is the latest of created_at, provider_accepted_at,
-// reviewed_at and scheduled_at (GREATEST ignores NULLs), so a scheduled or
-// review-held message that was submitted recently counts even when it was
-// created long ago.
+// Recipients: message_recipients rows (written when the provider or relay
+// accepted the message, one per normalized envelope recipient) — or, for a
+// message the provider accepted that has not settled yet (a provider message
+// id with no recipient rows, or a send claimed inside the window), the
+// message's own to/cc/bcc lists.
 //
 // "External" is the external-sending-access notion: anything other than
 //   - an agent of the same account (any state — by account erase time the
 //     account's agents are already trashed by the account trash),
 //   - the account's verified owner mailbox (valid proof for its CURRENT
 //     email, as sendingpolicy.ownerRecipientVerified), or
-//   - an address on one of the deployment's shared agent domains (the
-//     verified domains rows with no owning account).
-func sentExternallySinceSQL(scope string) string {
+//   - an address whose domain — the part after the LAST '@', so a quoted
+//     local part containing '@' cannot pose as an internal domain — is an
+//     exempt domain ($3) or a verified domains row with no owning account.
+//
+// System and internal account classes are never deferred.
+func sentExternallySinceSQL(agentScope, messageScope string) string {
 	return `
 SELECT EXISTS (
     SELECT 1
-      FROM agent_identities AS a
-      JOIN messages AS m ON m.agent_id = a.id
-      JOIN message_recipients AS r ON r.message_id = m.id
-      JOIN users AS u ON u.id = a.user_id
-     WHERE a.user_id = $1` + scope + `
-       AND m.direction = 'outbound'
-       AND GREATEST(m.created_at, m.provider_accepted_at, m.reviewed_at, m.scheduled_at) >= $2
+      FROM users AS u
+      JOIN agent_identities AS a ON a.user_id = u.id
+      CROSS JOIN LATERAL (
+          SELECT m.id, m.to_recipients, m.cc, m.bcc, m.recipient,
+                 m.provider_message_id, m.delivery_status, m.send_claimed_at
+            FROM messages AS m
+           WHERE m.agent_id = a.id AND m.direction = 'outbound'
+             AND m.created_at >= $4` + messageScope + `
+             AND GREATEST(m.created_at, m.provider_accepted_at, m.reviewed_at,
+                          m.scheduled_at, m.send_claimed_at) >= $2
+          UNION ALL
+          SELECT m.id, m.to_recipients, m.cc, m.bcc, m.recipient,
+                 m.provider_message_id, m.delivery_status, m.send_claimed_at
+            FROM messages AS m
+           WHERE m.agent_id = a.id AND m.direction = 'outbound'
+             AND (m.scheduled_at IS NOT NULL OR m.reviewed_at IS NOT NULL)
+             AND GREATEST(m.scheduled_at, m.reviewed_at) >= $4
+             AND m.created_at < $4` + messageScope + `
+             AND GREATEST(m.created_at, m.provider_accepted_at, m.reviewed_at,
+                          m.scheduled_at, m.send_claimed_at) >= $2
+      ) AS m
+      CROSS JOIN LATERAL (
+          SELECT r.address FROM message_recipients AS r WHERE r.message_id = m.id
+          UNION ALL
+          SELECT lower(btrim(x))
+            FROM unnest(COALESCE(m.to_recipients, '{}') || COALESCE(m.cc, '{}') ||
+                        COALESCE(m.bcc, '{}') ||
+                        CASE WHEN m.to_recipients IS NULL THEN ARRAY[m.recipient] ELSE '{}' END) AS x
+           WHERE NOT EXISTS (SELECT 1 FROM message_recipients AS r2 WHERE r2.message_id = m.id)
+             AND (COALESCE(m.provider_message_id, '') <> ''
+                  OR (m.delivery_status = 'sending' AND m.send_claimed_at >= $2))
+      ) AS rcpt
+     WHERE u.id = $1` + agentScope + `
+       AND u.account_class NOT IN ` + eraseDeferExemptClassesSQL + `
+       AND rcpt.address <> ''
        AND NOT EXISTS (
            SELECT 1 FROM agent_identities AS own
-            WHERE own.user_id = $1 AND lower(own.id) = r.address)
+            WHERE own.user_id = $1 AND lower(own.id) = rcpt.address)
        AND NOT (u.owner_email_verified_at IS NOT NULL
                 AND u.owner_email_verified_address IS NOT NULL
                 AND u.owner_email_verified_address = lower(btrim(u.email))
-                AND r.address = u.owner_email_verified_address)
+                AND rcpt.address = u.owner_email_verified_address)
+       AND NOT (lower(COALESCE(substring(rcpt.address from '@([^@]+)$'), '')) = ANY($3::text[]))
        AND NOT EXISTS (
            SELECT 1 FROM domains AS d
             WHERE d.user_id IS NULL AND d.verified
-              AND d.domain = split_part(r.address, '@', 2)))`
+              AND d.domain = lower(substring(rcpt.address from '@([^@]+)$'))))`
 }
 
 var (
-	accountSentExternallySinceSQL = sentExternallySinceSQL("")
-	agentSentExternallySinceSQL   = sentExternallySinceSQL("\n       AND a.id = $3")
-	messageSentExternallySinceSQL = sentExternallySinceSQL("\n       AND m.id = $3")
+	accountSentExternallySinceSQL = sentExternallySinceSQL("", "")
+	agentSentExternallySinceSQL   = sentExternallySinceSQL("\n       AND a.id = $5", "")
+	messageSentExternallySinceSQL = sentExternallySinceSQL("", " AND m.id = $5")
 )
 
-func sentExternallySince(ctx context.Context, q rowQuerier, query string, args ...any) (bool, error) {
+func sentExternallySince(ctx context.Context, q rowQuerier, query, userID string, since time.Time, scope ...any) (bool, error) {
+	args := append([]any{userID, since, exemptDomains(), since.Add(-eraseDeferRetryLag)}, scope...)
 	var sent bool
 	if err := q.QueryRow(ctx, query, args...).Scan(&sent); err != nil {
 		return false, fmt.Errorf("erase: recent external send: %w", err)
 	}
 	return sent, nil
+}
+
+// exemptDomains is EraseDeferExemptDomains normalized, never nil (a nil
+// slice would bind as SQL NULL and make "= ANY" unknown).
+func exemptDomains() []string {
+	out := make([]string, 0, len(EraseDeferExemptDomains))
+	for _, d := range EraseDeferExemptDomains {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // AccountSentExternallySince reports whether the account sent to at least one
@@ -113,6 +188,19 @@ func eraseDeferralCutoff() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Now().Add(-RecentSenderEraseDefer), true
+}
+
+// accountEraseDeferredTx reports whether a permanent erase of the account
+// must be deferred to the account trash: the deferral is enabled, the
+// deployment has account trash, and the account sent externally inside the
+// window. purgeAccount runs it inside its claim transaction, under the user
+// row lock.
+func accountEraseDeferredTx(ctx context.Context, q rowQuerier, userID string) (bool, error) {
+	since, ok := eraseDeferralCutoff()
+	if !ok || !AccountTrashEnabled() {
+		return false, nil
+	}
+	return sentExternallySince(ctx, q, accountSentExternallySinceSQL, userID, since)
 }
 
 // agentEraseDeferredTx reports whether a permanent delete of the agent must
@@ -146,19 +234,12 @@ const (
 		"It is purged at purge_after and can be restored until then."
 )
 
+// errAccountEraseDeferred is purgeAccount's in-transaction signal that an
+// on-demand erase must stay in the account trash. It never leaves the store.
+var errAccountEraseDeferred = errors.New("identity: account erase deferred")
+
 // ErrPurgeDeferred is returned by the int-returning purge wrappers
 // (DeleteAgent, DeleteAgentIncarnation, PurgeMessage) when the purge was
 // deferred to the trash instead: nothing was deleted. Callers that need the
 // deferred receipt use PermanentDeleteAgentIncarnation / PurgeMessageOrDefer.
 var ErrPurgeDeferred = errors.New("identity: permanent deletion deferred to the trash (recent external send)")
-
-// eraseDeferralApplies reports whether a permanent erase of the account must
-// be deferred to the trash: the deferral is enabled, the deployment has
-// account trash, and the account sent externally inside the window.
-func (s *Store) eraseDeferralApplies(ctx context.Context, userID string) (bool, error) {
-	since, ok := eraseDeferralCutoff()
-	if !ok || !AccountTrashEnabled() {
-		return false, nil
-	}
-	return s.AccountSentExternallySince(ctx, userID, since)
-}

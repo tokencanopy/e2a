@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/testutil"
@@ -464,5 +465,199 @@ func TestBypassDeleteAgentsThenEraseIsStillDeferred(t *testing.T) {
 	var recipients int
 	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM message_recipients WHERE message_id = 'msg_bypass'`).Scan(&recipients); err != nil || recipients != 1 {
 		t.Fatalf("recipient evidence rows = %d err=%v, want 1", recipients, err)
+	}
+}
+
+// ── Review hardening: exemptions, parsing, unsettled sends, scheduled sends ──
+
+func TestProviderSimulatorRecipientsNeverDefer(t *testing.T) {
+	f := newDeferFixture(t, "simulator")
+	ctx := context.Background()
+	f.sent(t, "msg_sim", time.Hour, "success@simulator.amazonses.com", "bounce@SIMULATOR.amazonses.com")
+	if n, err := f.store.DeleteAgent(ctx, f.agent, f.userID); err != nil || n != 1 {
+		t.Fatalf("DeleteAgent of a simulator-only sender = %d err=%v, want purged", n, err)
+	}
+	res, err := f.store.EraseAccount(ctx, f.userID, nil)
+	if err != nil || res.EraseDeferred || !res.UserDeleted {
+		t.Fatalf("EraseAccount = %+v err=%v, want an immediate erase", res, err)
+	}
+}
+
+func TestConfiguredExemptDomainsAreRespected(t *testing.T) {
+	prev := identity.EraseDeferExemptDomains
+	identity.EraseDeferExemptDomains = []string{"sink.example.test"}
+	t.Cleanup(func() { identity.EraseDeferExemptDomains = prev })
+
+	f := newDeferFixture(t, "exemptcfg")
+	f.sent(t, "msg_exempt_sink", time.Hour, "probe@sink.example.test")
+	f.sent(t, "msg_exempt_sim", time.Hour, "success@simulator.amazonses.com")
+	res, err := f.store.PermanentDeleteAgentIncarnation(context.Background(), f.agent, f.userID, f.agentCreatedAt(t, f.agent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The configured list replaces the default: the simulator is external now.
+	if !res.EraseDeferred {
+		t.Fatalf("result = %+v, want deferred (simulator no longer exempt)", res)
+	}
+}
+
+// The shared agent domain is exempt BY NAME even when its domains row is
+// owned by an account (the probe account adopts it on some deployments).
+func TestSharedDomainByNameIsInternalEvenWhenOwned(t *testing.T) {
+	f := newDeferFixture(t, "shareowned")
+	ctx := context.Background()
+	if _, err := f.pool.Exec(ctx, `UPDATE domains SET user_id = $1 WHERE domain = $2`, f.userID, deferSharedDomain); err != nil {
+		t.Fatal(err)
+	}
+	f.sent(t, "msg_share_owned", time.Hour, "someone-elses-bot@"+deferSharedDomain)
+
+	sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sent {
+		t.Fatal("without the name exemption an owned shared domain should count as external (test precondition)")
+	}
+	prev := identity.EraseDeferExemptDomains
+	identity.EraseDeferExemptDomains = append(append([]string(nil), prev...), deferSharedDomain)
+	t.Cleanup(func() { identity.EraseDeferExemptDomains = prev })
+	if sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-24*time.Hour)); err != nil || sent {
+		t.Fatalf("with the shared domain exempt by name: sent=%v err=%v, want false", sent, err)
+	}
+}
+
+func TestSystemAndInternalAccountsNeverDefer(t *testing.T) {
+	for _, class := range []string{"system", "internal"} {
+		t.Run(class, func(t *testing.T) {
+			f := newDeferFixture(t, "class"+class)
+			ctx := context.Background()
+			if _, err := f.pool.Exec(ctx, `UPDATE users SET account_class = $2 WHERE id = $1`, f.userID, class); err != nil {
+				t.Fatal(err)
+			}
+			f.sent(t, "msg_class_"+class, time.Hour, "someone@example.com")
+			if n, err := f.store.DeleteAgent(ctx, f.agent, f.userID); err != nil || n != 1 {
+				t.Fatalf("DeleteAgent = %d err=%v, want purged", n, err)
+			}
+			if res, err := f.store.EraseAccount(ctx, f.userID, nil); err != nil || res.EraseDeferred {
+				t.Fatalf("EraseAccount = %+v err=%v, want an immediate erase", res, err)
+			}
+		})
+	}
+}
+
+// A quoted local part containing '@' must not pose as an internal domain:
+// the domain is the part after the LAST '@'.
+func TestQuotedLocalPartCannotPoseAsTheSharedDomain(t *testing.T) {
+	f := newDeferFixture(t, "quoted")
+	f.sent(t, "msg_quoted", time.Hour, `"x@`+deferSharedDomain+`@y"@victim.example.test`)
+	res, err := f.store.PermanentDeleteAgentIncarnation(context.Background(), f.agent, f.userID, f.agentCreatedAt(t, f.agent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.EraseDeferred {
+		t.Fatalf("result = %+v, want deferred: the recipient's domain is victim.example.test", res)
+	}
+}
+
+// A message the provider accepted but that has not settled yet has no
+// message_recipients rows; its own recipient lists decide.
+func TestUnsettledProviderAcceptedSendCounts(t *testing.T) {
+	f := newDeferFixture(t, "unsettled")
+	ctx := context.Background()
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO messages (id, agent_id, direction, sender, recipient, subject, delivery_status,
+		                      provider_message_id, send_claimed_at, to_recipients, cc)
+		VALUES ('msg_unsettled_int', $1, 'outbound', $1, $2, 's', 'sending', 'ses-int-1', now(), ARRAY[$2], ARRAY['peer@`+deferSharedDomain+`']),
+		       ('msg_unsettled_ext', $1, 'outbound', $1, 'x@example.com', 's', 'sending', 'ses-ext-1', now(), ARRAY[$2], ARRAY['Someone@Example.com'])`,
+		f.agent, f.agent); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-time.Hour)); err != nil || !sent {
+		t.Fatalf("unsettled external send: sent=%v err=%v, want true", sent, err)
+	}
+	if _, err := f.pool.Exec(ctx, `DELETE FROM messages WHERE id = 'msg_unsettled_ext'`); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-time.Hour)); err != nil || sent {
+		t.Fatalf("unsettled internal-only send: sent=%v err=%v, want false", sent, err)
+	}
+}
+
+// Arm B: an old review-held message approved inside the window counts even
+// though created_at is beyond the retry-lag lower bound.
+func TestOldHeldMessageApprovedRecentlyCounts(t *testing.T) {
+	f := newDeferFixture(t, "oldheld")
+	ctx := context.Background()
+	f.sent(t, "msg_old_held", 60*24*time.Hour, "someone@example.com")
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE messages SET reviewed_at = now() - interval '1 hour', provider_accepted_at = NULL WHERE id = 'msg_old_held'`); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-24*time.Hour)); err != nil || !sent {
+		t.Fatalf("old held message approved an hour ago: sent=%v err=%v, want true", sent, err)
+	}
+}
+
+type deferRecordingCanceller struct{ jobIDs []int64 }
+
+func (c *deferRecordingCanceller) CancelTx(_ context.Context, _ pgx.Tx, jobID int64) error {
+	c.jobIDs = append(c.jobIDs, jobID)
+	return nil
+}
+
+// A deferred permanent agent delete cancels the agent's pending scheduled
+// sends: a later restore must not re-arm them.
+func TestDeferredAgentDeleteCancelsScheduledSends(t *testing.T) {
+	f := newDeferFixture(t, "schedcancel")
+	ctx := context.Background()
+	canceller := &deferRecordingCanceller{}
+	f.store.SetOutboundJobCanceller(canceller)
+	wireTrashScheduledFinalizer(f.store, f.pool)
+	f.sent(t, "msg_sched_evidence", time.Hour, "someone@example.com")
+	pending := trashOutbound(t, f.store, f.agent, "scheduled")
+	linkTrashTestSendJob(t, f.pool, pending.ID, 701)
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE messages SET scheduled_at = now() + interval '1 day' WHERE id = $1`, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.store.PermanentDeleteAgentIncarnation(ctx, f.agent, f.userID, f.agentCreatedAt(t, f.agent))
+	if err != nil || !res.EraseDeferred {
+		t.Fatalf("result = %+v err=%v, want deferred", res, err)
+	}
+	if len(canceller.jobIDs) != 1 || canceller.jobIDs[0] != 701 {
+		t.Fatalf("cancelled jobs = %v, want [701]", canceller.jobIDs)
+	}
+	if _, err := f.store.RestoreAgent(ctx, f.agent, f.userID); err != nil {
+		t.Fatalf("RestoreAgent: %v", err)
+	}
+	var status, detail string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT delivery_status, COALESCE(delivery_detail, '') FROM messages WHERE id = $1`, pending.ID,
+	).Scan(&status, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || detail != identity.ScheduledCancelDeferredPurge {
+		t.Fatalf("scheduled message after deferred delete + restore = %q %q, want failed with the deferred-purge detail", status, detail)
+	}
+	if len(canceller.jobIDs) != 1 {
+		t.Fatalf("restore re-touched jobs: %v", canceller.jobIDs)
+	}
+}
+
+// A send claimed inside the window (the provider call may have gone out) with
+// no provider id yet also counts, classified by its own recipient lists.
+func TestClaimedUnacceptedSendCounts(t *testing.T) {
+	f := newDeferFixture(t, "claimed")
+	ctx := context.Background()
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO messages (id, agent_id, direction, sender, recipient, subject, delivery_status,
+		                      send_claimed_at, to_recipients)
+		VALUES ('msg_claimed', $1, 'outbound', $1, 'x@example.com', 's', 'sending', now(), ARRAY['x@example.com'])`,
+		f.agent); err != nil {
+		t.Fatal(err)
+	}
+	if sent, err := f.store.AccountSentExternallySince(ctx, f.userID, time.Now().Add(-time.Hour)); err != nil || !sent {
+		t.Fatalf("claimed external send: sent=%v err=%v, want true", sent, err)
 	}
 }

@@ -304,7 +304,9 @@ func (a *outboundSendStore) meterSentTx(ctx context.Context, tx pgx.Tx, info *id
 }
 
 // FinalizeScheduledCancellationTx performs the canonical guarded terminal
-// transition for a scheduled message restored after its cutoff. Authoritative
+// transition for a canceled scheduled message (restored after its cutoff, or
+// its agent's permanent delete deferred to the trash); detail is recorded as
+// the delivery detail. Authoritative
 // provider-accept evidence wins and is settled as sent; otherwise the
 // cancellation becomes failed with a deterministic email.failed event.
 func (a *outboundSendStore) FinalizeScheduledCancellationTx(
@@ -313,6 +315,7 @@ func (a *outboundSendStore) FinalizeScheduledCancellationTx(
 	messageID string,
 	jobID int64,
 	occurredAt time.Time,
+	detail string,
 ) error {
 	info, providerID, err := a.store.ResolveOutboundProviderAcceptedTx(ctx, tx, messageID)
 	if err != nil {
@@ -322,7 +325,6 @@ func (a *outboundSendStore) FinalizeScheduledCancellationTx(
 		return a.finalizeSentTx(ctx, tx, info, jobID, 0, info.ProviderAcceptedAt, providerID)
 	}
 
-	const detail = "scheduled send canceled because it was restored after scheduled_at"
 	finfo, err := a.store.MarkOutboundFailedTx(ctx, tx, messageID, detail, delivery.FailureSourceLocal)
 	if err != nil {
 		return err
