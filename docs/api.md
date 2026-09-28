@@ -531,9 +531,17 @@ Workspace identity, plan limits, keys, suppressions, and data rights.
   default the account moves to the trash: it is unusable at once (keys,
   sessions and OAuth grants revoked, agents trashed, sending stopped, domains
   unverified), restorable by signing in to the dashboard until `purge_after`,
-  then purged permanently. `permanent=true` erases immediately. The receipt
-  carries `mode` (`trash` | `permanent`), `purge_after` (trash only) and
-  per-table counts. After any deletion the sign-in identity may be held for a
+  then purged permanently. `permanent=true` erases immediately — except for an
+  account that emailed an external recipient recently (within
+  `trash.recent_sender_erase_defer_days`, 14 days by default): that erase is
+  deferred, the account is moved to the trash like a default delete, and it is
+  purged at `purge_after`, so delivery feedback (spam complaints, bounces)
+  that arrives after a send still reaches it. The deferred case is a normal
+  200 receipt with `mode: "trash"`, `erase_deferred: true`, `purge_after` and
+  a human-readable `message`; the owner can restore until `purge_after`. A
+  paused account still answers `409 erase_held`, which takes precedence. The
+  receipt carries `mode` (`trash` | `permanent`), `purge_after` (trash only),
+  `erase_deferred` (deferred erase only) and per-table counts. After any deletion the sign-in identity may be held for a
   period and cannot immediately register a new account (`registration_refused`).
 - `GET /v1/account/export` — self-service account-data export supporting
   access requests: profile, agents, domains, API key metadata, messages,
