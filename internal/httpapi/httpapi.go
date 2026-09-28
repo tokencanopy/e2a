@@ -114,9 +114,11 @@ type AgentCreateEnforcer func(ctx context.Context, userID string) error
 
 // Agent mutation funcs mirror the like-named store methods.
 type (
-	// AgentDeleter deletes an agent, returning the number of message rows
-	// removed by the cascade (surfaced in the DeleteAgentResult receipt).
-	AgentDeleter func(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error)
+	// AgentDeleter permanently deletes an agent, returning the number of
+	// message rows removed by the cascade — or, for an agent that emailed
+	// external recipients recently, the deferral to the agent trash
+	// (surfaced in the DeleteAgentResult receipt).
+	AgentDeleter func(ctx context.Context, agentID, userID string, createdAt time.Time) (identity.AgentPurgeResult, error)
 	// AgentTrashOp moves an agent into or out of trash without deleting messages.
 	AgentTrashOp func(ctx context.Context, agentID, userID string) error
 	// AgentRestoreOp is AgentTrashOp's returning form: restore answers with the
@@ -131,6 +133,11 @@ type (
 // returning the sentinel errors ErrMessageHeld / ErrNotInTrash /
 // ErrMessageNotFound for the handler to map.
 type MessageTrashOp func(ctx context.Context, messageID, agentID string) error
+
+// MessagePurger permanently deletes an already-trashed message, or reports
+// that the purge was deferred (the message was sent to external recipients
+// recently and stays in the trash until purge_after).
+type MessagePurger func(ctx context.Context, messageID, agentID string) (identity.MessagePurgeResult, error)
 
 // MessageRestoreOp is MessageTrashOp's returning form, used by RestoreMessage
 // for the same reason AgentRestoreOp exists: the restored view comes from
@@ -219,7 +226,7 @@ type Deps struct {
 	// trash-only permanent purge.
 	DeleteMessage  MessageTrashOp
 	RestoreMessage MessageRestoreOp
-	PurgeMessage   MessageTrashOp
+	PurgeMessage   MessagePurger
 
 	// domains. ListDomains is keyset-paginated on (created_at, domain): the
 	// handler passes limit+1 to detect a further page (limit<=0 = all), and the

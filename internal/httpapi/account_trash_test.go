@@ -277,8 +277,8 @@ func TestAccountEraseThroughRestrictedSession(t *testing.T) {
 // ErrEraseHeld to 409 erase_held.
 func TestDeleteAgentPermanentIsHeldWhilePaused(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (int64, error) {
-			return 0, identity.ErrEraseHeld
+		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (identity.AgentPurgeResult, error) {
+			return identity.AgentPurgeResult{}, identity.ErrEraseHeld
 		}
 	})
 	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com?confirm=DELETE&permanent=true", "good", nil)

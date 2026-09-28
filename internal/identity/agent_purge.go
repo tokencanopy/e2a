@@ -20,7 +20,10 @@ const (
 
 // agentPurgeDecisionTx locks the exact incarnation the request resolved and
 // either leaves it on the bounded atomic path or durably claims it for a
-// resumable chunked purge. An existing claim is always adopted.
+// resumable chunked purge. An existing claim is always adopted. It returns
+// errAgentPurgeDeferred (with the agent lock still held) when the agent sent
+// to an external recipient inside RecentSenderEraseDefer; the caller then
+// trashes the agent in the same transaction instead of purging it.
 func (s *Store) agentPurgeDecisionTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -62,6 +65,14 @@ func (s *Store) agentPurgeDecisionTx(
 	}
 	if err := ensureNoAgentSendInProgressTx(ctx, tx, agentID); err != nil {
 		return "", false, err
+	}
+	// Deferred erase for recent external senders: decided under the agent
+	// lock, after the send-lease check, so no send of this agent can settle
+	// between the check and the purge. The caller trashes instead.
+	if deferred, err := agentEraseDeferredTx(ctx, tx, userID, agentID); err != nil {
+		return "", false, err
+	} else if deferred {
+		return "", false, errAgentPurgeDeferred
 	}
 
 	tooManyMessages, err := rowsOverLimitTx(ctx, tx,
@@ -110,6 +121,27 @@ func (s *Store) agentPurgeDecisionTx(
 		  WHERE id = $1 AND user_id = $2
 		  RETURNING purge_token`, agentID, userID, token).Scan(&token)
 	return token, true, err
+}
+
+// errAgentPurgeDeferred is agentPurgeDecisionTx's in-transaction signal that
+// the purge must be deferred to the agent trash. It never leaves the store.
+var errAgentPurgeDeferred = errors.New("identity: agent purge deferred")
+
+// trashAgentForDeferredPurgeTx moves the (locked) agent to the trash if it
+// is live and returns when the janitor will purge it.
+func trashAgentForDeferredPurgeTx(ctx context.Context, tx pgx.Tx, agentID, userID string) (time.Time, error) {
+	var deletedAt time.Time
+	err := tx.QueryRow(ctx,
+		`UPDATE agent_identities SET deleted_at = COALESCE(deleted_at, now())
+		  WHERE id = $1 AND user_id = $2
+		  RETURNING deleted_at`, agentID, userID).Scan(&deletedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrAgentNotFound
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return deletedAt.Add(TrashRetention), nil
 }
 
 func lockAgentMessagesTx(ctx context.Context, tx pgx.Tx, agentID string) error {

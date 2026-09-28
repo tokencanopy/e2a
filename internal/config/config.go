@@ -672,14 +672,18 @@ type TrashConfig struct {
 	// account soft deletion existed. Override with
 	// E2A_TRASH_ACCOUNT_RETENTION_DAYS.
 	AccountRetentionDays *int `yaml:"account_retention_days"`
-	// RecentSenderEraseDeferDays defers an on-demand permanent account
-	// erase (DELETE /v1/account?permanent=true, or the restore
-	// interstitial's "erase now") for an account that emailed an external
-	// recipient within this many days: the account is moved to the trash
-	// instead and purged at the end of the normal account trash window, so
-	// late provider feedback (complaints, bounces) still lands on its sending
-	// controls and aggregates. Default 14; 0 disables the deferral. It has no
-	// effect when account trash is disabled (account_retention_days: 0).
+	// RecentSenderEraseDeferDays defers an on-demand permanent erase of
+	// anything that emailed an external recipient within this many days:
+	// the account (DELETE /v1/account?permanent=true, or the restore
+	// interstitial's "erase now"), an agent (DELETE
+	// /v1/agents/{email}?permanent=true) or a message (permanent delete of a
+	// trashed message). Each goes to (or stays in) its normal trash and is
+	// purged at the end of that trash window, so late provider feedback
+	// (complaints, bounces) still lands on the account's sending controls and
+	// aggregates, and the evidence the account check reads cannot be removed
+	// inside the window. Default 14; 0 disables it everywhere. The account
+	// deferral has no effect when account trash is disabled
+	// (account_retention_days: 0).
 	// Override with E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS.
 	RecentSenderEraseDeferDays int `yaml:"recent_sender_erase_defer_days"`
 	// IdentityTombstones enables identity tombstones: every account purge

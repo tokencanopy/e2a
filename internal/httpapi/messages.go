@@ -431,7 +431,7 @@ func (s *Server) registerMessages() {
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/{email}/messages/{id}",
 		Summary:     "Delete a message (move to trash)",
-		Description: "Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.",
+		Description: "Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash (\"delete forever\"); a message sent to external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once — it stays in the trash and is purged at purge_after, and the receipt has erase_deferred:true, purge_after and a message. A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.",
 		Tags:        []string{"messages"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteMessage)
@@ -617,10 +617,15 @@ func (s *Server) handleDeleteMessage(ctx context.Context, in *deleteMessageInput
 		if s.deps.PurgeMessage == nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "delete unavailable")
 		}
-		if err := s.deps.PurgeMessage(ctx, in.MessageID, ag.ID); err != nil {
+		purge, err := s.deps.PurgeMessage(ctx, in.MessageID, ag.ID)
+		if err != nil {
 			return nil, mapTrashErr(err, "message")
 		}
-		return &deleteMessageOutput{Body: DeleteMessageResult{Deleted: true, ID: in.MessageID}}, nil
+		res := DeleteMessageResult{Deleted: true, ID: in.MessageID}
+		if purge.EraseDeferred {
+			res.EraseDeferred, res.PurgeAfter, res.Message = true, purge.PurgeAfter, identity.MessageEraseDeferredMessage
+		}
+		return &deleteMessageOutput{Body: res}, nil
 	}
 	if s.deps.DeleteMessage == nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "delete unavailable")

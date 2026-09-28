@@ -2665,31 +2665,75 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID, userID string) (messag
 	return s.DeleteAgentIncarnation(ctx, agentID, userID, createdAt)
 }
 
+// AgentPurgeResult is the outcome of a permanent agent delete: either the
+// agent and its messages were removed (MessagesDeleted), or — for an agent
+// that sent to an external recipient inside RecentSenderEraseDefer — the
+// purge was deferred and the agent is in the trash until PurgeAfter.
+type AgentPurgeResult struct {
+	MessagesDeleted int64
+	EraseDeferred   bool
+	PurgeAfter      *time.Time
+}
+
 // DeleteAgentIncarnation permanently deletes only the incarnation previously
-// resolved by the caller. Carrying createdAt across the handler/store boundary
-// prevents a delayed request from attaching to a same-owner recreation at the
-// same address before any purge token has been claimed.
+// resolved by the caller (see PermanentDeleteAgentIncarnation). A deferred
+// purge is reported as ErrPurgeDeferred: nothing was deleted.
+func (s *Store) DeleteAgentIncarnation(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error) {
+	res, err := s.PermanentDeleteAgentIncarnation(ctx, agentID, userID, createdAt)
+	if err != nil {
+		// A chunked purge that fails part-way still reports what it committed.
+		return res.MessagesDeleted, err
+	}
+	if res.EraseDeferred {
+		return 0, ErrPurgeDeferred
+	}
+	return res.MessagesDeleted, nil
+}
+
+// PermanentDeleteAgentIncarnation permanently deletes only the incarnation
+// previously resolved by the caller. Carrying createdAt across the
+// handler/store boundary prevents a delayed request from attaching to a
+// same-owner recreation at the same address before any purge token has been
+// claimed.
 //
 // While the owning account's sending is paused (any class) it refuses with
 // ErrEraseHeld: an account under a pause may trash its agents but may not
 // erase their content before an operator has classified the pause.
-func (s *Store) DeleteAgentIncarnation(ctx context.Context, agentID, userID string, createdAt time.Time) (messagesDeleted int64, err error) {
-	var token string
-	var chunked bool
-	err = s.WithTx(ctx, func(tx pgx.Tx) error {
+//
+// An agent that sent to an external recipient within RecentSenderEraseDefer
+// is not purged: it is moved to the trash (if live) in the same transaction
+// and the result reports EraseDeferred with the trash purge time, so late
+// provider feedback can still be attributed and the account-level erase
+// deferral keeps its evidence (account_erase_defer.go).
+func (s *Store) PermanentDeleteAgentIncarnation(ctx context.Context, agentID, userID string, createdAt time.Time) (AgentPurgeResult, error) {
+	var (
+		res     AgentPurgeResult
+		token   string
+		chunked bool
+	)
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
 		var decisionErr error
 		token, chunked, decisionErr = s.agentPurgeDecisionTx(ctx, tx, agentID, userID, createdAt)
+		if errors.Is(decisionErr, errAgentPurgeDeferred) {
+			purgeAfter, err := trashAgentForDeferredPurgeTx(ctx, tx, agentID, userID)
+			if err != nil {
+				return err
+			}
+			res.EraseDeferred, res.PurgeAfter = true, &purgeAfter
+			return nil
+		}
 		if decisionErr != nil || chunked {
 			return decisionErr
 		}
 		var deleteErr error
-		messagesDeleted, deleteErr = s.deleteAgentAtomicTx(ctx, tx, agentID, userID)
+		res.MessagesDeleted, deleteErr = s.deleteAgentAtomicTx(ctx, tx, agentID, userID)
 		return deleteErr
 	})
 	if err != nil || !chunked {
-		return messagesDeleted, err
+		return res, err
 	}
-	return s.purgeAgentChunked(ctx, agentID, userID, token)
+	res.MessagesDeleted, err = s.purgeAgentChunked(ctx, agentID, userID, token)
+	return res, err
 }
 
 // SoftDeleteAgent moves a live agent to the trash (docs/design/
@@ -5558,9 +5602,32 @@ func (s *Store) RestoreMessage(ctx context.Context, messageID, agentID string) (
 // PurgeMessage permanently deletes a message that is already in the trash
 // ("delete forever" — the Gmail journey is delete → trash → delete forever,
 // so a live message must be trashed first). Returns ErrNotInTrash for a
-// live message, ErrMessageNotFound otherwise.
+// live message, ErrMessageNotFound otherwise, and ErrPurgeDeferred when the
+// message was sent externally inside RecentSenderEraseDefer (see
+// PurgeMessageOrDefer; nothing is deleted).
 func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) error {
-	return s.WithTx(ctx, func(tx pgx.Tx) error {
+	res, err := s.PurgeMessageOrDefer(ctx, messageID, agentID)
+	if err == nil && res.EraseDeferred {
+		return ErrPurgeDeferred
+	}
+	return err
+}
+
+// MessagePurgeResult is the outcome of a permanent message delete: purged,
+// or — for a message sent to an external recipient inside
+// RecentSenderEraseDefer — left in the message trash until PurgeAfter.
+type MessagePurgeResult struct {
+	EraseDeferred bool
+	PurgeAfter    *time.Time
+}
+
+// PurgeMessageOrDefer is PurgeMessage returning the deferral: an
+// already-trashed message that was sent to an external recipient within
+// RecentSenderEraseDefer stays in the trash (the janitor purges it
+// TrashRetention after deleted_at) instead of being deleted now.
+func (s *Store) PurgeMessageOrDefer(ctx context.Context, messageID, agentID string) (MessagePurgeResult, error) {
+	var res MessagePurgeResult
+	err := s.WithTx(ctx, func(tx pgx.Tx) error {
 		var deletedAt *time.Time
 		var deliveryStatus string
 		var activeSend bool
@@ -5585,6 +5652,19 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 		if deletedAt == nil {
 			return ErrNotInTrash
 		}
+		var userID string
+		if err := tx.QueryRow(ctx,
+			`SELECT user_id FROM agent_identities WHERE id = $1`, agentID,
+		).Scan(&userID); err != nil {
+			return err
+		}
+		if deferred, err := messageEraseDeferredTx(ctx, tx, userID, messageID); err != nil {
+			return err
+		} else if deferred {
+			purgeAfter := deletedAt.Add(TrashRetention)
+			res.EraseDeferred, res.PurgeAfter = true, &purgeAfter
+			return nil
+		}
 		if sendJobID != nil && (deliveryStatus == "accepted" || deliveryStatus == "sending") {
 			if err := s.cancelOutboundJobIDsTx(ctx, tx, []int64{*sendJobID}); err != nil {
 				return err
@@ -5604,6 +5684,7 @@ func (s *Store) PurgeMessage(ctx context.Context, messageID, agentID string) err
 		_, err = tx.Exec(ctx, `DELETE FROM messages WHERE id = $1`, messageID)
 		return err
 	})
+	return res, err
 }
 
 // classifyTrashMiss turns a zero-row trash mutation into the precise error:

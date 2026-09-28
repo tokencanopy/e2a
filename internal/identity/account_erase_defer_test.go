@@ -273,3 +273,196 @@ func TestOperatorForcePurgeStillPurgesADeferredAccount(t *testing.T) {
 		t.Fatalf("purged = %v, want the deferred account", purged)
 	}
 }
+
+// ── Agent- and message-level deferral: the account check's evidence cannot
+// be purged on demand inside the window. ──
+
+func (f deferFixture) agentCreatedAt(t *testing.T, agentID string) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT created_at FROM agent_identities WHERE id = $1`, agentID).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+func (f deferFixture) agentDeletedAt(t *testing.T, agentID string) (exists bool, deletedAt *time.Time) {
+	t.Helper()
+	err := f.pool.QueryRow(context.Background(),
+		`SELECT true, deleted_at FROM agent_identities WHERE id = $1`, agentID).Scan(&exists, &deletedAt)
+	if err != nil {
+		return false, nil
+	}
+	return exists, deletedAt
+}
+
+func TestPermanentAgentDeleteIsDeferredForARecentExternalSender(t *testing.T) {
+	f := newDeferFixture(t, "agentrecent")
+	ctx := context.Background()
+	f.sent(t, "msg_agent_recent", 24*time.Hour, "someone@example.com")
+
+	res, err := f.store.PermanentDeleteAgentIncarnation(ctx, f.agent, f.userID, f.agentCreatedAt(t, f.agent))
+	if err != nil {
+		t.Fatalf("PermanentDeleteAgentIncarnation: %v", err)
+	}
+	if !res.EraseDeferred || res.MessagesDeleted != 0 || res.PurgeAfter == nil {
+		t.Fatalf("result = %+v, want deferred with purge_after and nothing deleted", res)
+	}
+	exists, deletedAt := f.agentDeletedAt(t, f.agent)
+	if !exists || deletedAt == nil {
+		t.Fatalf("agent exists=%v deleted_at=%v, want a trashed row", exists, deletedAt)
+	}
+	if !res.PurgeAfter.Equal(deletedAt.Add(identity.TrashRetention)) {
+		t.Fatalf("purge_after = %v, want deleted_at + trash retention", res.PurgeAfter)
+	}
+	var msgs int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM message_recipients WHERE message_id = 'msg_agent_recent'`).Scan(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	if msgs != 1 {
+		t.Fatalf("recipient evidence rows = %d after a deferred agent delete, want 1", msgs)
+	}
+	// A second permanent delete of the now-trashed agent is deferred again,
+	// and the int-returning wrapper reports it as ErrPurgeDeferred.
+	if _, err := f.store.DeleteAgent(ctx, f.agent, f.userID); !errors.Is(err, identity.ErrPurgeDeferred) {
+		t.Fatalf("DeleteAgent of the trashed recent sender err = %v, want ErrPurgeDeferred", err)
+	}
+	// Restore works as for any trashed agent.
+	if _, err := f.store.RestoreAgent(ctx, f.agent, f.userID); err != nil {
+		t.Fatalf("RestoreAgent after a deferred delete: %v", err)
+	}
+	// And the account erase is still deferred.
+	acct, err := f.store.EraseAccount(ctx, f.userID, nil)
+	if err != nil || !acct.EraseDeferred {
+		t.Fatalf("EraseAccount after the agent delete = %+v err=%v, want deferred", acct, err)
+	}
+}
+
+func TestPermanentAgentDeleteOfAnInternalOnlySenderPurges(t *testing.T) {
+	f := newDeferFixture(t, "agentinternal")
+	ctx := context.Background()
+	f.sent(t, "msg_agent_internal", time.Hour, "peer-bot@"+deferSharedDomain, f.agent)
+
+	res, err := f.store.PermanentDeleteAgentIncarnation(ctx, f.agent, f.userID, f.agentCreatedAt(t, f.agent))
+	if err != nil {
+		t.Fatalf("PermanentDeleteAgentIncarnation: %v", err)
+	}
+	if res.EraseDeferred || res.MessagesDeleted != 1 {
+		t.Fatalf("result = %+v, want an immediate purge of 1 message", res)
+	}
+	if exists, _ := f.agentDeletedAt(t, f.agent); exists {
+		t.Fatal("agent row survived a purge with only internal sends")
+	}
+}
+
+func TestPermanentAgentDeleteOutsideTheWindowPurges(t *testing.T) {
+	f := newDeferFixture(t, "agentold")
+	f.sent(t, "msg_agent_old", 15*24*time.Hour, "someone@example.com")
+	if n, err := f.store.DeleteAgent(context.Background(), f.agent, f.userID); err != nil || n != 1 {
+		t.Fatalf("DeleteAgent = %d err=%v, want 1 message purged", n, err)
+	}
+}
+
+func TestPausedAccountAgentDeleteStaysEraseHeld(t *testing.T) {
+	f := newDeferFixture(t, "agentpaused")
+	ctx := context.Background()
+	f.sent(t, "msg_agent_paused", time.Hour, "someone@example.com")
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE account_sending_controls SET state = 'paused', reason = 'r', actor = 'op', pause_class = 'operator' WHERE user_id = $1`,
+		f.userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.DeleteAgent(ctx, f.agent, f.userID); !errors.Is(err, identity.ErrEraseHeld) {
+		t.Fatalf("DeleteAgent on a paused account err = %v, want ErrEraseHeld", err)
+	}
+	if _, deletedAt := f.agentDeletedAt(t, f.agent); deletedAt != nil {
+		t.Fatal("a held permanent delete trashed the agent")
+	}
+}
+
+func TestPermanentMessageDeleteIsDeferredForARecentExternalSend(t *testing.T) {
+	f := newDeferFixture(t, "msgrecent")
+	ctx := context.Background()
+	f.sent(t, "msg_purge_recent", time.Hour, "someone@example.com")
+	f.sent(t, "msg_purge_internal", time.Hour, "peer-bot@"+deferSharedDomain)
+	for _, id := range []string{"msg_purge_recent", "msg_purge_internal"} {
+		if err := f.store.SoftDeleteMessage(ctx, id, f.agent); err != nil {
+			t.Fatalf("SoftDeleteMessage %s: %v", id, err)
+		}
+	}
+
+	res, err := f.store.PurgeMessageOrDefer(ctx, "msg_purge_recent", f.agent)
+	if err != nil {
+		t.Fatalf("PurgeMessageOrDefer: %v", err)
+	}
+	var deletedAt time.Time
+	if err := f.pool.QueryRow(ctx, `SELECT deleted_at FROM messages WHERE id = 'msg_purge_recent'`).Scan(&deletedAt); err != nil {
+		t.Fatalf("externally sent message was purged: %v", err)
+	}
+	if !res.EraseDeferred || res.PurgeAfter == nil || !res.PurgeAfter.Equal(deletedAt.Add(identity.TrashRetention)) {
+		t.Fatalf("result = %+v, want deferred with purge_after = deleted_at + trash retention", res)
+	}
+	if err := f.store.PurgeMessage(ctx, "msg_purge_recent", f.agent); !errors.Is(err, identity.ErrPurgeDeferred) {
+		t.Fatalf("PurgeMessage err = %v, want ErrPurgeDeferred", err)
+	}
+
+	// A message sent only internally is purged at once.
+	if res, err := f.store.PurgeMessageOrDefer(ctx, "msg_purge_internal", f.agent); err != nil || res.EraseDeferred {
+		t.Fatalf("internal message purge = %+v err=%v, want purged", res, err)
+	}
+	var n int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM messages WHERE id = 'msg_purge_internal'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("internal message rows = %d err=%v, want 0", n, err)
+	}
+}
+
+func TestWindowZeroDisablesAgentAndMessageDeferral(t *testing.T) {
+	prev := identity.RecentSenderEraseDefer
+	identity.RecentSenderEraseDefer = 0
+	t.Cleanup(func() { identity.RecentSenderEraseDefer = prev })
+
+	f := newDeferFixture(t, "zeroagent")
+	ctx := context.Background()
+	f.sent(t, "msg_zero_a", time.Hour, "someone@example.com")
+	f.sent(t, "msg_zero_b", time.Hour, "someone@example.com")
+	if err := f.store.SoftDeleteMessage(ctx, "msg_zero_a", f.agent); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := f.store.PurgeMessageOrDefer(ctx, "msg_zero_a", f.agent); err != nil || res.EraseDeferred {
+		t.Fatalf("message purge with window 0 = %+v err=%v, want purged", res, err)
+	}
+	if n, err := f.store.DeleteAgent(ctx, f.agent, f.userID); err != nil || n != 1 {
+		t.Fatalf("agent purge with window 0 = %d err=%v, want 1 message purged", n, err)
+	}
+}
+
+// The original bypass, end to end: send externally, try to permanently
+// delete the sending agent (and its sent message), then erase the account.
+// The evidence survives and the account erase is deferred.
+func TestBypassDeleteAgentsThenEraseIsStillDeferred(t *testing.T) {
+	f := newDeferFixture(t, "bypass")
+	ctx := context.Background()
+	f.sent(t, "msg_bypass", time.Hour, "someone@example.com")
+
+	if err := f.store.SoftDeleteMessage(ctx, "msg_bypass", f.agent); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := f.store.PurgeMessageOrDefer(ctx, "msg_bypass", f.agent); err != nil || !res.EraseDeferred {
+		t.Fatalf("message purge = %+v err=%v, want deferred", res, err)
+	}
+	if res, err := f.store.PermanentDeleteAgentIncarnation(ctx, f.agent, f.userID, f.agentCreatedAt(t, f.agent)); err != nil || !res.EraseDeferred {
+		t.Fatalf("agent purge = %+v err=%v, want deferred", res, err)
+	}
+	acct, err := f.store.EraseAccount(ctx, f.userID, nil)
+	if err != nil {
+		t.Fatalf("EraseAccount: %v", err)
+	}
+	if !acct.EraseDeferred || acct.UserDeleted {
+		t.Fatalf("account erase after the bypass sequence = %+v, want deferred", acct)
+	}
+	var recipients int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM message_recipients WHERE message_id = 'msg_bypass'`).Scan(&recipients); err != nil || recipients != 1 {
+		t.Fatalf("recipient evidence rows = %d err=%v, want 1", recipients, err)
+	}
+}

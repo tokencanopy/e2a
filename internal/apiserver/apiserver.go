@@ -193,13 +193,13 @@ func BuildDeps(p Params) httpapi.Deps {
 		// Trash semantics (docs/design/trash-soft-delete.md): the default
 		// delete is soft; the hard delete sits behind ?permanent=true.
 		DeleteAgent:          p.Store.SoftDeleteAgent,
-		PermanentDeleteAgent: p.Store.DeleteAgentIncarnation,
+		PermanentDeleteAgent: p.Store.PermanentDeleteAgentIncarnation,
 		RestoreAgent:         p.Store.RestoreAgent,
 		GetAgentAnyState:     p.Store.GetAgentByIDAnyState,
 		ListDeletedAgents:    p.Store.ListDeletedAgentsByUser,
 		DeleteMessage:        p.Store.SoftDeleteMessage,
 		RestoreMessage:       p.Store.RestoreMessage,
-		PurgeMessage:         p.Store.PurgeMessage,
+		PurgeMessage:         p.Store.PurgeMessageOrDefer,
 
 		ListDomains:                  p.Store.ListDomainsByUser,
 		SendingRampSnapshot:          rampSnapshot,
