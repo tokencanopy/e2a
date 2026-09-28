@@ -153,3 +153,30 @@ func TestSweepMessagesDoesNotCountConflicts(t *testing.T) {
 		t.Fatalf("Trashed = %d, want 0 — a 409 is skipped, not booked as done", got.Trashed)
 	}
 }
+
+// A purge the server deferred (erase_deferred: the message stays in the
+// trash) is counted apart and never booked as purged.
+func TestSweepMessagesCountsDeferredPurgesApart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			items := []map[string]string{}
+			if r.URL.Query().Get("deleted") == "true" {
+				items = []map[string]string{{"id": "msg_deferred"}, {"id": "msg_gone"}}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": nil})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if strings.Contains(r.URL.Path, "msg_deferred") {
+			_, _ = w.Write([]byte(`{"deleted":true,"id":"msg_deferred","erase_deferred":true,"purge_after":"2026-10-28T00:00:00Z"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"deleted":true,"id":"msg_gone"}`))
+	}))
+	defer srv.Close()
+
+	got := failProbe(srv.URL, "", nil).SweepMessages()
+	if got.Purged != 1 || got.Deferred != 1 {
+		t.Fatalf("SweepMessages() = %+v, want {Purged:1 Deferred:1}", got)
+	}
+}

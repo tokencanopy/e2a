@@ -68,8 +68,8 @@ func (p *prober) runOnce(ctx context.Context) run {
 	// already fixed, so a cleanup failure cannot colour it. Without this the
 	// probe agent accumulates every message the battery ever created (268k on
 	// staging), until unrelated deletes on that instance start timing out.
-	if sw := probe.SweepMessages(); sw.Trashed > 0 || sw.Purged > 0 {
-		log.Printf("prober: message sweep trashed=%d purged=%d", sw.Trashed, sw.Purged)
+	if sw := probe.SweepMessages(); sw.Trashed > 0 || sw.Purged > 0 || sw.Deferred > 0 {
+		log.Printf("prober: message sweep trashed=%d purged=%d deferred=%d", sw.Trashed, sw.Purged, sw.Deferred)
 	}
 	return r
 }

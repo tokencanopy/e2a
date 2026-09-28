@@ -20,6 +20,14 @@ export interface CleanupResult {
 	 * domain-fixture flow gates DNS removal on sending_teardown.
 	 */
 	completed: Array<{ kind: Kind; id: string; raw: string }>;
+	/**
+	 * Permanent deletes the server deferred (200 with erase_deferred: the
+	 * fixture emailed an external recipient recently, so it stays in the trash
+	 * until purge_after). NOT purged and not counted in `succeeded`; untracked
+	 * all the same — retrying would be deferred again, and the janitor removes
+	 * it at the end of the trash window.
+	 */
+	deferred: Array<{ kind: Kind; id: string; purgeAfter: string | null }>;
 }
 
 export interface CleanupOpts {
@@ -116,6 +124,7 @@ export async function cleanupFixtures(
 
   const failed: CleanupResult["failed"] = [];
 	const completed: CleanupResult["completed"] = [];
+	const deferred: CleanupResult["deferred"] = [];
   let succeeded = 0;
   // Snapshot up front: the loop mutates `tracked` via untrack().
   const batch = [...fixtures].reverse();
@@ -124,7 +133,11 @@ export async function cleanupFixtures(
     // budget — so neither a hard failure nor an exhausted retry on one fixture
     // can stop the remaining ones from being deleted.
 		const outcome = await deleteWithRetry(client, t, attempts, conflictAttempts, backoffMs, sleep);
-		if (outcome.reason === null) {
+		const deferral = outcome.reason === null ? eraseDeferral(outcome.raw) : null;
+		if (deferral !== null) {
+			deferred.push({ ...t, purgeAfter: deferral.purgeAfter });
+			untrack(t.kind, t.id);
+		} else if (outcome.reason === null) {
       succeeded++;
 			completed.push({ ...t, raw: outcome.raw });
 			if (
@@ -139,7 +152,18 @@ export async function cleanupFixtures(
 			failed.push({ ...t, reason: outcome.reason });
     }
   }
-	return { attempted: batch.length, succeeded, failed, completed };
+	return { attempted: batch.length, succeeded, failed, completed, deferred };
+}
+
+/** The deferral of a 200 permanent-delete receipt, or null when it purged. */
+function eraseDeferral(raw: string): { purgeAfter: string | null } | null {
+	try {
+		const body = JSON.parse(raw) as { erase_deferred?: unknown; purge_after?: unknown };
+		if (body.erase_deferred !== true) return null;
+		return { purgeAfter: typeof body.purge_after === "string" ? body.purge_after : null };
+	} catch {
+		return null;
+	}
 }
 
 /** Finish one domain registration's cleanup after its DNS records are gone. */

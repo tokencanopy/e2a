@@ -42,6 +42,11 @@ const (
 type SweepResult struct {
 	Trashed int `json:"trashed"`
 	Purged  int `json:"purged"`
+	// Deferred counts purge attempts the server answered with
+	// erase_deferred: the message was sent to an external recipient
+	// recently, so it stays in the trash until purge_after. It is NOT
+	// purged; the janitor removes it at the end of the trash window.
+	Deferred int `json:"deferred,omitempty"`
 }
 
 // SweepMessages trashes live probe messages and then purges the trash.
@@ -66,14 +71,22 @@ func (p *Probe) SweepMessages() SweepResult {
 	// so the defaults would walk straight past every outbound copy and every
 	// inbound message a scenario had already read.
 	for _, id := range p.listMessageIDs(ctx, "direction=all&read_status=all") {
-		if p.deleteMessage(ctx, id, false) {
+		if ok, _ := p.deleteMessage(ctx, id, false); ok {
 			res.Trashed++
 		}
 	}
 	// Trash → gone. Picks up what was just trashed plus anything an earlier
-	// run trashed and left sitting for the 30-day janitor.
+	// run trashed and left sitting for the 30-day janitor. A deferred purge
+	// (erase_deferred) left the message in the trash, so it is counted apart
+	// and never booked as purged. The probe's own recipients are exempt from
+	// the deferral server-side (its account class, the shared domain and the
+	// provider simulator), so deferrals here indicate a misconfiguration.
 	for _, id := range p.listMessageIDs(ctx, "deleted=true&direction=all&read_status=all") {
-		if p.deleteMessage(ctx, id, true) {
+		ok, deferred := p.deleteMessage(ctx, id, true)
+		switch {
+		case deferred:
+			res.Deferred++
+		case ok:
 			res.Purged++
 		}
 	}
@@ -112,15 +125,28 @@ func (p *Probe) listMessageIDs(ctx context.Context, query string) []string {
 }
 
 // deleteMessage trashes (permanent=false) or purges (permanent=true) one
-// message, reporting whether the row actually moved. A 409 — a message held for
-// review, or one whose provider submission is still in flight — counts as
-// skipped and is retried next tick, rather than being booked as done.
-func (p *Probe) deleteMessage(ctx context.Context, id string, permanent bool) bool {
+// message, reporting whether the row actually moved and whether a purge was
+// deferred (200 with erase_deferred: the message stays in the trash). A 409 —
+// a message held for review, or one whose provider submission is still in
+// flight — counts as skipped and is retried next tick, rather than being
+// booked as done.
+func (p *Probe) deleteMessage(ctx context.Context, id string, permanent bool) (moved, deferred bool) {
 	u := p.HTTPBaseURL + "/v1/agents/" + url.PathEscape(p.AgentEmail) +
 		"/messages/" + url.PathEscape(id)
 	if permanent {
 		u += "?permanent=true&confirm=DELETE"
 	}
-	st, _, err := p.do(ctx, http.MethodDelete, u, nil)
-	return err == nil && st == http.StatusOK
+	st, body, err := p.do(ctx, http.MethodDelete, u, nil)
+	if err != nil || st != http.StatusOK {
+		return false, false
+	}
+	if permanent {
+		var receipt struct {
+			EraseDeferred bool `json:"erase_deferred"`
+		}
+		if json.Unmarshal(body, &receipt) == nil && receipt.EraseDeferred {
+			return false, true
+		}
+	}
+	return true, false
 }
