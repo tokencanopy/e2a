@@ -16,9 +16,19 @@
 -- LIMIT 1 in the failing case.
 --
 -- Index-only additions. Note these are NON-concurrent CREATE INDEX, which
--- takes SHARE and blocks writes to the table for its duration: acceptable
--- only because these tables are empty or near-empty at the release that
--- carries this migration.
+-- takes SHARE and blocks writes to the table for its duration. These tables
+-- are NOT empty at the release that carries this migration: the gate has
+-- written a correlation (plus one recipient row per envelope address) for
+-- every authorized provider attempt since the sending-policy gate shipped,
+-- so a production deployment holds weeks of rows. That is still a small
+-- table by index-build standards — one row per send, a few narrow columns —
+-- so the build completes in well under a second to a few seconds, and the
+-- only writers it blocks are feedback/authorization inserts, which wait
+-- rather than fail. lock_timeout bounds the wait to ACQUIRE the lock, so a
+-- long-running transaction on these tables fails the migration (and the
+-- boot, which retries) instead of queueing every writer behind it. A
+-- deployment with a far larger backlog should pre-create these indexes
+-- CONCURRENTLY by hand; IF NOT EXISTS then makes this file a no-op.
 
 SET LOCAL lock_timeout = '2s';
 
