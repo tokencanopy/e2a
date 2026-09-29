@@ -436,6 +436,18 @@ provider retries. The seam never reads `messages`, `agent_identities`, or
   correlation authorized in a race with a purge) and sweeps events whose
   correlation is gone. Migration 124 ran that stamp once for the backlog with
   a **fixed 30 days** (the policy default), not the effective policy value.
+- **Synthetic traffic keeps provenance for 30 days (2026-09-30).** System-
+  and internal-class accounts (the standing prober, monitors, conformance
+  runs) are never deleted, so the account-lifetime rule would keep their
+  correlations forever — and the prober sends every 30 seconds, so they are
+  nearly all of the table. The gate therefore stamps customer-purpose
+  correlations of a `system` or `internal` account (server-owned
+  `users.account_class`, read under the authorization lock) with
+  `expires_at = created_at + sending_feedback_post_account_retention_days`
+  (30 by default) at creation, exactly like non-customer purposes; events
+  inherit it and the hourly janitor removes them. Migration 129 stamped the
+  existing rows of those accounts once with a fixed `created_at + 30 days`.
+  Standard and demo accounts keep the account-lifetime rule.
 - **Keyring coverage is a startup gate**: a server that HAS a keyring
   refuses to start if any unexpired recipient row was signed under a version
   that keyring does not hold. Rotation is superset-first: add the new key

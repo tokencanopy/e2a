@@ -1356,8 +1356,16 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 	// wait out a fixed timer before complaining. The post-deletion janitor sets
 	// their horizon. A non-customer operation has no account to outlive, so it
 	// receives the configured horizon at creation.
+	//
+	// So does customer-purpose traffic from a system or internal account
+	// (probers, monitors, conformance runs). Those accounts are never deleted,
+	// so "account lifetime" would mean forever, and their traffic is
+	// synthetic: the standing prober alone writes thousands of correlations a
+	// day. The class is the server-owned users.account_class, read under the
+	// FOR SHARE lock readAuthState already holds — the same value that exempts
+	// the account from budgets. Standard and demo accounts are unchanged.
 	var expires *time.Time
-	if !st.op.Purpose.isCustomer() {
+	if !st.op.Purpose.isCustomer() || accountClassExempt(st.class) {
 		horizon := time.Now().UTC().Add(
 			time.Duration(st.policy.SendingFeedbackPostAcctRetention) * 24 * time.Hour)
 		expires = &horizon
