@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/riverqueue/river"
@@ -11,8 +12,10 @@ import (
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/config"
 	"github.com/tokencanopy/e2a/internal/delivery"
+	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/testutil/testdb"
 	"github.com/tokencanopy/e2a/internal/usage"
 )
@@ -166,7 +169,68 @@ func TestFeedbackAccountingWiring(t *testing.T) {
 		t.Fatal("no feedback retention janitor composed")
 	}
 	periodics := janitor.RegisterJobs(river.NewWorkers())
-	if len(periodics) != 2 {
-		t.Fatalf("retention periodics = %d, want 2 (retention pass + reconcile)", len(periodics))
+	if len(periodics) != 3 {
+		t.Fatalf("retention periodics = %d, want 3 (feedback retention + reconcile + ledger retention)", len(periodics))
+	}
+}
+
+// ledgerObserverRecorder is a full telemetry backend that records only the
+// ledger janitor's samples.
+type ledgerObserverRecorder struct {
+	telemetry.NoOp
+	mu      sync.Mutex
+	deleted map[string]int
+	runs    []string
+}
+
+func (r *ledgerObserverRecorder) JanitorRowsDeleted(table string, count int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted[table] += count
+}
+
+func (r *ledgerObserverRecorder) SendingLedgerRetentionRun(outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runs = append(r.runs, outcome)
+}
+
+// TestLedgerRetentionWiring: the composition root must both register the
+// sending-ledger janitor and route its samples to the process metrics
+// backend. Either omission is silent in production — the ledger simply grows,
+// or shrinks with no signal — so this drives the composed module's janitor
+// over a seeded expired row after installing the observers exactly as main
+// does, and requires the deletion and the run outcome to reach the backend.
+func TestLedgerRetentionWiring(t *testing.T) {
+	pool := testdb.TestDB(t)
+	if err := jobs.Migrate(context.Background(), pool); err != nil {
+		t.Fatalf("river migrate: %v", err)
+	}
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: "relay.invalid", Port: 587, FromDomain: "test.e2a.dev"})
+	composed := newOutboundSending(outboundSendingDeps{
+		pool:    pool,
+		relay:   relay,
+		secrets: sendingpolicy.Secrets{},
+		source:  sendingpolicy.PolicySourceConfig,
+		policy:  sendingpolicy.DisabledPolicy(),
+	})
+
+	rec := &ledgerObserverRecorder{deleted: map[string]int{}}
+	installSendingPolicyObservers(rec)
+	t.Cleanup(func() { installSendingPolicyObservers(telemetry.NoOp{}) })
+
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO sending_budget_counters (scope, scope_id, day, daily_limit)
+		VALUES ('global_all', 'global', (now() AT TIME ZONE 'UTC')::date - 3, 5000)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sendingpolicy.NewLedgerRetentionWorker(composed.module).Work(context.Background(), &river.Job[sendingpolicy.LedgerRetentionArgs]{}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if rec.deleted[sendingpolicy.LedgerTableCounters] != 1 {
+		t.Fatalf("deleted samples = %v, want the closed-day counter reported", rec.deleted)
+	}
+	if len(rec.runs) != 1 || rec.runs[0] != sendingpolicy.LedgerRunComplete {
+		t.Fatalf("run samples = %v, want one complete", rec.runs)
 	}
 }

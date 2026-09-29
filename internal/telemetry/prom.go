@@ -32,6 +32,7 @@ type Prom struct {
 	outRateDeferred    prometheus.Counter
 	externalAccess     *prometheus.CounterVec
 	sendingFeedback    *prometheus.CounterVec
+	sendingLedgerRuns  *prometheus.CounterVec
 	whAttempts         *prometheus.CounterVec
 	whAttemptDur       prometheus.Histogram
 	whTerminal         *prometheus.CounterVec
@@ -107,6 +108,7 @@ var (
 	sendingFeedbackOutcomeSet = set("correlated", "dead_account", "unmatched_recipient",
 		"uncorrelated_with_marker", "uncorrelated", "duplicate")
 	sendingFeedbackBucketSet = set("delivered", "hard_bounce", "complaint", "terminal_other", "none")
+	sendingLedgerRunSet      = set("complete", "partial", "failed")
 	whSet                    = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
 	whTerminalSet = set("delivered", "e2a_failure", "endpoint_failure", "excluded")
@@ -142,7 +144,12 @@ var (
 	scopeSet = set("single", "since")
 	tableSet = set("webhook_events", "webhook_subscriber_deliveries",
 		"webhook_deliveries", "messages", "agent_identities",
-		"user_sessions", "oauth")
+		"user_sessions", "oauth",
+		// Sending-ledger retention (internal/sendingpolicy ledger janitor).
+		"sending_provider_operations", "sending_budget_reservations",
+		"sending_budget_counters", "sending_protection_notice_events",
+		"sending_protection_notice_deliveries", "account_sending_control_events",
+		"external_sending_access_events")
 	threadResolutionSet = set(
 		"api_reply", "fresh_send", "forward", "rfc_in_reply_to",
 		"rfc_references", "self_twin", "authenticated_delivery_twin",
@@ -279,6 +286,10 @@ func NewProm(build string) *Prom {
 			Name: "e2a_sending_feedback_ingested_total",
 			Help: "Deletion-resistant SES feedback ingestion results by outcome and detector bucket (uncorrelated_with_marker = e2a-stamped mail with no retained correlation).",
 		}, []string{"outcome", "bucket"}),
+		sendingLedgerRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_sending_ledger_retention_runs_total",
+			Help: "Sending-ledger retention passes by outcome (partial = a table hit its per-run batch cap; failed = a table's batch failed and is retried next run). Rows deleted are on e2a_janitor_rows_deleted_total.",
+		}, []string{"outcome"}),
 		outRateDeferred: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_outbound_rate_deferred_total",
 			Help: "Outbound submissions deferred by the per-agent fire-time rate limiter (snoozed, re-fired when the window frees capacity).",
@@ -444,7 +455,7 @@ func NewProm(build string) *Prom {
 	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
-		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred, p.externalAccess, p.sendingFeedback,
+		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred, p.externalAccess, p.sendingFeedback, p.sendingLedgerRuns,
 		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whNotify, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.delegatedFailures, p.delegatedRefresh, p.oidcDiscovery, p.oidcCallback, p.provisioning,
@@ -523,6 +534,10 @@ func (p *Prom) ExternalAccessDecision(stage, route, mode string) {
 
 func (p *Prom) SendingFeedbackIngested(outcome, bucket string) {
 	p.sendingFeedback.WithLabelValues(enum(sendingFeedbackOutcomeSet, outcome), enum(sendingFeedbackBucketSet, bucket)).Inc()
+}
+
+func (p *Prom) SendingLedgerRetentionRun(outcome string) {
+	p.sendingLedgerRuns.WithLabelValues(enum(sendingLedgerRunSet, outcome)).Inc()
 }
 
 func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {

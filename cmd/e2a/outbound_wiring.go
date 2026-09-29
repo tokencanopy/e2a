@@ -12,6 +12,7 @@ import (
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/webhooknotify"
 )
 
@@ -118,11 +119,29 @@ func (s outboundSending) armDeliveryConsumer(c *delivery.Consumer) *delivery.Con
 	return c.WithFeedbackProcessor(s.module)
 }
 
-// feedbackMaintenance is the retention janitor for feedback provenance and
-// daily outcome aggregates. Unregistered, nothing enforces the
-// post-deletion horizon.
+// feedbackMaintenance is the sending-protection retention registrar: the
+// janitor for feedback provenance and daily outcome aggregates, its reconcile
+// backstop, and the sending-ledger janitor (operations, attempts, day
+// counters, notice outbox, control and access audit). Unregistered, nothing
+// enforces any of those horizons and the ledger grows with every send.
 func (s outboundSending) feedbackMaintenance() *sendingpolicy.MaintenanceJobs {
 	return sendingpolicy.NewMaintenanceJobs(s.module)
+}
+
+// installSendingPolicyObservers routes sendingpolicy's process-wide telemetry
+// hooks to the process metrics backend. Each hook is a silent no-op until set,
+// so a missing line here loses a signal without failing anything — which is
+// why it is one function the wiring test calls, not three lines in main.
+func installSendingPolicyObservers(m telemetry.Metrics) {
+	// External-sending-access decisions (shadow impact / enforce refusals)
+	// as bounded counters; a no-op while the control is disabled.
+	sendingpolicy.SetExternalAccessObserver(m.ExternalAccessDecision)
+	// Deletion-resistant feedback ingestion outcomes (B8): bounded
+	// outcome × bucket counter, no address/account/id labels.
+	sendingpolicy.SetFeedbackObserver(m.SendingFeedbackIngested)
+	// Ledger retention: rows deleted per ledger table (on the shared janitor
+	// counter) and one run-outcome sample per pass.
+	sendingpolicy.SetLedgerRetentionObserver(m)
 }
 
 // nonEmpty returns the non-blank values, so an unset config string does not

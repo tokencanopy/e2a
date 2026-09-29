@@ -127,8 +127,8 @@ func TestFeedbackMaintenanceRegistersOnTheMaintenanceQueue(t *testing.T) {
 	f := newFixture(t)
 	module := sendingpolicy.NewModule(f.pool, f.secrets())
 	periodics := sendingpolicy.NewMaintenanceJobs(module).RegisterJobs(river.NewWorkers())
-	if len(periodics) != 2 {
-		t.Fatalf("periodic jobs = %d, want 2 (retention pass + reconcile)", len(periodics))
+	if len(periodics) != 3 {
+		t.Fatalf("periodic jobs = %d, want 3 (retention pass + reconcile + ledger retention)", len(periodics))
 	}
 	// River keeps the periodic's constructor unexported, so assert the two
 	// facts that are observable and load-bearing: the job kind the worker

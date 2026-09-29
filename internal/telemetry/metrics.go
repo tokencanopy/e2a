@@ -159,6 +159,14 @@ type Metrics interface {
 	// only: never an address, account, correlation or provider id.
 	SendingFeedbackIngested(outcome, bucket string)
 
+	// SendingLedgerRetentionRun records one sending-ledger retention pass
+	// (internal/sendingpolicy). outcome ∈ {complete, partial, failed}:
+	// partial = a table hit its per-run batch cap and continues next run;
+	// failed = a table's batch failed (lock/statement timeout) and is
+	// retried next run. Rows it deletes are counted on JanitorRowsDeleted
+	// with the ledger table as the label.
+	SendingLedgerRetentionRun(outcome string)
+
 	// WebhookAttempt records one webhook delivery attempt. outcome ∈
 	// {delivered, retryable_failure, exhausted, webhook_deleted,
 	// skipped_disabled}. statusClass is the HTTP status class of the
@@ -330,6 +338,7 @@ func (NoOp) OutboundAttempt(string, float64)               {}
 func (NoOp) OutboundRateDeferred()                         {}
 func (NoOp) ExternalAccessDecision(string, string, string) {}
 func (NoOp) SendingFeedbackIngested(string, string)        {}
+func (NoOp) SendingLedgerRetentionRun(string)              {}
 func (NoOp) WebhookAttempt(string, string, float64)        {}
 func (NoOp) WebhookTerminal(string, string, int)           {}
 func (NoOp) WebhookNotify(string, string)                  {}
@@ -466,6 +475,10 @@ func (l *Log) ExternalAccessDecision(stage, route, mode string) {
 
 func (l *Log) SendingFeedbackIngested(outcome, bucket string) {
 	log.Printf("[metrics] event=sending_feedback.ingested outcome=%s bucket=%s", outcome, bucket)
+}
+
+func (l *Log) SendingLedgerRetentionRun(outcome string) {
+	log.Printf("[metrics] event=sending_ledger.retention_run outcome=%s", outcome)
 }
 
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {

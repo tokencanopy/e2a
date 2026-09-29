@@ -95,8 +95,9 @@ func (w *FeedbackReconcileWorker) Work(ctx context.Context, _ *river.Job[Feedbac
 	return nil
 }
 
-// MaintenanceJobs registers the feedback retention periodics. Implements
-// jobs.Registrar.
+// MaintenanceJobs registers the sending-protection retention periodics: the
+// feedback provenance pass, its reconcile backstop, and the ledger janitor.
+// Implements jobs.Registrar.
 type MaintenanceJobs struct{ module *Module }
 
 // NewMaintenanceJobs builds the registrar over the gate's module.
@@ -105,6 +106,7 @@ func NewMaintenanceJobs(module *Module) *MaintenanceJobs { return &MaintenanceJo
 func (m *MaintenanceJobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 	river.AddWorker(w, &FeedbackMaintenanceWorker{module: m.module})
 	river.AddWorker(w, &FeedbackReconcileWorker{module: m.module})
+	river.AddWorker(w, &LedgerRetentionWorker{module: m.module})
 	return []*river.PeriodicJob{
 		river.NewPeriodicJob(
 			river.PeriodicInterval(feedbackMaintenanceInterval),
@@ -117,6 +119,16 @@ func (m *MaintenanceJobs) RegisterJobs(w *river.Workers) []*river.PeriodicJob {
 			river.PeriodicInterval(feedbackReconcileInterval),
 			func() (river.JobArgs, *river.InsertOpts) {
 				return FeedbackReconcileArgs{}, &river.InsertOpts{Queue: jobs.QueueMaintenance}
+			},
+			&river.PeriodicJobOpts{RunOnStart: true},
+		),
+		// The ledger janitor also runs on start: blue/green deploys restart
+		// the process more often than a slow cadence would tick, and the
+		// first run after rollout has weeks of backlog to start on.
+		river.NewPeriodicJob(
+			river.PeriodicInterval(ledgerRetentionInterval),
+			func() (river.JobArgs, *river.InsertOpts) {
+				return LedgerRetentionArgs{}, &river.InsertOpts{Queue: jobs.QueueMaintenance}
 			},
 			&river.PeriodicJobOpts{RunOnStart: true},
 		),

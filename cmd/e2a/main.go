@@ -356,12 +356,9 @@ func main() {
 		metrics = promBackend
 	}
 	store.SetThreadMetrics(metrics)
-	// External-sending-access decisions (shadow impact / enforce refusals)
-	// as bounded counters; a no-op while the control is disabled.
-	sendingpolicy.SetExternalAccessObserver(metrics.ExternalAccessDecision)
-	// Deletion-resistant feedback ingestion outcomes (B8): bounded
-	// outcome × bucket counter, no address/account/id labels.
-	sendingpolicy.SetFeedbackObserver(metrics.SendingFeedbackIngested)
+	// sendingpolicy's process-wide telemetry hooks: external-access
+	// decisions, feedback ingestion, and the ledger retention janitor.
+	installSendingPolicyObservers(metrics)
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)
 	smtpRelay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
 	sender := outbound.NewSenderWithDKIM(smtpRelay, cfg.OutboundSMTP.FromDomain, store)
