@@ -178,12 +178,47 @@ describe("ProtectionEditor — save", () => {
         // field is not editable in that state.
         gate: { policy: "open", allowlist: [], action: "flag" },
         scan: { sensitivity: "off" },
+        require_review: false,
       },
       holds: { ttl_seconds: 86400, on_expiry: "approve" },
     });
     expect(await screen.findByText("Saved ✓")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(onSaved).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers the outbound-only require_review toggle and PUTs it", async () => {
+    mockSetProtection.mockResolvedValue(undefined);
+    renderEditor();
+
+    // The switch is outbound-only: an inbound hold-everything knob would be a
+    // different posture and the API does not expose one.
+    expect(screen.queryByLabelText("Inbound always require human review")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("Outbound always require human review"));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mockSetProtection).toHaveBeenCalledTimes(1));
+    const [, payload] = mockSetProtection.mock.calls[0];
+    expect(payload.outbound.require_review).toBe(true);
+    // The flag holds every send on its own; the gate is left as it was.
+    expect(payload.outbound.gate.policy).toBe("open");
+    expect(payload.outbound.gate.action).toBe("flag");
+  });
+
+  it("keeps an existing require_review set when an unrelated field is saved", async () => {
+    mockSetProtection.mockResolvedValue(undefined);
+    renderEditor({
+      ...baseConfig,
+      outbound: { ...baseConfig.outbound, require_review: true },
+    });
+    expect(screen.getByLabelText("Outbound always require human review")).toBeChecked();
+
+    await userEvent.click(screen.getByRole("button", { name: "1 day" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mockSetProtection).toHaveBeenCalledTimes(1));
+    const [, payload] = mockSetProtection.mock.calls[0];
+    expect(payload.outbound.require_review).toBe(true);
   });
 
   it("trims allowlist entries and drops blank lines on save", async () => {

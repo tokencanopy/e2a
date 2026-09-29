@@ -272,6 +272,8 @@ components:
           type: string
         outbound_policy_action:
           type: string
+        outbound_require_review:
+          type: boolean
         outbound_scan:
           type: string
         outbound_scan_block_threshold:
@@ -318,6 +320,7 @@ components:
         - inbound_policy_action
         - outbound_policy
         - outbound_policy_action
+        - outbound_require_review
         - inbound_scan
         - inbound_scan_review_threshold
         - inbound_scan_block_threshold
@@ -3767,7 +3770,7 @@ components:
         inbound:
           $ref: "#/components/schemas/ProtectionDirectionRequest"
         outbound:
-          $ref: "#/components/schemas/ProtectionDirectionRequest"
+          $ref: "#/components/schemas/ProtectionOutboundRequest"
       required:
         - inbound
         - outbound
@@ -3782,7 +3785,7 @@ components:
         inbound:
           $ref: "#/components/schemas/ProtectionDirectionView"
         outbound:
-          $ref: "#/components/schemas/ProtectionDirectionView"
+          $ref: "#/components/schemas/ProtectionOutboundView"
       required:
         - inbound
         - outbound
@@ -3966,6 +3969,38 @@ components:
           format: int64
           minimum: 0
           type: integer
+      type: object
+      x-stability-level: beta
+    ProtectionOutboundRequest:
+      additionalProperties: false
+      properties:
+        gate:
+          $ref: "#/components/schemas/ProtectionGateRequest"
+        require_review:
+          default: false
+          description: When true, hold every outbound send for review regardless of the gate policy, allowlist, or non-match action.
+          type: boolean
+        scan:
+          $ref: "#/components/schemas/ProtectionScanRequest"
+      required:
+        - gate
+        - scan
+      type: object
+      x-stability-level: beta
+    ProtectionOutboundView:
+      additionalProperties: true
+      properties:
+        gate:
+          $ref: "#/components/schemas/ProtectionGateView"
+        require_review:
+          default: false
+          description: When true, hold every outbound send for review regardless of the gate policy, allowlist, or non-match action. A content scan can still block a message that crosses the scan block threshold.
+          type: boolean
+        scan:
+          $ref: "#/components/schemas/ProtectionScanView"
+      required:
+        - gate
+        - scan
       type: object
       x-stability-level: beta
     ProtectionScanRequest:

@@ -10,15 +10,17 @@
  * Do not edit the class manually.
  */
 
-import { ProtectionDirectionRequest } from '../models/ProtectionDirectionRequest.js';
-import { ProtectionHoldsRequest } from '../models/ProtectionHoldsRequest.js';
-import { ProtectionOutboundRequest } from '../models/ProtectionOutboundRequest.js';
+import { ProtectionGateView } from '../models/ProtectionGateView.js';
+import { ProtectionScanView } from '../models/ProtectionScanView.js';
 import { HttpFile } from '../http/http.js';
 
-export class ProtectionConfigRequest {
-    'holds': ProtectionHoldsRequest;
-    'inbound': ProtectionDirectionRequest;
-    'outbound': ProtectionOutboundRequest;
+export class ProtectionOutboundView {
+    'gate': ProtectionGateView;
+    /**
+    * When true, hold every outbound send for review regardless of the gate policy, allowlist, or non-match action. A content scan can still block a message that crosses the scan block threshold.
+    */
+    'requireReview'?: boolean;
+    'scan': ProtectionScanView;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -26,26 +28,26 @@ export class ProtectionConfigRequest {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
-            "name": "holds",
-            "baseName": "holds",
-            "type": "ProtectionHoldsRequest",
+            "name": "gate",
+            "baseName": "gate",
+            "type": "ProtectionGateView",
             "format": ""
         },
         {
-            "name": "inbound",
-            "baseName": "inbound",
-            "type": "ProtectionDirectionRequest",
+            "name": "requireReview",
+            "baseName": "require_review",
+            "type": "boolean",
             "format": ""
         },
         {
-            "name": "outbound",
-            "baseName": "outbound",
-            "type": "ProtectionOutboundRequest",
+            "name": "scan",
+            "baseName": "scan",
+            "type": "ProtectionScanView",
             "format": ""
         }    ];
 
     static getAttributeTypeMap() {
-        return ProtectionConfigRequest.attributeTypeMap;
+        return ProtectionOutboundView.attributeTypeMap;
     }
 
     public constructor() {

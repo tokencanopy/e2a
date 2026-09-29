@@ -153,6 +153,8 @@ __all__ = [
     "ProtectionGateView",
     "ProtectionHoldsRequest",
     "ProtectionHoldsView",
+    "ProtectionOutboundRequest",
+    "ProtectionOutboundView",
     "ProtectionScanRequest",
     "ProtectionScanView",
     "RateLimitedDetails",
@@ -351,6 +353,8 @@ from e2a.v1.generated.models.protection_gate_request import ProtectionGateReques
 from e2a.v1.generated.models.protection_gate_view import ProtectionGateView as ProtectionGateView
 from e2a.v1.generated.models.protection_holds_request import ProtectionHoldsRequest as ProtectionHoldsRequest
 from e2a.v1.generated.models.protection_holds_view import ProtectionHoldsView as ProtectionHoldsView
+from e2a.v1.generated.models.protection_outbound_request import ProtectionOutboundRequest as ProtectionOutboundRequest
+from e2a.v1.generated.models.protection_outbound_view import ProtectionOutboundView as ProtectionOutboundView
 from e2a.v1.generated.models.protection_scan_request import ProtectionScanRequest as ProtectionScanRequest
 from e2a.v1.generated.models.protection_scan_view import ProtectionScanView as ProtectionScanView
 from e2a.v1.generated.models.rate_limited_details import RateLimitedDetails as RateLimitedDetails

@@ -113,6 +113,8 @@ export * from '../models/ProtectionGateRequest.js';
 export * from '../models/ProtectionGateView.js';
 export * from '../models/ProtectionHoldsRequest.js';
 export * from '../models/ProtectionHoldsView.js';
+export * from '../models/ProtectionOutboundRequest.js';
+export * from '../models/ProtectionOutboundView.js';
 export * from '../models/ProtectionScanRequest.js';
 export * from '../models/ProtectionScanView.js';
 export * from '../models/RateLimitedDetails.js';
@@ -284,6 +286,8 @@ import { ProtectionGateRequest, ProtectionGateRequestActionEnum   , ProtectionGa
 import { ProtectionGateView } from '../models/ProtectionGateView.js';
 import { ProtectionHoldsRequest, ProtectionHoldsRequestOnExpiryEnum     } from '../models/ProtectionHoldsRequest.js';
 import { ProtectionHoldsView } from '../models/ProtectionHoldsView.js';
+import { ProtectionOutboundRequest } from '../models/ProtectionOutboundRequest.js';
+import { ProtectionOutboundView } from '../models/ProtectionOutboundView.js';
 import { ProtectionScanRequest, ProtectionScanRequestSensitivityEnum   } from '../models/ProtectionScanRequest.js';
 import { ProtectionScanView } from '../models/ProtectionScanView.js';
 import { RateLimitedDetails } from '../models/RateLimitedDetails.js';
@@ -496,6 +500,8 @@ let typeMap: {[index: string]: any} = {
     "ProtectionGateView": ProtectionGateView,
     "ProtectionHoldsRequest": ProtectionHoldsRequest,
     "ProtectionHoldsView": ProtectionHoldsView,
+    "ProtectionOutboundRequest": ProtectionOutboundRequest,
+    "ProtectionOutboundView": ProtectionOutboundView,
     "ProtectionScanRequest": ProtectionScanRequest,
     "ProtectionScanView": ProtectionScanView,
     "RateLimitedDetails": RateLimitedDetails,

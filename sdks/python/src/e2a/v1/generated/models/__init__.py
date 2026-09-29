@@ -128,6 +128,8 @@ from e2a.v1.generated.models.protection_gate_request import ProtectionGateReques
 from e2a.v1.generated.models.protection_gate_view import ProtectionGateView
 from e2a.v1.generated.models.protection_holds_request import ProtectionHoldsRequest
 from e2a.v1.generated.models.protection_holds_view import ProtectionHoldsView
+from e2a.v1.generated.models.protection_outbound_request import ProtectionOutboundRequest
+from e2a.v1.generated.models.protection_outbound_view import ProtectionOutboundView
 from e2a.v1.generated.models.protection_scan_request import ProtectionScanRequest
 from e2a.v1.generated.models.protection_scan_view import ProtectionScanView
 from e2a.v1.generated.models.rate_limited_details import RateLimitedDetails

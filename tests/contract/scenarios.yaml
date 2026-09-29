@@ -686,6 +686,53 @@ scenarios:
           body_match:
             status: pending_review
 
+  - name: outbound_require_review_holds_202
+    description: >
+      require_review holds every outbound send on a permissive open gate, where
+      no recipient is a non-match. Before #989 this state was only reachable by
+      arranging an empty allowlist so nothing matched; POST /send returns
+      202 + status=pending_review.
+    setup:
+      - register_domain: require-review.test.dev
+      - verify_domain: require-review.test.dev
+      - register_agent:
+          email: bot@require-review.test.dev
+    steps:
+      - id: enable_require_review
+        action: request
+        method: PUT
+        path: /v1/agents/{agent_email}/protection
+        body:
+          inbound:
+            gate: {}
+            scan: {}
+          outbound:
+            gate:
+              policy: open
+              action: flag
+            scan: {}
+            require_review: true
+          holds: {}
+        expect:
+          status: 200
+          body_match:
+            outbound.require_review: true
+            outbound.gate.policy: open
+
+      - id: send_held
+        action: request
+        method: POST
+        path: /v1/agents/{agent_email}/messages
+        body:
+          to:
+            - alice@example.com
+          subject: Hold me too
+          text: require_review should hold this
+        expect:
+          status: 202
+          body_match:
+            status: pending_review
+
   - name: hitl_reject_records_reason
     description: >
       Reject endpoint accepts a reason in the body and surfaces it. Catches the

@@ -62,13 +62,18 @@ func validSensitivity(s string) bool {
 // mechanism. Concrete values (the PUT body is a full replace), so
 // UpdateAgentProtection validates and writes the effective posture atomically.
 type ProtectionConfig struct {
-	InboundGatePolicy       string
-	InboundAllowlist        []string
-	InboundGateAction       string
-	InboundScanSensitivity  string
-	OutboundGatePolicy      string
-	OutboundAllowlist       []string
-	OutboundGateAction      string
+	InboundGatePolicy      string
+	InboundAllowlist       []string
+	InboundGateAction      string
+	InboundScanSensitivity string
+	OutboundGatePolicy     string
+	OutboundAllowlist      []string
+	OutboundGateAction     string
+	// OutboundRequireReview holds every outbound send for review regardless of
+	// the gate policy, allowlist, or non-match action (issue #989). It is the
+	// explicit form of what an empty allowlist with action=review expressed
+	// through the accident of matching nothing.
+	OutboundRequireReview   bool
 	OutboundScanSensitivity string
 	HITLTTLSeconds          int
 	HITLExpirationAction    string
@@ -166,7 +171,8 @@ func (s *Store) UpdateAgentProtection(ctx context.Context, agentID, userID strin
 		    outbound_scan = $13, outbound_scan_review_threshold = $14, outbound_scan_block_threshold = $15,
 		    outbound_scan_sensitivity = $16,
 		    hitl_ttl_seconds = $17, hitl_expiration_action = $18,
-		    suppress_notifications = $19
+		    suppress_notifications = $19,
+		    outbound_require_review = $20
 		  WHERE id = $1 AND user_id = $2`,
 		agentID, userID,
 		c.InboundGatePolicy, inAllow, c.InboundGateAction,
@@ -177,6 +183,7 @@ func (s *Store) UpdateAgentProtection(ctx context.Context, agentID, userID strin
 		c.OutboundScanSensitivity,
 		c.HITLTTLSeconds, c.HITLExpirationAction,
 		c.SuppressNotifications,
+		c.OutboundRequireReview,
 	)
 	if err != nil {
 		return nil, err
