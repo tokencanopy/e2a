@@ -47,6 +47,7 @@ class AgentIdentity(BaseModel):
     outbound_allowlist: Optional[List[StrictStr]] = None
     outbound_policy: StrictStr
     outbound_policy_action: StrictStr
+    outbound_require_review: StrictBool
     outbound_scan: StrictStr
     outbound_scan_block_threshold: Union[StrictFloat, StrictInt]
     outbound_scan_review_threshold: Union[StrictFloat, StrictInt]
@@ -59,7 +60,7 @@ class AgentIdentity(BaseModel):
     user_id: StrictStr
     webhook_status: Optional[StrictStr] = Field(default=None, description="Webhook posture for this agent, derived from the account's webhook subscribers that match it (a webhook with no agent filter matches every agent). Open set; tolerate unknown values. Known values: none (no webhook matches this agent), healthy (an enabled webhook matches and none serving this agent has a terminally-failed delivery in the last 24h), failing (an enabled webhook matches but at least one delivery on a matching enabled webhook terminally failed in the last 24h), disabled (webhooks match but every one is disabled, turned off manually), auto_disabled (webhooks match, every one is disabled, and at least one was auto-disabled by the chronic-failure sweep). Present on enriched surfaces (account export, dashboard agent list); absent where not computed.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["created_at", "deleted_at", "domain", "domain_verified", "email", "inbound_7d", "inbound_allowlist", "inbound_policy", "inbound_policy_action", "inbound_scan", "inbound_scan_block_threshold", "inbound_scan_review_threshold", "inbound_scan_sensitivity", "last_delivery_at", "name", "on_expiry", "outbound_7d", "outbound_allowlist", "outbound_policy", "outbound_policy_action", "outbound_scan", "outbound_scan_block_threshold", "outbound_scan_review_threshold", "outbound_scan_sensitivity", "pending_count", "public", "registered_domain", "suppress_notifications", "ttl_seconds", "user_id", "webhook_status"]
+    __properties: ClassVar[List[str]] = ["created_at", "deleted_at", "domain", "domain_verified", "email", "inbound_7d", "inbound_allowlist", "inbound_policy", "inbound_policy_action", "inbound_scan", "inbound_scan_block_threshold", "inbound_scan_review_threshold", "inbound_scan_sensitivity", "last_delivery_at", "name", "on_expiry", "outbound_7d", "outbound_allowlist", "outbound_policy", "outbound_policy_action", "outbound_require_review", "outbound_scan", "outbound_scan_block_threshold", "outbound_scan_review_threshold", "outbound_scan_sensitivity", "pending_count", "public", "registered_domain", "suppress_notifications", "ttl_seconds", "user_id", "webhook_status"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -149,6 +150,7 @@ class AgentIdentity(BaseModel):
             "outbound_allowlist": obj.get("outbound_allowlist"),
             "outbound_policy": obj.get("outbound_policy"),
             "outbound_policy_action": obj.get("outbound_policy_action"),
+            "outbound_require_review": obj.get("outbound_require_review"),
             "outbound_scan": obj.get("outbound_scan"),
             "outbound_scan_block_threshold": obj.get("outbound_scan_block_threshold"),
             "outbound_scan_review_threshold": obj.get("outbound_scan_review_threshold"),

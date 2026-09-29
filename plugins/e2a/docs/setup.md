@@ -141,18 +141,17 @@ selected inbox with:
 
 ```json
 {
-  "outbound_gate_policy": "allowlist",
-  "outbound_gate_allowlist": [],
-  "outbound_gate_action": "review",
+  "outbound_require_review": true,
   "holds_on_expiry": "reject"
 }
 ```
 
-An empty allowlist makes every recipient a gate non-match, `review` holds every
-non-match for a human, and `reject` prevents expiry from sending an unreviewed
-message. Do not use `open` with `review`: `open` matches every recipient, so the
-recipient gate holds nothing. Inbox creation alone is not permission to enable
-this policy.
+`require_review` holds every outbound send for a human whatever the gate says,
+and `reject` prevents expiry from sending an unreviewed message. Do not try to
+reach this by setting `outbound_gate_policy` to `open` with `outbound_gate_action`
+`review`: `open` matches every recipient, so the recipient gate holds nothing.
+(An allowlist with an empty list still holds everything too, but only because
+nothing matches.) Inbox creation alone is not permission to enable this policy.
 
 ## Use the inbox safely
 

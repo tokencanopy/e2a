@@ -441,6 +441,7 @@ describe("e2a MCP server", () => {
       properties?: Record<string, { description?: string }>;
     })?.properties ?? {};
 
+    expect(description).toContain("outbound_require_review=true");
     expect(description).toContain("outbound_gate_policy=allowlist");
     expect(description).toContain("outbound_gate_allowlist=[]");
     expect(description).toContain("outbound_gate_action=review");
@@ -453,6 +454,7 @@ describe("e2a MCP server", () => {
     // refuses outright (blocked, not held).
     expect(description).toMatch(/blocked, not held/i);
     expect(properties.outbound_gate_policy?.description).toMatch(/open.*every recipient/i);
+    expect(properties.outbound_require_review?.description).toMatch(/every outbound send/i);
     expect(properties.holds_on_expiry?.description).toMatch(/reject.*explicit human approval/i);
   });
 
@@ -2069,6 +2071,20 @@ describe("e2a MCP server", () => {
     expect(cfg.holds.onExpiry).toBe("reject");
     expect(cfg.holds.suppressNotifications).toBe(true);
     expect(addr).toBeUndefined();
+  });
+
+  it("update_protection sets outbound require_review without touching the gate", async () => {
+    await client.callTool({
+      name: "update_protection",
+      arguments: { outbound_require_review: true },
+    });
+    const [cfg] = stub.updateProtection.mock.calls.at(-1)!;
+    expect(cfg.outbound.requireReview).toBe(true);
+    // The switch holds every send on its own: the gate stays permissive rather
+    // than being arranged so nothing matches (#989).
+    expect(cfg.outbound.gate.policy).toBe("open");
+    expect(cfg.outbound.gate.action).toBe("flag");
+    expect(cfg.inbound.gate.policy).toBe("open");
   });
 
   it("delete_agent requires confirm:true — server-side schema rejects when omitted", async () => {

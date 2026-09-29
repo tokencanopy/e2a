@@ -12,12 +12,13 @@
 
 import { ProtectionDirectionView } from '../models/ProtectionDirectionView.js';
 import { ProtectionHoldsView } from '../models/ProtectionHoldsView.js';
+import { ProtectionOutboundView } from '../models/ProtectionOutboundView.js';
 import { HttpFile } from '../http/http.js';
 
 export class ProtectionConfigView {
     'holds': ProtectionHoldsView;
     'inbound': ProtectionDirectionView;
-    'outbound': ProtectionDirectionView;
+    'outbound': ProtectionOutboundView;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -39,7 +40,7 @@ export class ProtectionConfigView {
         {
             "name": "outbound",
             "baseName": "outbound",
-            "type": "ProtectionDirectionView",
+            "type": "ProtectionOutboundView",
             "format": ""
         }    ];
 
