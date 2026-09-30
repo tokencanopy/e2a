@@ -2164,3 +2164,17 @@ async def test_message_delete_permanent_reports_a_deferral(httpx_mock):
         res = await c.messages.delete("bot@agents.localhost", "msg_sent", permanent=True)
     assert res.erase_deferred is True
     assert res.purge_after is not None
+
+
+@pytest.mark.anyio
+async def test_account_daily_limit_decodes_utc_reset(httpx_mock):
+    from e2a.v1.generated.models.account_view import AccountView
+    httpx_mock.add_response(json=_valid(AccountView, daily_limit={
+        "limit": 88, "used": 17, "shared_limit": 50, "shared_used": 6,
+        "clean_active_days": 1, "resets_at": "2026-01-02T00:00:00Z",
+    }))
+    async with _client() as c:
+        account = await c.account.get()
+    assert account.daily_limit.limit == 88
+    assert account.daily_limit.shared_used == 6
+    assert account.daily_limit.resets_at.isoformat() == "2026-01-02T00:00:00+00:00"

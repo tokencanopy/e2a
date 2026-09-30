@@ -4,13 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import { billingPolling } from "../../../lib/livePolling";
 import { limitsKey } from "../../../lib/swrKeys";
+import type { DailySendingLimit } from "../../components/onboarding/api";
 import { PageShell } from "../../components/loft/PageShell";
 
 // LimitsInfo matches the LimitsView shape returned by GET /v1/account.
 // Kept inline rather than imported from a generated client because the
-// OSS SDK doesn't expose this endpoint yet (it's a dashboard-only
-// surface — SDK consumers would call /agents and /messages directly).
+// dashboard uses the HTTP wire names directly.
 type LimitsInfo = {
+  daily_limit?: DailySendingLimit;
   plan_code: string;
   limits: {
     max_agents: number;
@@ -1106,6 +1107,13 @@ export default function BillingPage() {
               limit={formatNumber(data.limits.max_messages_month)}
               pct={pct(data.usage.messages_month, data.limits.max_messages_month)}
             />
+            {data.daily_limit && (
+              <div>
+                <UsageRow label="External recipients today" current={formatNumber(data.daily_limit.used)} limit={formatNumber(data.daily_limit.limit)} pct={pct(data.daily_limit.used, data.daily_limit.limit)} />
+                <p className="text-xs text-muted mt-2">Shared identity: {formatNumber(data.daily_limit.shared_used)} of {formatNumber(data.daily_limit.shared_limit)} (included above). Resets {data.daily_limit.resets_at} (UTC).</p>
+                <p className="text-xs text-muted mt-1">Pending sends count toward this allowance. Mail to your own inboxes and verified account email does not.</p>
+              </div>
+            )}
             <UsageRow
               label="Storage"
               current={formatBytes(data.usage.storage_bytes)}

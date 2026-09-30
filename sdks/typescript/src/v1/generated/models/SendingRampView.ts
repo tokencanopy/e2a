@@ -17,7 +17,7 @@ export class SendingRampView {
     */
     'activeDays': number;
     /**
-    * Current UTC-day recipient allowance. Zero means no ramp cap applies.
+    * Current UTC-day recipient allowance. Zero means no per-domain ramp cap applies; account daily_limit can still apply.
     */
     'dailyRecipientLimit': number;
     /**
@@ -31,7 +31,7 @@ export class SendingRampView {
     'recipientsUsedToday': number;
     'resetsAt'?: Date;
     /**
-    * Platform-managed sending-ramp state. Open set; known values: inactive, ramping, complete, exempt.
+    * Platform-managed sending-ramp state. Open set; known values: inactive, ramping, complete, exempt, account_managed (the account daily_limit replaces the per-domain ramp).
     */
     'status': string;
 

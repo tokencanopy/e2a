@@ -14,27 +14,27 @@
 
 from __future__ import annotations
 import pprint
+import re  # noqa: F401
 import json
 
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
-from typing import Any, ClassVar, Dict, List, Optional
+from pydantic import BaseModel, ConfigDict, StrictInt
+from typing import Any, ClassVar, Dict, List
 from typing import Optional, Set
 from typing_extensions import Self
 
-class SendingRampView(BaseModel):
+class AccountDailyLimit(BaseModel):
     """
-    SendingRampView
+    AccountDailyLimit
     """ # noqa: E501
-    active_days: StrictInt = Field(description="UTC days that reached the provider-accepted volume threshold.")
-    daily_recipient_limit: StrictInt = Field(description="Current UTC-day recipient allowance. Zero means no per-domain ramp cap applies; account daily_limit can still apply.")
-    estimated_completion_at: Optional[datetime] = Field(default=None, description="Earliest estimated completion assuming every remaining UTC day reaches the provider-accepted volume threshold.")
-    ramp_days: StrictInt
-    recipients_used_today: StrictInt = Field(description="Recipient capacity reserved for the current UTC day, including submissions whose provider outcome is still pending.")
-    resets_at: Optional[datetime] = None
-    status: StrictStr = Field(description="Platform-managed sending-ramp state. Open set; known values: inactive, ramping, complete, exempt, account_managed (the account daily_limit replaces the per-domain ramp).")
+    clean_active_days: StrictInt
+    limit: StrictInt
+    resets_at: datetime
+    shared_limit: StrictInt
+    shared_used: StrictInt
+    used: StrictInt
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["active_days", "daily_recipient_limit", "estimated_completion_at", "ramp_days", "recipients_used_today", "resets_at", "status"]
+    __properties: ClassVar[List[str]] = ["clean_active_days", "limit", "resets_at", "shared_limit", "shared_used", "used"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -54,7 +54,7 @@ class SendingRampView(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of SendingRampView from a JSON string"""
+        """Create an instance of AccountDailyLimit from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -86,7 +86,7 @@ class SendingRampView(BaseModel):
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of SendingRampView from a dict"""
+        """Create an instance of AccountDailyLimit from a dict"""
         if obj is None:
             return None
 
@@ -94,13 +94,12 @@ class SendingRampView(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
-            "active_days": obj.get("active_days"),
-            "daily_recipient_limit": obj.get("daily_recipient_limit"),
-            "estimated_completion_at": obj.get("estimated_completion_at"),
-            "ramp_days": obj.get("ramp_days"),
-            "recipients_used_today": obj.get("recipients_used_today"),
+            "clean_active_days": obj.get("clean_active_days"),
+            "limit": obj.get("limit"),
             "resets_at": obj.get("resets_at"),
-            "status": obj.get("status")
+            "shared_limit": obj.get("shared_limit"),
+            "shared_used": obj.get("shared_used"),
+            "used": obj.get("used")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

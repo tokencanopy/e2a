@@ -84,8 +84,8 @@ type DomainView struct {
 }
 
 type SendingRampView struct {
-	Status                string     `json:"status" doc:"Platform-managed sending-ramp state. Open set; known values: inactive, ramping, complete, exempt."`
-	DailyRecipientLimit   int        `json:"daily_recipient_limit" doc:"Current UTC-day recipient allowance. Zero means no ramp cap applies."`
+	Status                string     `json:"status" doc:"Platform-managed sending-ramp state. Open set; known values: inactive, ramping, complete, exempt, account_managed (the account daily_limit replaces the per-domain ramp)."`
+	DailyRecipientLimit   int        `json:"daily_recipient_limit" doc:"Current UTC-day recipient allowance. Zero means no per-domain ramp cap applies; account daily_limit can still apply."`
 	RecipientsUsedToday   int        `json:"recipients_used_today" doc:"Recipient capacity reserved for the current UTC day, including submissions whose provider outcome is still pending."`
 	ResetsAt              *time.Time `json:"resets_at,omitempty"`
 	ActiveDays            int        `json:"active_days" doc:"UTC days that reached the provider-accepted volume threshold."`

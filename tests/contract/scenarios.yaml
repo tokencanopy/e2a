@@ -3856,3 +3856,52 @@ scenarios:
           status: 401
           body_match:
             "error.code": unauthorized
+
+  - name: account_daily_trust_limit
+    description: >
+      Account daily limits count only external recipients. The real contract
+      service has the ladder enabled; workers are stopped so no external mail
+      is submitted. An immediate 21-recipient send exceeds the initial 20
+      allowance and persists nothing. The same scenario runs in Go, TS and Python.
+    setup:
+      - register_agent:
+          email: "trust-{scenario_token}@agents.localhost"
+    steps:
+      - id: account_reports_daily_allowance
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 200
+          body_match:
+            "daily_limit.limit": 20
+            "daily_limit.used": 0
+            "daily_limit.shared_limit": 20
+            "daily_limit.shared_used": 0
+            "daily_limit.clean_active_days": 0
+          body_contains: ["daily_limit"]
+        capture:
+          daily_reset: daily_limit.resets_at
+      - id: daily_refusal_includes_snapshot
+        action: request
+        method: POST
+        path: /v1/agents/trust-{scenario_token}@agents.localhost/messages
+        body:
+          to: ["recipient-0@example.test", "recipient-1@example.test", "recipient-2@example.test", "recipient-3@example.test", "recipient-4@example.test", "recipient-5@example.test", "recipient-6@example.test", "recipient-7@example.test", "recipient-8@example.test", "recipient-9@example.test", "recipient-10@example.test", "recipient-11@example.test", "recipient-12@example.test", "recipient-13@example.test", "recipient-14@example.test", "recipient-15@example.test", "recipient-16@example.test", "recipient-17@example.test", "recipient-18@example.test", "recipient-19@example.test", "recipient-20@example.test"]
+          subject: Synthetic daily limit probe
+          text: This request must not queue mail.
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": messages_day
+            "error.details.daily_limit.limit": 20
+            "error.details.daily_limit.used": 0
+            "error.details.daily_limit.resets_at": "{daily_reset}"
+    cleanup:
+      - id: delete_trust_agent
+        action: request
+        method: DELETE
+        path: /v1/agents/trust-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
+        expect:
+          status: 200

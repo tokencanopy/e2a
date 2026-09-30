@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/sendramp"
 )
 
 // AccountUserView is the authenticated principal's identity (A-1). Returned by
@@ -25,7 +26,8 @@ type AccountUserView struct {
 // credentials (where the credential *is* a single agent) — omitted for
 // account scope, which spans many agents.
 type AccountView struct {
-	User AccountUserView `json:"user"`
+	DailyLimit *sendramp.AccountDailyLimit `json:"daily_limit,omitempty" doc:"External-recipient allowance for this UTC day. Used includes pending or uncertain provider submissions. Shared-identity usage is included in total usage and also bounded by shared_limit. Internal recipients (own live agents and verified owner mailbox) do not count. Omitted when this deployment does not enable the account trust ladder."`
+	User       AccountUserView             `json:"user"`
 	// Scope is an OPEN set on this response view (evolving vocabulary), not a
 	// closed enum — see docs/api.md "Versioning & stability".
 	Scope        string          `json:"scope" doc:"Credential scope. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: account, agent."`
@@ -345,6 +347,13 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 	if err != nil {
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "limits lookup failed")
 	}
+	var daily *sendramp.AccountDailyLimit
+	if s.deps.AccountDailyLimit != nil {
+		daily, err = s.deps.AccountDailyLimit(ctx, user.ID)
+		if err != nil {
+			return nil, NewError(http.StatusServiceUnavailable, "limits_unavailable", "daily sending limit is temporarily unavailable").WithDetails(RetryAfterDetails{RetryAfterSeconds: limitsUnavailableRetrySeconds}).WithRetryAfter(limitsUnavailableRetrySeconds)
+		}
+	}
 	var usage LimitsUsageView
 	if s.deps.GetUsage != nil {
 		usage = s.deps.GetUsage(ctx, user.ID)
@@ -356,6 +365,7 @@ func (s *Server) handleGetMyLimits(ctx context.Context, _ *struct{}) (*accountOu
 		agentAddress = p.AgentID
 	}
 	return &accountOutput{Body: AccountView{
+		DailyLimit:   daily,
 		User:         AccountUserView{ID: user.ID, Email: user.Email},
 		Scope:        p.Scope,
 		AgentAddress: agentAddress,

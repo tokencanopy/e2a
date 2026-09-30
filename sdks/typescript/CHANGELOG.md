@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Account responses and daily quota refusals expose an optional daily-limit snapshot: external-recipient allowance, reserved usage, shared-identity subset, and UTC reset time.
+
+## Unreleased
+
 ### Breaking
 - **`account.delete()` now moves the account to the trash by default instead
   of erasing it immediately.** Every API key, OAuth grant, and dashboard

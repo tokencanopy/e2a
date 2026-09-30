@@ -924,6 +924,7 @@ class AccountResource {
    * — is always among them; `"verified_domain"` and `"paid_entitlement"` only
    * where configured). Undefined from servers that predate the field.
    */
+  /** Account identity and usage, including optional dailyLimit for external recipients. */
   get(): Promise<AccountView> {
     return call(() => this.api.getAccount());
   }

@@ -4,6 +4,7 @@ import type { Middleware } from '../middleware.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountDailyLimit } from '../models/AccountDailyLimit.js';
 import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';

@@ -191,6 +191,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	// so every other scenario is unaffected while the restriction's contract
 	// is exercised over the wire.
 	sendingPolicy := sendingpolicy.DisabledPolicy()
+	sendingPolicy.AccountTrustEnabled = true
 	sendingPolicy.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{
 		Mode:                     sendingpolicy.ModeEnforce,
 		AccountsCreatedAtOrAfter: ContractExternalAccessCutoff,
@@ -216,6 +217,7 @@ func StartContractServer(ctx context.Context, dbURL string) (*ContractServer, er
 	api.SetProviderSubmitter(providerSubmitter, sendingGate)
 	api.SetExternalAccess(sendingModule)
 	api.SetIdempotencyStore(idempotencyStore)
+	enforcer.SetAccountDailyControl(sendingModule.AccountTrustEnabled)
 	api.SetEnforcer(enforcer)
 	api.SetUsageStore(usageStore)
 	api.SetSubscriberStore(subscriberStore)

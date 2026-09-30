@@ -20,6 +20,7 @@ import json
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
+from e2a.v1.generated.models.account_daily_limit import AccountDailyLimit
 from e2a.v1.generated.models.account_user_view import AccountUserView
 from e2a.v1.generated.models.limits_caps_view import LimitsCapsView
 from e2a.v1.generated.models.limits_usage_view import LimitsUsageView
@@ -32,6 +33,7 @@ class AccountView(BaseModel):
     AccountView
     """ # noqa: E501
     agent_email: Optional[StrictStr] = None
+    daily_limit: Optional[AccountDailyLimit] = Field(default=None, description="External-recipient allowance for this UTC day. Used includes pending or uncertain provider submissions. Shared-identity usage is included in total usage and also bounded by shared_limit. Internal recipients (own live agents and verified owner mailbox) do not count. Omitted when this deployment does not enable the account trust ladder.")
     deleted_at: Optional[datetime] = Field(default=None, description="When the account was moved to the trash. Absent for a live account.")
     limits: LimitsCapsView
     plan_code: StrictStr
@@ -44,7 +46,7 @@ class AccountView(BaseModel):
     usage: LimitsUsageView
     user: AccountUserView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_email", "deleted_at", "limits", "plan_code", "purge_after", "read_only", "restored_at", "scope", "sending_access", "upgrade_url", "usage", "user"]
+    __properties: ClassVar[List[str]] = ["agent_email", "daily_limit", "deleted_at", "limits", "plan_code", "purge_after", "read_only", "restored_at", "scope", "sending_access", "upgrade_url", "usage", "user"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -87,6 +89,9 @@ class AccountView(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of daily_limit
+        if self.daily_limit:
+            _dict['daily_limit'] = self.daily_limit.to_dict()
         # override the default output from pydantic by calling `to_dict()` of limits
         if self.limits:
             _dict['limits'] = self.limits.to_dict()
@@ -117,6 +122,7 @@ class AccountView(BaseModel):
 
         _obj = cls.model_validate({
             "agent_email": obj.get("agent_email"),
+            "daily_limit": AccountDailyLimit.from_dict(obj["daily_limit"]) if obj.get("daily_limit") is not None else None,
             "deleted_at": obj.get("deleted_at"),
             "limits": LimitsCapsView.from_dict(obj["limits"]) if obj.get("limits") is not None else None,
             "plan_code": obj.get("plan_code"),

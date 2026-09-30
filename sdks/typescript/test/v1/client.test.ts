@@ -1289,6 +1289,14 @@ describe("E2AClient", () => {
     expect(lastCall().url).toContain("/v1/account/suppressions");
   });
 
+  it("account.get decodes daily usage and the UTC reset", async () => {
+    globalThis.fetch=mockFetch(200,{daily_limit:{limit:88,used:17,shared_limit:50,shared_used:6,clean_active_days:1,resets_at:"2026-01-02T00:00:00Z"}});
+    const account=await client.account.get();
+    expect(account.dailyLimit?.limit).toBe(88);
+    expect(account.dailyLimit?.sharedUsed).toBe(6);
+    expect(account.dailyLimit?.resetsAt.toISOString()).toBe("2026-01-02T00:00:00.000Z");
+  });
+
   it("account.get decodes sending_access.available_unlocks (beta, additive)", async () => {
     globalThis.fetch = mockFetch(200, {
       plan: "free",

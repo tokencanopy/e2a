@@ -16,6 +16,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"github.com/tokencanopy/e2a/internal/sendramp"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -159,10 +160,11 @@ type PayloadTooLargeDetails struct {
 // time. `plan_code`/`upgrade_url` are the account's plan label and any upgrade
 // affordance the operator configured.
 type LimitExceededDetails struct {
+	DailyLimit *sendramp.AccountDailyLimit `json:"daily_limit,omitempty" doc:"Current external-recipient allowance, usage and reset time when the account trust ladder refuses an immediate send."`
 	// Resource is an OPEN set (evolving response-side vocabulary): a new
 	// capped resource means a new value here, and that must not break
 	// spec-generated clients.
-	Resource   string `json:"resource" doc:"The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (per-UTC-day send cap; no AccountView field — resets at midnight UTC)."`
+	Resource   string `json:"resource" doc:"The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (daily send cap; daily_limit reports external-recipient usage on deployments with the account trust ladder — resets at midnight UTC)."`
 	Limit      int64  `json:"limit" doc:"The cap that was hit (matches limits.max_<resource>)."`
 	Current    int64  `json:"current" doc:"The account's usage at the time the cap was hit (matches usage.<resource>)."`
 	PlanCode   string `json:"plan_code,omitempty" doc:"The account's plan label."`

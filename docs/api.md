@@ -708,13 +708,15 @@ usually a truncated TXT.)
 
 Every domain response also carries **`sending_ramp`** — the platform-managed
 recipient-volume ramp state for newly verified custom sender domains:
-`status` (open set; known values `inactive | ramping | complete | exempt`),
-`daily_recipient_limit` (zero means no cap applies), `recipients_used_today`,
+`status` (open set; known values `inactive | ramping | complete | exempt | account_managed`),
+`daily_recipient_limit` (zero means no per-domain cap applies), `recipients_used_today`,
 `active_days` / `ramp_days`, and `resets_at` / `estimated_completion_at`. You
 can read this state but cannot change the schedule, exempt yourself, or reset
 progression through the API — see
 [`docs/runbooks/sending-ramp.md`](runbooks/sending-ramp.md) for the
-operator-side mechanics.
+operator-side mechanics. With `account_managed`, the optional `daily_limit`
+object on `GET /v1/account` supplies the account-wide external allowance,
+reserved usage, shared-identity subset, and UTC reset time.
 
 ### Agents (`/v1/agents`)
 

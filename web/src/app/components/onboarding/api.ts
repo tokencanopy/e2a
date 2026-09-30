@@ -981,7 +981,17 @@ export async function getAccountMetrics(opts: {
 // read. `sending_access` (beta) is entirely omitted by servers/accounts
 // where the external-sending-access control doesn't apply; treat it as
 // "no restriction info" rather than defaulting any of its booleans.
+export type DailySendingLimit = {
+  limit: number;
+  used: number;
+  shared_limit: number;
+  shared_used: number;
+  clean_active_days: number;
+  resets_at: string;
+};
+
 export type AccountInfo = {
+  daily_limit?: DailySendingLimit;
   user: { id: string; email: string };
   scope: string;
   plan_code: string;

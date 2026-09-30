@@ -1409,6 +1409,9 @@ class AccountResource:
     async def get(self) -> AccountView:
         """The authenticated account (whoami).
 
+        ``daily_limit``, when present, reports today's external-recipient
+        allowance, reserved usage, shared-identity subset and UTC reset time.
+
         On a deployment that restricts external sending, ``sending_access``
         (beta) reports the account's state; its ``available_unlocks`` lists
         the routes that deployment accepts for lifting the restriction

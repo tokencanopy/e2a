@@ -53,6 +53,14 @@ function stageLimits(payload: unknown) {
 }
 
 describe("BillingPage", () => {
+  it("shows external daily usage, shared subset and UTC reset", async () => {
+    stageLimits({plan_code:"default",limits:{max_agents:10,max_domains:1,max_messages_month:1000,max_storage_bytes:1000},usage:{agents:1,domains:0,messages_month:17,storage_bytes:0},upgrade_url:"",daily_limit:{limit:88,used:17,shared_limit:50,shared_used:6,clean_active_days:1,resets_at:"2026-01-02T00:00:00Z"}});
+    renderPage();
+    expect(await screen.findByText("External recipients today")).toBeInTheDocument();
+    expect(screen.getByText(/Shared identity: 6 of 50/)).toBeInTheDocument();
+    expect(screen.getByText(/2026-01-02T00:00:00Z/)).toBeInTheDocument();
+  });
+
   it("renders plan name and all four usage rows", async () => {
     stageLimits({
       plan_code: "default",

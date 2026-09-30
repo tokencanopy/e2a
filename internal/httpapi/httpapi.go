@@ -147,6 +147,7 @@ type MessageRestoreOp func(ctx context.Context, messageID, agentID string) (*ide
 // Deps are the collaborators the v1 layer needs. Everything is injected so
 // the package has no hidden globals and is straightforward to test.
 type Deps struct {
+	AccountDailyLimit func(context.Context, string) (*sendramp.AccountDailyLimit, error)
 	// External sending access (all optional; nil = surface absent/501).
 	// SendingAccessStatus backs the additive sending_access object on GET
 	// /v1/account; the request pair backs /v1/account/sending-access/request;

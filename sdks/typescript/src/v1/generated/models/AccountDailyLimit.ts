@@ -10,34 +10,15 @@
  * Do not edit the class manually.
  */
 
-import { AccountDailyLimit } from '../models/AccountDailyLimit.js';
 import { HttpFile } from '../http/http.js';
 
-export class LimitExceededDetails {
-    /**
-    * The account\'s usage at the time the cap was hit (matches usage.<resource>).
-    */
-    'current': number;
-    /**
-    * Current external-recipient allowance, usage and reset time when the account trust ladder refuses an immediate send.
-    */
-    'dailyLimit'?: AccountDailyLimit;
-    /**
-    * The cap that was hit (matches limits.max_<resource>).
-    */
+export class AccountDailyLimit {
+    'cleanActiveDays': number;
     'limit': number;
-    /**
-    * The account\'s plan label.
-    */
-    'planCode'?: string;
-    /**
-    * The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (daily send cap; daily_limit reports external-recipient usage on deployments with the account trust ladder — resets at midnight UTC).
-    */
-    'resource': string;
-    /**
-    * An upgrade affordance URL, when the operator has configured one.
-    */
-    'upgradeUrl'?: string;
+    'resetsAt': Date;
+    'sharedLimit': number;
+    'sharedUsed': number;
+    'used': number;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -45,16 +26,10 @@ export class LimitExceededDetails {
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
         {
-            "name": "current",
-            "baseName": "current",
+            "name": "cleanActiveDays",
+            "baseName": "clean_active_days",
             "type": "number",
             "format": "int64"
-        },
-        {
-            "name": "dailyLimit",
-            "baseName": "daily_limit",
-            "type": "AccountDailyLimit",
-            "format": ""
         },
         {
             "name": "limit",
@@ -63,26 +38,32 @@ export class LimitExceededDetails {
             "format": "int64"
         },
         {
-            "name": "planCode",
-            "baseName": "plan_code",
-            "type": "string",
-            "format": ""
+            "name": "resetsAt",
+            "baseName": "resets_at",
+            "type": "Date",
+            "format": "date-time"
         },
         {
-            "name": "resource",
-            "baseName": "resource",
-            "type": "string",
-            "format": ""
+            "name": "sharedLimit",
+            "baseName": "shared_limit",
+            "type": "number",
+            "format": "int64"
         },
         {
-            "name": "upgradeUrl",
-            "baseName": "upgrade_url",
-            "type": "string",
-            "format": ""
+            "name": "sharedUsed",
+            "baseName": "shared_used",
+            "type": "number",
+            "format": "int64"
+        },
+        {
+            "name": "used",
+            "baseName": "used",
+            "type": "number",
+            "format": "int64"
         }    ];
 
     static getAttributeTypeMap() {
-        return LimitExceededDetails.attributeTypeMap;
+        return AccountDailyLimit.attributeTypeMap;
     }
 
     public constructor() {

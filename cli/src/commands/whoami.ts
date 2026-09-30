@@ -37,6 +37,10 @@ export async function whoami(opts: WhoamiOptions): Promise<void> {
     `usage: ${account.usage.agents}/${account.limits.maxAgents} agents, ` +
       `${account.usage.messagesMonth}/${account.limits.maxMessagesMonth} messages this month\n`,
   );
+  if (account.dailyLimit) {
+    const d=account.dailyLimit;
+    process.stdout.write(`daily: ${d.used}/${d.limit} external recipients; shared identity: ${d.sharedUsed}/${d.sharedLimit}; resets ${d.resetsAt.toISOString()}\n`);
+  }
   // Additive, optional: only ever present right after a dashboard restore
   // from the trash, so most accounts print nothing new here.
   if (account.restoredAt) {
