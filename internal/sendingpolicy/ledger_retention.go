@@ -223,8 +223,11 @@ var ledgerSweeps = map[string]ledgerSweep{
 	// Provider operations with every attempt they own. An operation survives
 	// its own expiry while ANY of these still needs it:
 	//   - an attempt that is not terminal (state reserved: capacity held; or
-	//     call_state authorized: a token was issued and not yet redeemed or
-	//     invalidated), or an attempt not yet past its own expiry;
+	//     call_state authorized for the current or a future ordinal: a token
+	//     may still be redeemed), or an attempt not yet past its own expiry;
+	//     superseded authorized ordinals cannot redeem and do not hold an
+	//     otherwise terminal operation forever; their confirmed exposure is
+	//     retained in the day counters until those days close;
 	//   - a River job that can still run and names it in operation_ref —
 	//     this covers budget and pause holds (snoozed jobs), retries inside
 	//     SendRetryHorizon, and every notification kind; deleting it would
@@ -257,7 +260,8 @@ var ledgerSweeps = map[string]ledgerSweep{
 			       AND NOT EXISTS (
 			           SELECT 1 FROM sending_budget_reservations r
 			            WHERE r.operation_id = o.operation_id
-			              AND (r.expires_at > $1 OR r.state = 'reserved' OR r.call_state = 'authorized'))
+			              AND (r.expires_at > $1 OR r.state = 'reserved'
+			                   OR (r.call_state = 'authorized' AND r.submission_attempt >= o.current_attempt)))
 			       AND o.operation_id NOT IN (
 			           SELECT l.operation_id FROM live_refs l WHERE l.operation_id IS NOT NULL)
 			       AND NOT EXISTS (

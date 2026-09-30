@@ -520,3 +520,64 @@ func TestLedgerRetentionRegistersOnTheMaintenanceQueue(t *testing.T) {
 		t.Fatalf("periodic jobs = %d, want 3 (feedback retention, reconcile, ledger retention)", len(periodics))
 	}
 }
+
+// Superseded tokens can never open a socket again, even though their
+// reservation preserves confirmed exposure and call_state=authorized.
+func TestLedgerRetentionCollectsSupersededAuthorization(t *testing.T) {
+	f, m := ledgerFixture(t)
+	g := f.gate(enforcingPolicy(nil))
+	agent := f.agent(f.user("standard"))
+	ref, first := f.prepareAndReserve(g, agent, 1)
+	_, oldAuth, err := g.ConsumeAttempt(f.ctx, first)
+	if err != nil || oldAuth == nil {
+		t.Fatalf("old auth: %v", err)
+	}
+	_, second, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, liveAuth, err := g.ConsumeAttempt(f.ctx, second)
+	if err != nil || liveAuth == nil {
+		t.Fatalf("live auth: %v", err)
+	}
+	if err := g.RedeemProviderCall(f.ctx, *oldAuth); !errors.Is(err, sendingpolicy.ErrAuthorizationInvalid) {
+		t.Fatalf("stale token: %v", err)
+	}
+	if err := g.RedeemProviderCall(f.ctx, *liveAuth); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SettleOperation(f.ctx, ref, sendingpolicy.SettlementProviderAccepted, "ses_synthetic_gc"); err != nil {
+		t.Fatal(err)
+	}
+	f.exec(`UPDATE messages SET delivery_status = 'delivered' WHERE id = $1`, ref.ID())
+	f.exec(`UPDATE sending_provider_operations SET expires_at = now() - interval '1 hour' WHERE operation_id = $1`, ref.ID())
+	f.exec(`UPDATE sending_budget_reservations SET expires_at = now() - interval '1 hour' WHERE operation_id = $1`, ref.ID())
+	gcLedger(t, m)
+	if f.opExists(ref.ID()) || f.attempts(ref.ID()) != 0 {
+		t.Fatal("terminal operation retained forever by its superseded authorization")
+	}
+}
+
+func TestLedgerRetentionSupersededAuthorizationKeepsOtherGuards(t *testing.T) {
+	f, m := ledgerFixture(t)
+	for _, tc := range []struct {
+		id                  string
+		attempt             int
+		state, call, expiry string
+	}{
+		{"op_stale_unexpired", 1, "confirmed", "authorized", "1 day"},
+		{"op_current_authorized", 2, "confirmed", "authorized", "-1 hour"},
+		{"op_future_authorized", 3, "confirmed", "authorized", "-1 hour"},
+		{"op_old_reserved", 1, "reserved", "none", "-1 hour"},
+	} {
+		f.op(tc.id, "-1 hour")
+		f.exec(`UPDATE sending_provider_operations SET current_attempt = 2 WHERE operation_id = $1`, tc.id)
+		f.attempt(tc.id, tc.attempt, tc.state, tc.call, tc.expiry)
+	}
+	gcLedger(t, m)
+	for _, id := range []string{"op_stale_unexpired", "op_current_authorized", "op_future_authorized", "op_old_reserved"} {
+		if !f.opExists(id) || f.attempts(id) != 1 {
+			t.Errorf("guarded operation %s lost", id)
+		}
+	}
+}

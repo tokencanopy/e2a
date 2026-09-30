@@ -465,6 +465,11 @@ func NewProm(build string) *Prom {
 		p.outboxPublished, p.outboxFanOut, p.outboxMatched, p.outboxNoMatch,
 		p.outboxFailures, p.redeliver, p.janitorDeleted, p.contactDue, p.notifyMissed, p.publisherLag,
 	)
+	// Export a zero baseline before the first run so increase() can count
+	// the first failure after a scrape. These outcomes are a closed set.
+	for _, outcome := range []string{"complete", "partial", "failed"} {
+		p.sendingLedgerRuns.WithLabelValues(outcome)
+	}
 	return p
 }
 

@@ -472,3 +472,20 @@ func itoa(i int) string {
 	}
 	return string(b[pos:])
 }
+
+// A zero baseline lets increase() include the first failure after a scrape,
+// instead of treating that failure as the counter's initial value.
+func TestPromInitialLedgerRetentionOutcomes(t *testing.T) {
+	p := NewProm("")
+	out := scrape(t, p)
+	for _, outcome := range []string{"complete", "partial", "failed"} {
+		want := `e2a_sending_ledger_retention_runs_total{outcome="` + outcome + `"} 0`
+		if !strings.Contains(out, want) {
+			t.Errorf("initial scrape missing zero baseline: %s", want)
+		}
+	}
+	p.SendingLedgerRetentionRun("failed")
+	if !strings.Contains(scrape(t, p), `e2a_sending_ledger_retention_runs_total{outcome="failed"} 1`) {
+		t.Error("first failure must increment the primed counter to one")
+	}
+}

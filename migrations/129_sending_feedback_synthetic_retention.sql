@@ -23,9 +23,13 @@
 --
 -- Idempotent: only NULL expiries are written. Row-level UPDATEs only;
 -- lock_timeout bounds waiting on a row a concurrent feedback transaction
--- holds, failing the boot (which retries) rather than hanging it.
+-- holds, failing the boot (which retries) rather than hanging it. Each UPDATE
+-- also has a 30-second statement budget; a timeout rolls the migration back.
+-- This is a single-transaction backfill, not a batched sweep. If the backlog
+-- cannot fit the budget, stop rollout and arrange a reviewed batched backfill.
 
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
 
 UPDATE sending_feedback_correlations c
    SET expires_at = c.created_at + interval '30 days'
