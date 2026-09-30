@@ -232,6 +232,13 @@ func BuildEngine() *piguard.Engine {
 			detectors = append(detectors, d)
 			cfg.Timeout = GeminiDetectorTimeout
 			log.Printf("[piguard] Gemini detector enabled (model: %s)", d.Model())
+		} else if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" || os.Getenv("GEMINI_AUTH") != "" {
+			// The operator configured Gemini credentials or an auth mode but the
+			// detector could not be constructed (bad GEMINI_AUTH value, missing
+			// Application Default Credentials, …). Screening silently degrading to
+			// heuristics-only would hide that, so say it out loud. The error text
+			// never contains credential material.
+			log.Printf("[piguard] Gemini detector NOT enabled despite configuration: %v", err)
 		}
 	} else {
 		log.Printf("[piguard] Gemini detector disabled via E2A_GEMINI_DETECTOR_ENABLED=false")
