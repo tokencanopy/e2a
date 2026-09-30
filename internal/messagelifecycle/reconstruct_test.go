@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 var reconstructBaseTime = time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
@@ -178,6 +179,29 @@ func TestReconstructRecipientMappingsAndIgnoredStatuses(t *testing.T) {
 				t.Fatalf("status %q proved an outcome", status)
 			}
 		})
+	}
+}
+
+func TestReconstructOversizedRecipientDetailIsBoundedAtAValidUTF8Boundary(t *testing.T) {
+	// A 3-byte rune repeated enough times that the byte cap (2048) lands
+	// mid-rune: 683*3 = 2049 bytes, and 2049%3 = 0 while 2048%3 = 2, so a raw
+	// byte slice at maxDiagnosticStringBytes always splits the last rune.
+	oversized := strings.Repeat("中", 683)
+	s := baseSnapshot("outbound", "smtp")
+	s.Recipients = []RecipientSnapshot{{ID: "rcp_1", Address: "a@example.com", Status: "bounced", Detail: oversized, UpdatedAt: reconstructBaseTime.Add(time.Minute)}}
+	got := findReason(Reconstruct(s), ReasonDeliveryUndeterminedBounce)
+	if got == nil {
+		t.Fatalf("recipient transition disappeared: %#v", Reconstruct(s))
+	}
+	detail, ok := got.Evidence["smtp_detail"].(string)
+	if !ok {
+		t.Fatalf("smtp_detail missing or not a string: %#v", got.Evidence)
+	}
+	if len(detail) > maxDiagnosticStringBytes {
+		t.Fatalf("smtp_detail exceeds the byte cap: len=%d", len(detail))
+	}
+	if !utf8.ValidString(detail) {
+		t.Fatalf("smtp_detail split a UTF-8 rune at the byte boundary: %q", detail)
 	}
 }
 
