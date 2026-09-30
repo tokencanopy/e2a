@@ -299,8 +299,9 @@ func TestValidateAPIURL(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &Config{
-				HTTP:  HTTPConfig{APIURL: tc.apiURL},
-				Trash: TrashConfig{RetentionDays: 1},
+				HTTP:    HTTPConfig{APIURL: tc.apiURL},
+				Trash:   TrashConfig{RetentionDays: 1},
+				Webhook: WebhookConfig{WarnThreshold: defaultWebhookWarnThreshold, SweepMaxPerTick: defaultWebhookSweepMaxPerTick},
 			}
 			err := cfg.Validate()
 			if tc.wantErr {
@@ -603,6 +604,74 @@ func TestTrashRetentionDefaultOverrideAndValidation(t *testing.T) {
 	}
 	if _, err := Load(write("neg.yaml", "env: \"development\"\ntrash:\n  retention_days: -3\n")); err == nil {
 		t.Error("Load should reject a negative trash.retention_days")
+	}
+}
+
+func TestWebhookHealthThresholdsDefaultOverrideAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// Absent: compiled defaults (identity.WarnThreshold=5,
+	// WarnSweepMaxPerTick=DisableSweepMaxPerTick=100).
+	cfg, err := Load(write("default.yaml", "env: \"development\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhook.WarnThreshold != 5 {
+		t.Errorf("default Webhook.WarnThreshold = %d, want 5", cfg.Webhook.WarnThreshold)
+	}
+	if cfg.Webhook.SweepMaxPerTick != 100 {
+		t.Errorf("default Webhook.SweepMaxPerTick = %d, want 100", cfg.Webhook.SweepMaxPerTick)
+	}
+
+	// YAML override.
+	cfg, err = Load(write("yaml.yaml", "env: \"development\"\nwebhook:\n  warn_threshold: 3\n  sweep_max_per_tick: 25\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhook.WarnThreshold != 3 {
+		t.Errorf("yaml Webhook.WarnThreshold = %d, want 3", cfg.Webhook.WarnThreshold)
+	}
+	if cfg.Webhook.SweepMaxPerTick != 25 {
+		t.Errorf("yaml Webhook.SweepMaxPerTick = %d, want 25", cfg.Webhook.SweepMaxPerTick)
+	}
+
+	// Env override wins over yaml.
+	t.Setenv("E2A_WEBHOOK_WARN_THRESHOLD", "8")
+	t.Setenv("E2A_WEBHOOK_SWEEP_MAX_PER_TICK", "40")
+	cfg, err = Load(write("env.yaml", "env: \"development\"\nwebhook:\n  warn_threshold: 3\n  sweep_max_per_tick: 25\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhook.WarnThreshold != 8 {
+		t.Errorf("env Webhook.WarnThreshold = %d, want 8", cfg.Webhook.WarnThreshold)
+	}
+	if cfg.Webhook.SweepMaxPerTick != 40 {
+		t.Errorf("env Webhook.SweepMaxPerTick = %d, want 40", cfg.Webhook.SweepMaxPerTick)
+	}
+	t.Setenv("E2A_WEBHOOK_WARN_THRESHOLD", "")
+	t.Setenv("E2A_WEBHOOK_SWEEP_MAX_PER_TICK", "")
+
+	// Below 1: refused (a threshold or per-tick cap of 0 silently breaks
+	// the feature rather than disabling it: see the field docs).
+	if _, err := Load(write("zero-warn.yaml", "env: \"development\"\nwebhook:\n  warn_threshold: 0\n")); err == nil {
+		t.Error("Load should reject webhook.warn_threshold: 0")
+	}
+	if _, err := Load(write("neg-warn.yaml", "env: \"development\"\nwebhook:\n  warn_threshold: -1\n")); err == nil {
+		t.Error("Load should reject a negative webhook.warn_threshold")
+	}
+	if _, err := Load(write("zero-sweep.yaml", "env: \"development\"\nwebhook:\n  sweep_max_per_tick: 0\n")); err == nil {
+		t.Error("Load should reject webhook.sweep_max_per_tick: 0")
+	}
+	if _, err := Load(write("neg-sweep.yaml", "env: \"development\"\nwebhook:\n  sweep_max_per_tick: -5\n")); err == nil {
+		t.Error("Load should reject a negative webhook.sweep_max_per_tick")
 	}
 }
 
