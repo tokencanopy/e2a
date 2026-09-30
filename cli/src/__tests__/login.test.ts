@@ -6,6 +6,7 @@ const mockLoadConfig = vi.fn();
 const mockSaveConfig = vi.fn();
 const mockCreateServer = vi.fn();
 const mockFetch = vi.fn();
+const mockHostname = vi.fn();
 const originalFetch = globalThis.fetch;
 
 let currentServerHandler: ((req: any, res: any) => void | Promise<void>) | null = null;
@@ -41,6 +42,10 @@ vi.mock("node:http", () => ({
 vi.mock("../config.js", () => ({
   loadConfig: mockLoadConfig,
   saveConfig: mockSaveConfig,
+}));
+
+vi.mock("node:os", () => ({
+  hostname: mockHostname,
 }));
 
 // login probes GET /v1/info with a raw fetch (pre-auth, before a key exists),
@@ -100,6 +105,10 @@ describe("login", () => {
     mockExecFile.mockReset();
     mockCreateServer.mockClear();
     mockFetch.mockReset();
+    mockHostname.mockReset();
+    // Default: a normal, resolvable hostname. Override per-test for the
+    // lookup-failure scenario.
+    mockHostname.mockReturnValue("laptop.local");
     // Default: deployment exposes the hosted shared domain. Override per-test
     // for self-host / older-deployment / unreachable scenarios.
     mockFetch.mockResolvedValue(infoResponse("agents.e2a.dev"));
@@ -153,6 +162,53 @@ describe("login", () => {
       "No default inbox set. Pass --agent <email> per command, or set one:\n" +
         "  e2a agents list\n" +
         "  e2a config set agent_email <email>\n",
+    );
+  });
+
+  it("sends the machine's hostname as device_name on the browser login URL", async () => {
+    mockHostname.mockReturnValue("laptop.local");
+    let deviceName: string | null = null;
+    mockExecFile.mockImplementation((_cmd: string, args: string[], cb?: (err: Error | null) => void) => {
+      const loginUrl = new URL(args[args.length - 1]);
+      deviceName = loginUrl.searchParams.get("device_name");
+      void simulateBrowserCallback({
+        cli_state: loginUrl.searchParams.get("cli_state")!,
+        api_key: "e2a_browser_key",
+        agent_email: "bot@agents.e2a.dev",
+      });
+      cb?.(null);
+      return { unref: vi.fn() };
+    });
+
+    const { login } = await import("../commands/login.js");
+    await login();
+
+    expect(deviceName).toBe("laptop.local");
+  });
+
+  it("omits device_name rather than failing the login when the hostname lookup throws", async () => {
+    mockHostname.mockImplementation(() => {
+      throw new Error("ENOTFOUND: no hostname available");
+    });
+    let sawDeviceNameParam = true;
+    mockExecFile.mockImplementation((_cmd: string, args: string[], cb?: (err: Error | null) => void) => {
+      const loginUrl = new URL(args[args.length - 1]);
+      sawDeviceNameParam = loginUrl.searchParams.has("device_name");
+      void simulateBrowserCallback({
+        cli_state: loginUrl.searchParams.get("cli_state")!,
+        api_key: "e2a_browser_key",
+        agent_email: "bot@agents.e2a.dev",
+      });
+      cb?.(null);
+      return { unref: vi.fn() };
+    });
+
+    const { login } = await import("../commands/login.js");
+    await login();
+
+    expect(sawDeviceNameParam).toBe(false);
+    expect(mockSaveConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ api_key: "e2a_browser_key" }),
     );
   });
 

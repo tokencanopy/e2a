@@ -571,3 +571,169 @@ func TestHandleCallback_RecordsOwnerEmailProof(t *testing.T) {
 		t.Fatalf("a mismatched address must not be recorded: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestHandleLogin_EncodesSanitizedDeviceNameInOAuthState: device_name rides
+// the OAuth state alongside cli_callback/cli_state, sanitized per
+// sanitizeDeviceName's contract (printable ASCII only, capped at 64 runes).
+func TestHandleLogin_EncodesSanitizedDeviceNameInOAuthState(t *testing.T) {
+	raw := "joshzhang-MBP\x07\x1b[31m" + strings.Repeat("x", 100) // \x07/\x1b are control bytes and dropped;
+	// "[31m" is ordinary printable text (the rest of what would be an ANSI
+	// color escape, minus its non-printable lead-in) and survives, so the
+	// printable stream is "joshzhang-MBP[31m" (17 runes) + 100 x's, capped at 64.
+	want := "joshzhang-MBP[31m" + strings.Repeat("x", 47) // 17 + 47 = 64
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/auth/login?cli_callback=http://127.0.0.1:43123/callback&cli_state=cli_state_123&device_name="+url.QueryEscape(raw),
+		nil,
+	)
+	ua, _, _ := setupUserAuth(t)
+	w := httptest.NewRecorder()
+	ua.HandleLogin(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusFound)
+	}
+	u, err := url.Parse(w.Result().Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect URL: %v", err)
+	}
+	stateJSON, err := base64.URLEncoding.DecodeString(u.Query().Get("state"))
+	if err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	var state struct {
+		DeviceName string `json:"dn"`
+	}
+	if err := json.Unmarshal(stateJSON, &state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if state.DeviceName != want {
+		t.Fatalf("device name = %q (len %d), want %q (len %d)", state.DeviceName, len(state.DeviceName), want, len(want))
+	}
+}
+
+// TestHandleLogin_WebLoginIgnoresDeviceName: device_name only means anything
+// alongside a CLI handoff; a plain web login (no cli_callback) must not
+// carry it into the state even if the query string sends one.
+func TestHandleLogin_WebLoginIgnoresDeviceName(t *testing.T) {
+	ua, _, _ := setupUserAuth(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/login?device_name=some-host", nil)
+	w := httptest.NewRecorder()
+	ua.HandleLogin(w, req)
+
+	u, _ := url.Parse(w.Result().Header.Get("Location"))
+	stateJSON, _ := base64.URLEncoding.DecodeString(u.Query().Get("state"))
+	var state struct {
+		DeviceName string `json:"dn"`
+	}
+	json.Unmarshal(stateJSON, &state)
+	if state.DeviceName != "" {
+		t.Fatalf("web login should not carry a device name, got %q", state.DeviceName)
+	}
+}
+
+// TestHandleCallback_CLILogin_SameDeviceReplacesPriorKey is the regression
+// test for the bug this fix targets: two logins from the same named device
+// leave exactly one live "CLI login on <device>" key, and it is the second
+// mint, not the first.
+func TestHandleCallback_CLILogin_SameDeviceReplacesPriorKey(t *testing.T) {
+	ua, store, srv := setupUserAuthWithFakeOAuth(t)
+	_ = srv
+	ctx := context.Background()
+
+	login := func(nonce string) {
+		t.Helper()
+		state := auth.EncodeOAuthState(&auth.OAuthState{
+			Nonce:       nonce,
+			CLICallback: "http://127.0.0.1:43123/callback",
+			CLIState:    "cli_state_abc",
+			DeviceName:  "joshzhang-MBP",
+		})
+		req := httptest.NewRequest(
+			http.MethodGet,
+			fmt.Sprintf("/api/auth/callback?code=fake-code&state=%s", url.QueryEscape(state)),
+			nil,
+		)
+		req.AddCookie(&http.Cookie{Name: "e2a_oauth_state", Value: nonce})
+		w := httptest.NewRecorder()
+		ua.HandleCallback(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+		}
+	}
+
+	login("nonce-device-1")
+	login("nonce-device-2")
+
+	user, err := store.CreateOrGetUser(ctx, "cliuser@test.com", "CLI User", "google-sub-cli-test")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	keys, err := store.ListAPIKeys(ctx, user.ID, 0, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("ListAPIKeys: %v", err)
+	}
+	var named []identity.APIKey
+	for _, k := range keys {
+		if k.Name == "CLI login on joshzhang-MBP" {
+			named = append(named, k)
+		}
+	}
+	if len(named) != 1 {
+		t.Fatalf("live keys named %q = %d, want 1 (re-login from the same device must replace, not accumulate)", "CLI login on joshzhang-MBP", len(named))
+	}
+}
+
+// TestHandleCallback_CLILogin_NoDeviceName_PreservesLegacyAccumulation pins
+// the deliberate scope boundary: without a device name (older CLI binaries,
+// or a login door that never plumbs one) writeCLIHandoffPage must keep
+// minting distinct "CLI login" keys rather than revoking by that
+// un-device-scoped shared name, which could otherwise revoke a different,
+// still-live device's key out from under it.
+func TestHandleCallback_CLILogin_NoDeviceName_PreservesLegacyAccumulation(t *testing.T) {
+	ua, store, srv := setupUserAuthWithFakeOAuth(t)
+	_ = srv
+	ctx := context.Background()
+
+	login := func(nonce string) {
+		t.Helper()
+		state := auth.EncodeOAuthState(&auth.OAuthState{
+			Nonce:       nonce,
+			CLICallback: "http://127.0.0.1:43123/callback",
+			CLIState:    "cli_state_abc",
+		})
+		req := httptest.NewRequest(
+			http.MethodGet,
+			fmt.Sprintf("/api/auth/callback?code=fake-code&state=%s", url.QueryEscape(state)),
+			nil,
+		)
+		req.AddCookie(&http.Cookie{Name: "e2a_oauth_state", Value: nonce})
+		w := httptest.NewRecorder()
+		ua.HandleCallback(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+		}
+	}
+
+	login("nonce-legacy-1")
+	login("nonce-legacy-2")
+
+	user, err := store.CreateOrGetUser(ctx, "cliuser@test.com", "CLI User", "google-sub-cli-test")
+	if err != nil {
+		t.Fatalf("CreateOrGetUser: %v", err)
+	}
+	keys, err := store.ListAPIKeys(ctx, user.ID, 0, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("ListAPIKeys: %v", err)
+	}
+	var plain int
+	for _, k := range keys {
+		if k.Name == "CLI login" {
+			plain++
+		}
+	}
+	if plain != 2 {
+		t.Fatalf("live \"CLI login\" keys = %d, want 2 (unnamed-device logins are unchanged by this fix)", plain)
+	}
+}

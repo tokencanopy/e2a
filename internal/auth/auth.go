@@ -72,6 +72,9 @@ type UserAuth struct {
 type cliLoginHandoff struct {
 	CallbackURL string
 	State       string
+	// DeviceName is the sanitized CLI hostname, or "" if the CLI did not
+	// supply one. See writeCLIHandoffPage.
+	DeviceName string
 }
 
 var cliLoginTemplate = template.Must(template.New("cli-login").Parse(`<!doctype html>
@@ -272,16 +275,40 @@ func validateCLICallbackURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
+// maxDeviceNameLen bounds the CLI-supplied device_name before it is used as
+// (part of) an API key name shown in the dashboard.
+const maxDeviceNameLen = 64
+
+// sanitizeDeviceName keeps only printable ASCII from raw, capped at
+// maxDeviceNameLen runes; anything else degrades to "" rather than
+// failing the login.
+func sanitizeDeviceName(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if r < 0x20 || r > 0x7e {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= maxDeviceNameLen {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
 // OAuthState is encoded into the OAuth state parameter. It carries the CSRF
 // nonce and, for CLI-initiated logins, the callback URL and CLI state token.
 // ReturnTo, if set, is a same-origin server-path the user is bounced back to
 // after callback succeeds — used by the MCP authorize flow to resume after
-// a session is established. Validated at HandleLogin time.
+// a session is established. DeviceName, if set, identifies the CLI's host so
+// writeCLIHandoffPage can replace that device's own prior key instead of
+// minting an indistinguishable extra one. Validated at HandleLogin time.
 type OAuthState struct {
 	Nonce       string `json:"n"`
 	CLICallback string `json:"cb,omitempty"`
 	CLIState    string `json:"cs,omitempty"`
 	ReturnTo    string `json:"rt,omitempty"`
+	DeviceName  string `json:"dn,omitempty"`
 }
 
 func EncodeOAuthState(s *OAuthState) string {
@@ -321,12 +348,18 @@ func defaultAgentEmail(ctx context.Context, store *identity.Store, userID string
 	return agents[0].EmailAddress()
 }
 
-// writeCLIHandoffPage mints a fresh "CLI login" API key for the user and
-// renders the auto-submitting page that POSTs it (plus the CLI's state
-// token) to the loopback listener the CLI opened. Shared by every browser
-// login door that supports the CLI handoff.
+// writeCLIHandoffPage mints an API key for the user and renders the
+// auto-submitting page the CLI's loopback listener consumes. A device name
+// replaces that device's own prior key by name instead of adding another.
 func writeCLIHandoffPage(store *identity.Store, w http.ResponseWriter, r *http.Request, user *identity.User, handoff *cliLoginHandoff) error {
-	key, err := store.CreateAPIKey(r.Context(), user.ID, "CLI login", nil)
+	name := "CLI login"
+	if handoff.DeviceName != "" {
+		name = "CLI login on " + handoff.DeviceName
+		if err := store.RevokeAPIKeysByName(r.Context(), user.ID, name); err != nil {
+			return fmt.Errorf("failed to revoke prior device key: %w", err)
+		}
+	}
+	key, err := store.CreateAPIKey(r.Context(), user.ID, name, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create api key: %w", err)
 	}
@@ -365,6 +398,7 @@ func (ua *UserAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		state.CLICallback = callbackURL.String()
 		state.CLIState = cliState
+		state.DeviceName = sanitizeDeviceName(r.URL.Query().Get("device_name"))
 	}
 
 	if returnTo := r.URL.Query().Get("return_to"); returnTo != "" {
@@ -527,6 +561,7 @@ func (ua *UserAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		handoff := &cliLoginHandoff{
 			CallbackURL: callbackURL.String(),
 			State:       state.CLIState,
+			DeviceName:  state.DeviceName,
 		}
 		if err := writeCLIHandoffPage(ua.store, w, r, user, handoff); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

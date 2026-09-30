@@ -6833,6 +6833,18 @@ func (s *Store) DeleteAPIKey(ctx context.Context, keyID, userID string) error {
 	return nil
 }
 
+// RevokeAPIKeysByName soft-deletes every live key the user owns with the
+// exact given name. Unlike DeleteAPIKey, matching zero rows is not an error:
+// the caller (writeCLIHandoffPage) uses this to take over a device's own
+// prior key before minting its replacement, and "no prior key yet" is the
+// ordinary first-login case, not a failure.
+func (s *Store) RevokeAPIKeysByName(ctx context.Context, userID, name string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET revoked_at = now() WHERE user_id = $1 AND name = $2 AND revoked_at IS NULL`, userID, name,
+	)
+	return err
+}
+
 // GetUserByAPIKey authenticates a bearer token and returns the owning
 // user. Rejects revoked keys and time-expired keys; touches last_used_at
 // only on the success path so the column stays a real "last successful
