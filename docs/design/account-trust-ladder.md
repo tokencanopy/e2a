@@ -28,7 +28,7 @@ account's live agents and its currently verified owner mailbox. Normalize and
 deduplicate the complete To/Cc/Bcc envelope. Internal recipients still count
 against monthly quota. This classification is repeated at authorization and
 immediately before a provider call, so an old grant cannot acquire new external
-recipients after an ownership or verification change.
+recipients after an ownership or verification change. Any count change, including becoming internal, requires a fresh authorization. Legacy/all-recipient attempts never earn trust credit, including across runtime-policy toggles.
 
 Reservations serialize on an account row after the existing account-control,
 operation, and budget locks. All identities compete for that same allowance.
@@ -78,7 +78,7 @@ usage dashboard carry the same contract. No platform-wide capacity is exposed.
 
 ## Persistence and rollout
 
-Migration 130 adds account trust, daily buckets, and message reservations without
+Migrations 130–131 add account trust, daily buckets, message reservations, and immutable per-attempt external-unit provenance without
 activating the control or exempting existing accounts. Foreign keys erase these
 rows with their owning account. Daily maintenance prunes settled history older
 than 90 days, folding clean-day credit into the account row first. It retains

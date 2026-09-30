@@ -182,3 +182,71 @@ func TestAccountTrustMixedEnvelopeAndOwnerProofRevocation(t *testing.T) {
 		t.Fatal("revoked owner proof expanded old grant")
 	}
 }
+
+func TestAccountTrustGrantCannotKeepExternalCreditAfterOwnerVerification(t *testing.T) {
+	f := newFixture(t)
+	p := sendingpolicy.DisabledPolicy()
+	p.AccountTrustEnabled = true
+	g := f.gate(p)
+	user := f.user("standard")
+	f.plan(user, "scale")
+	sender := f.agent(user)
+	_, ref := f.prepareMessage(g, f.messageTo(sender, "relay", []string{f.ownerEmail(user)}))
+	_, attempt, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || !d.Allow || auth == nil {
+		t.Fatalf("grant: %+v %v", d, err)
+	}
+	f.proveOwner(user)
+	if err = g.RedeemProviderCall(f.ctx, *auth); err == nil {
+		t.Fatal("newly internal recipient kept external-credit token")
+	}
+}
+
+func TestAccountTrustDisabledRetryDoesNotEarnActivity(t *testing.T) {
+	f := newFixture(t)
+	p := sendingpolicy.DisabledPolicy()
+	p.AccountTrustEnabled = true
+	g := f.gate(p)
+	user := f.user("standard")
+	f.plan(user, "scale")
+	sender := f.agent(user)
+	_, ref := f.prepareMessage(g, f.messageTo(sender, "relay", []string{f.ownerEmail(user)}))
+	_, attempt, err := g.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, auth, err := g.ConsumeAttempt(f.ctx, attempt)
+	if err != nil || !d.Allow || auth == nil {
+		t.Fatalf("grant: %+v %v", d, err)
+	}
+	f.proveOwner(user)
+	disabled := f.gate(sendingpolicy.DisabledPolicy())
+	if err = disabled.RedeemProviderCall(f.ctx, *auth); err == nil {
+		t.Fatal("changed accounting mode kept old grant")
+	}
+	_, retry, err := disabled.Reserve(f.ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, auth, err = disabled.ConsumeAttempt(f.ctx, retry)
+	if err != nil || !d.Allow || auth == nil {
+		t.Fatalf("retry: %+v %v", d, err)
+	}
+	if err = disabled.RedeemProviderCall(f.ctx, *auth); err != nil {
+		t.Fatal(err)
+	}
+	if err = disabled.SettleProvider(f.ctx, sendingpolicy.ProviderSettlement{Attempt: retry, Outcome: sendingpolicy.SettlementProviderAccepted}); err != nil {
+		t.Fatal(err)
+	}
+	var activity int
+	if err = f.pool.QueryRow(f.ctx, `SELECT COALESCE(sum(confirmed_count),0) FROM account_send_days WHERE user_id=$1`, user).Scan(&activity); err != nil {
+		t.Fatal(err)
+	}
+	if activity != 0 {
+		t.Fatalf("disabled internal retry earned %d units of clean activity", activity)
+	}
+}

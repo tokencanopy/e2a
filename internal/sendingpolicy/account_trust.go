@@ -157,7 +157,7 @@ func (m *Module) recheckAccountTrustGrant(ctx context.Context, tx pgx.Tx, op ope
 	if err != nil {
 		return false, err
 	}
-	if n > stored.Units {
+	if stored.AccountTrustUnits == nil || n != *stored.AccountTrustUnits {
 		return false, nil
 	}
 	if n == 0 {
