@@ -115,6 +115,9 @@ const maxBasisPoints = 9999
 // struct is hashed, reviewed by a human, and then required by hash at
 // activation, so renaming a key is a policy-breaking change.
 type RuntimePolicy struct {
+	DisableLegacyDailyBudgets bool `json:"disable_legacy_daily_budgets,omitempty"`
+	// Omitted when disabled to preserve existing canonical policy hashes.
+	AccountTrustEnabled              bool     `json:"account_trust_enabled,omitempty"`
 	AllCustomerGlobalDailyRecipients int      `json:"all_customer_global_daily_recipients"`
 	BounceMinOutcomes                int      `json:"bounce_min_outcomes"`
 	BouncePauseBasisPoints           int      `json:"bounce_pause_basis_points"`

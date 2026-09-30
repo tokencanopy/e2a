@@ -530,7 +530,7 @@ func TestSendingRampDefaultsOverridesAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load defaults: %v", err)
 	}
-	if cfg.SendingRamp.Enabled || cfg.SendingRamp.StartDaily != 50 || cfg.SendingRamp.TargetDaily != 2000 || cfg.SendingRamp.RampDays != 30 {
+	if cfg.SendingRamp.AccountTrustEnabled || cfg.SendingRamp.DisableLegacyDailyBudgets || cfg.SendingRamp.Enabled || cfg.SendingRamp.StartDaily != 50 || cfg.SendingRamp.TargetDaily != 2000 || cfg.SendingRamp.RampDays != 30 {
 		t.Fatalf("sending ramp defaults = %+v, want disabled 50/2000/30", cfg.SendingRamp)
 	}
 

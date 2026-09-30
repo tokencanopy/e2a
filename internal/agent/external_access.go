@@ -12,6 +12,7 @@ import (
 
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
+	"github.com/tokencanopy/e2a/internal/sendramp"
 )
 
 // ExternalSendingNotEnabledCode is the stable 403 code for a send the account
@@ -64,6 +65,23 @@ func (a *API) preflightExternalAccess(ctx context.Context, userID, agentID strin
 	}
 	if verdict.Denied() {
 		return a.externalSendingNotEnabledError(ctx, userID)
+	}
+	if req.ScheduledAt == nil {
+		if daily, ok := a.externalAccess.(interface {
+			DailyLimitPreflight(context.Context, string, string, []string) (*sendramp.AccountDailyLimit, error)
+		}); ok {
+			d, err := daily.DailyLimitPreflight(ctx, userID, agentID, recipients)
+			if err != nil {
+				return &OutboundError{Status: http.StatusServiceUnavailable, Code: "limits_unavailable", Msg: "could not verify daily sending limit; retry shortly"}
+			}
+			if d != nil && !d.Allowed {
+				limit, used := d.Limit, d.Used
+				if d.SharedBinding {
+					limit, used = d.SharedLimit, d.SharedUsed
+				}
+				return &OutboundError{Status: http.StatusPaymentRequired, Code: "limit_exceeded", Msg: "daily external-recipient allowance reached; wait until the UTC reset", Details: map[string]any{"resource": "messages_day", "limit": limit, "current": used, "daily_limit": d}}
+			}
+		}
 	}
 	return nil
 }

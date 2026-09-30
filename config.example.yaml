@@ -308,6 +308,13 @@ sender_identity:
 # established self-host-compatible default of 50, so the hashes intentionally
 # differ even though both policies are disabled.
 sending_ramp:
+  # Opt-in replacement: one account allowance (20 to 2,000), with shared
+  # identity capped at 50 and only external recipients counted. Independent
+  # of the legacy enabled/schedule fields below. Review existing-account
+  # seeding before activation; see docs/design/account-trust-ladder.md.
+  account_trust_enabled: false
+  # Retire probation/account/shared budget caps; global and notice pools stay.
+  disable_legacy_daily_budgets: false
   enabled: false
   start_daily: 50
   target_daily: 2000

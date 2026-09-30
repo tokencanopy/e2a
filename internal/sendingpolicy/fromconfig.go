@@ -19,6 +19,8 @@ func FromConfig(cfg *config.Config) (RuntimePolicy, error) {
 	sp := cfg.SendingProtect
 
 	policy := RuntimePolicy{
+		DisableLegacyDailyBudgets:        cfg.SendingRamp.DisableLegacyDailyBudgets,
+		AccountTrustEnabled:              cfg.SendingRamp.AccountTrustEnabled,
 		AllCustomerGlobalDailyRecipients: sp.AllCustomerGlobalDailyRecipients,
 		BounceMinOutcomes:                sp.BounceMinOutcomes,
 		BouncePauseBasisPoints:           sp.BouncePauseBasisPoints,

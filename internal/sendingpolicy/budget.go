@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -130,6 +131,11 @@ func scopeKeys(purpose Purpose, accountID string, shared, probation bool) ([]cou
 // limitFor resolves today's cap for one counter under the current policy and
 // the account's authoritative plan.
 func limitFor(key counterKey, policy RuntimePolicy, planCode string) int {
+	// Keep ledger keys for safe settlement across policy changes, but remove
+	// these legacy caps from admission. The account trust ledger owns them.
+	if policy.DisableLegacyDailyBudgets && (key.Scope == ScopeGlobalProbation || key.Scope == ScopeAccountDaily || key.Scope == ScopeAccountSharedDaily) {
+		return math.MaxInt32
+	}
 	switch key.Scope {
 	case ScopeGlobalAll:
 		return policy.AllCustomerGlobalDailyRecipients
@@ -353,6 +359,9 @@ func (p *ledgerPlan) release(ref ledgerRef, units int) {
 
 // acquire records taking `units`, reporting whether there was room.
 func (p *ledgerPlan) acquire(ref ledgerRef, units int) bool {
+	if units == 0 {
+		return true
+	}
 	row, ok := p.rows[ref]
 	if !ok {
 		return false

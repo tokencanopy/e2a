@@ -520,10 +520,12 @@ type SenderIdentityConfig struct {
 // public API. Values are snapshotted when a domain first sends, so later config
 // changes do not reshape an in-flight ramp.
 type SendingRampConfig struct {
-	Enabled     bool `yaml:"enabled"`
-	StartDaily  int  `yaml:"start_daily"`
-	TargetDaily int  `yaml:"target_daily"`
-	RampDays    int  `yaml:"ramp_days"`
+	DisableLegacyDailyBudgets bool `yaml:"disable_legacy_daily_budgets"`
+	AccountTrustEnabled       bool `yaml:"account_trust_enabled"`
+	Enabled                   bool `yaml:"enabled"`
+	StartDaily                int  `yaml:"start_daily"`
+	TargetDaily               int  `yaml:"target_daily"`
+	RampDays                  int  `yaml:"ramp_days"`
 }
 
 // SendingProtectionConfig carries the non-schedule half of the sending

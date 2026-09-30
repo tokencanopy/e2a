@@ -894,6 +894,7 @@ func main() {
 		},
 		time.Duration(cfg.Limits.CacheTTLSeconds)*time.Second,
 	)
+	enforcer.SetAccountDailyControl(outboundSending.module.AccountTrustEnabled)
 	api.SetEnforcer(enforcer)
 	// Master switch for the outbound footer; the enforcer above carries the
 	// per-account entitlement + row-less default the decision reads.

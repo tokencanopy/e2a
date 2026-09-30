@@ -36,12 +36,13 @@ type fakeStore struct {
 	suppressed    []string
 	suppressedErr error
 
-	sent      []sentCall
-	holds     []holdCall
-	failed    []failedCall
-	deferred  []failedCall
-	temporary []failedCall
-	released  []string
+	holdDetails []string
+	sent        []sentCall
+	holds       []holdCall
+	failed      []failedCall
+	deferred    []failedCall
+	temporary   []failedCall
+	released    []string
 	// suppressionUserID records the tenant the guard was scoped to.
 	suppressionUserID    string
 	suppressionAgentID   string
@@ -442,4 +443,9 @@ func gatedJob(id string, attempt int) *river.Job[outboundsend.OutboundSendArgs] 
 	ref := refFor(id)
 	j.Args.OperationRef = &ref
 	return j
+}
+
+func (f *fakeStore) RecordHoldDetail(_ context.Context, _ string, _ int64, detail string) error {
+	f.holdDetails = append(f.holdDetails, detail)
+	return nil
 }

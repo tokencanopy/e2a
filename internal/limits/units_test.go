@@ -143,3 +143,20 @@ func TestCheckMessageSend_DailyCap(t *testing.T) {
 		}
 	})
 }
+
+func TestAccountDailyControlPreservesMonthlyQuota(t *testing.T) {
+	store := &fakeStore{found: true, row: Limits{MaxMessagesMonth: 100, MaxMessagesDay: intPtr(20), MaxStorageBytes: 1 << 40}}
+	counter := &fakeCounter{messagesMonth: 99, messagesToday: 1000}
+	e := newEnforcerWithReader(store, counter, defaultsForTest(), 0)
+	e.SetAccountDailyControl(func(context.Context) (bool, error) { return true, nil })
+	if err := e.CheckMessageSend(context.Background(), "u", 1); err != nil {
+		t.Fatalf("legacy daily gate not delegated: %v", err)
+	}
+	if le, ok := IsLimitExceeded(e.CheckMessageSend(context.Background(), "u", 2)); !ok || le.Resource != "messages_month" {
+		t.Fatalf("monthly gate changed: %v", le)
+	}
+	e.SetAccountDailyControl(func(context.Context) (bool, error) { return false, errors.New("policy unavailable") })
+	if err := e.CheckMessageSend(context.Background(), "u", 1); err == nil {
+		t.Fatal("unreadable policy failed open")
+	}
+}

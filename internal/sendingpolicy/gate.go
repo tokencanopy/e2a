@@ -299,6 +299,16 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 	if err != nil {
 		return Decision{}, AttemptRef{}, err
 	}
+	if policy.AccountTrustEnabled && op.Purpose == PurposeCustomerMessage {
+		envelope, e := messageEnvelopeQ(ctx, tx, op.OperationID)
+		if e != nil {
+			return Decision{}, AttemptRef{}, e
+		}
+		units, err = externalRecipientCount(ctx, tx, op.accountRef(), envelope)
+		if err != nil {
+			return Decision{}, AttemptRef{}, err
+		}
+	}
 
 	day, err := ledgerDay(ctx, tx)
 	if err != nil {
@@ -707,6 +717,9 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		if errors.Is(err, ErrSourceUnavailable) {
 			return st, terminalHold(ReasonSourceUnavailable), nil
 		}
+		if d, ok := rampHoldFor(err, st.day); ok {
+			return st, d, nil
+		}
 		return st, Decision{}, err
 	}
 
@@ -798,6 +811,12 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	}
 	st.envelope = envelope
 	st.units = len(st.envelope)
+	if policy.AccountTrustEnabled && op.Purpose == PurposeCustomerMessage {
+		st.units, err = externalRecipientCount(ctx, tx, op.accountRef(), st.envelope)
+		if err != nil {
+			return st, Decision{}, err
+		}
+	}
 
 	// External sending access, decided under the locks just taken: the users
 	// row (FOR SHARE), the account control row and the plan row are all held
@@ -825,6 +844,9 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		// vanished source is not something a retry can restore.
 		if errors.Is(err, ErrSourceUnavailable) {
 			return st, terminalHold(ReasonSourceUnavailable), nil
+		}
+		if d, ok := rampHoldFor(err, st.day); ok {
+			return st, d, nil
 		}
 		return st, Decision{}, err
 	}
@@ -1633,6 +1655,16 @@ func (m *Module) RedeemProviderCall(ctx context.Context, auth ProviderAuthorizat
 		return m.invalidate(ctx, tx, auth.attempt)
 	}
 
+	if policy.AccountTrustEnabled && op.Purpose == PurposeCustomerMessage {
+		valid, err := m.recheckAccountTrustGrant(ctx, tx, op, stored)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return m.invalidate(ctx, tx, auth.attempt)
+		}
+	}
+
 	if auth.notice != nil {
 		ok, err := m.noticeSelectorStillCurrent(ctx, tx, auth, stored, ownerEmail)
 		if err != nil {
@@ -2006,7 +2038,7 @@ func (m *Module) settle(ctx context.Context, operationID string, attempt int, se
 	// Ramp keys come last in the normative order, after the correlation row,
 	// which is keyed by this operation and already held under its lock.
 	if op.Purpose == PurposeCustomerMessage {
-		if err := m.rampSettle(ctx, tx, op.OperationID, settlement.Outcome); err != nil {
+		if err := m.rampSettle(ctx, tx, op.OperationID, settlement.Outcome, stored.Day, stored.Units); err != nil {
 			return err
 		}
 	}

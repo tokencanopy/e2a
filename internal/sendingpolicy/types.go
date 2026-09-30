@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tokencanopy/e2a/internal/sendramp"
 	"sort"
 	"strings"
 	"time"
@@ -217,10 +218,11 @@ const (
 // forever instead of failing the message once. A terminal hold carries no
 // RetryAt because there is no time at which the answer changes.
 type Decision struct {
-	Allow    bool
-	Reason   string
-	RetryAt  time.Time
-	Terminal bool
+	DailyLimit *sendramp.AccountDailyLimit
+	Allow      bool
+	Reason     string
+	RetryAt    time.Time
+	Terminal   bool
 }
 
 func allowDecision() Decision { return Decision{Allow: true} }

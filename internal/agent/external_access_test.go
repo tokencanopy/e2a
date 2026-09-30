@@ -194,3 +194,25 @@ func TestDeliverOutboundExternalAccessMessageFollowsUnlocks(t *testing.T) {
 		})
 	}
 }
+
+func TestDailyLimitSharedRefusalReportsBindingCap(t *testing.T) {
+	api, store, _, _, pool := setupAsyncAPIWithPool(t)
+	p := sendingpolicy.DisabledPolicy()
+	p.AccountTrustEnabled = true
+	api.SetExternalAccess(sendingpolicy.NewPolicyModule(pool, sendingpolicy.Secrets{}, sendingpolicy.PolicySourceConfig, p))
+	ctx := context.Background()
+	user, ag := selfAgent(t, store, "sharedcap")
+	if _, err := pool.Exec(ctx, `INSERT INTO account_limits(user_id,max_agents,max_domains,max_messages_month,max_storage_bytes,max_messages_day) VALUES($1,100,10,10000,1073741824,NULL) ON CONFLICT(user_id) DO UPDATE SET max_messages_day=NULL`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO account_sending_trust(user_id,grandfather_daily) VALUES($1,2000)`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO account_send_days(user_id,day,reserved_count,shared_count) VALUES($1,(clock_timestamp() AT TIME ZONE 'UTC')::date,50,50)`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, e := api.DeliverOutbound(ctx, user, ag, outbound.SendRequest{To: []string{"external@example.test"}, Subject: "synthetic", Body: "test"}, "send", "", nil, nil)
+	if e == nil || e.Status != 402 || e.Details["limit"] != 50 || e.Details["current"] != 50 {
+		t.Fatalf("shared refusal: %+v", e)
+	}
+}

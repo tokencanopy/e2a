@@ -1093,3 +1093,7 @@ func TestRegisterJobs_RegistersTerminalReconcilePeriodic(t *testing.T) {
 		t.Fatalf("RegisterJobs periodics = %d, want 1", len(periodics))
 	}
 }
+
+func (s failingTerminalStore) RecordHoldDetail(context.Context, string, int64, string) error {
+	return nil
+}

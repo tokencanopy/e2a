@@ -212,6 +212,15 @@ func (a *outboundSendStore) RecordHold(ctx context.Context, messageID string, cl
 	return a.store.RecordOutboundHold(ctx, messageID, string(class), anchor)
 }
 
+// RecordHoldDetail persists only the current claim's safe quota diagnostic.
+// The terminal sent/failed transitions clear or replace this field.
+func (a *outboundSendStore) RecordHoldDetail(ctx context.Context, messageID string, jobID int64, detail string) error {
+	return a.store.WithTx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE messages SET delivery_detail=$3 WHERE id=$1 AND send_job_id=$2 AND delivery_status IN ('accepted','sending')`, messageID, jobID, messagelifecycle.SafeDiagnostic(detail))
+		return err
+	})
+}
+
 // SuppressedRecipients backs the SendWorker's pre-provider suppression guard:
 // the effective account-wide + exact-agent subset (the store normalizes both
 // sides).
