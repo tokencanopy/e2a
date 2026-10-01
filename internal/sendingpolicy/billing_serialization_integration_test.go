@@ -89,7 +89,13 @@ func TestBillingCommitSerializesBeforeConsume(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := make(chan consumeResult, 1)
-			go func() { d, _, e := enforce.ConsumeAttempt(ctx, attempt); result <- consumeResult{d, e} }()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				d, _, e := enforce.ConsumeAttempt(ctx, attempt)
+				result <- consumeResult{d, e}
+			}()
+			defer func() { cancel(); <-done }()
 			waitForBlockedBackend(t, ctx, f.pool, pid)
 			if err = billing.Commit(ctx); err != nil {
 				t.Fatal(err)
@@ -137,19 +143,40 @@ func TestConsumeSerializesBeforeBillingCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	consumed := make(chan consumeResult, 1)
-	go func() { d, _, e := enforce.ConsumeAttempt(ctx, attempt); consumed <- consumeResult{d, e} }()
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		d, _, e := enforce.ConsumeAttempt(ctx, attempt)
+		consumed <- consumeResult{d, e}
+	}()
+	defer func() { cancel(); <-consumeDone }()
 	consumePID := waitForBlockedBackend(t, ctx, f.pool, barrierPID)
 	billing, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer billing.Rollback(ctx)
+	billingOwnedByWorker := false
+	defer func() {
+		if !billingOwnedByWorker {
+			cleanup, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanupCancel()
+			_ = billing.Rollback(cleanup)
+		}
+	}()
 	var billingPID int32
 	if err = billing.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&billingPID); err != nil {
 		t.Fatal(err)
 	}
 	written := make(chan error, 1)
+	billingDone := make(chan struct{})
+	billingOwnedByWorker = true
 	go func() {
+		defer close(billingDone)
+		defer func() {
+			cleanup, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanupCancel()
+			_ = billing.Rollback(cleanup)
+		}()
 		if e := billingControlLock(ctx, billing, user); e != nil {
 			written <- e
 			return
@@ -160,6 +187,7 @@ func TestConsumeSerializesBeforeBillingCommit(t *testing.T) {
 		}
 		written <- billing.Commit(ctx)
 	}()
+	defer func() { cancel(); <-billingDone }()
 	if got := waitForBlockedBackend(t, ctx, f.pool, consumePID); got != billingPID {
 		t.Fatalf("blocked pid=%d want billing %d", got, billingPID)
 	}
