@@ -25,8 +25,25 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // error" is important: a transient DB hiccup must fail closed, while a
 // genuinely-missing row is the normal case for a fresh user.
 func (s *Store) Get(ctx context.Context, userID string) (Limits, bool, error) {
+	return s.get(ctx, s.pool, userID)
+}
+
+// GetTx is Get on a caller-owned transaction. The accept-time send
+// reservation reads the cap on the accept transaction's own connection so it
+// never needs a second pool connection while it holds the per-user advisory
+// lock.
+func (s *Store) GetTx(ctx context.Context, tx pgx.Tx, userID string) (Limits, bool, error) {
+	return s.get(ctx, tx, userID)
+}
+
+// rowQuerier is the subset of *pgxpool.Pool and pgx.Tx get needs.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (s *Store) get(ctx context.Context, q rowQuerier, userID string) (Limits, bool, error) {
 	l := Limits{}
-	err := s.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT plan_code, max_agents, max_domains, max_messages_month, max_messages_day, max_storage_bytes, upgrade_url, outbound_footer_enabled
 		   FROM account_limits WHERE user_id = $1`, userID,
 	).Scan(&l.PlanCode, &l.MaxAgents, &l.MaxDomains, &l.MaxMessagesMonth, &l.MaxMessagesDay, &l.MaxStorageBytes, &l.UpgradeURL, &l.OutboundFooterEnabled)
