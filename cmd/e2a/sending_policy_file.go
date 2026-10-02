@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -29,9 +28,6 @@ func readSendingPolicyFile(path string) (sendingpolicy.RuntimePolicy, error) {
 	}
 	if len(raw) > maxBytes {
 		return sendingpolicy.RuntimePolicy{}, errors.New("policy file exceeds 64 KiB")
-	}
-	if !json.Valid(raw) {
-		return sendingpolicy.RuntimePolicy{}, errors.New("policy file must contain one valid JSON document")
 	}
 	policy, err := sendingpolicy.ParsePolicy(raw)
 	if err != nil {

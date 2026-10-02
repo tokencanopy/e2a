@@ -171,3 +171,34 @@ func TestSendingReadinessRequiresSelectedPermanentVersion(t *testing.T) {
 	m.evaluate()
 	assertReadiness(t, m, http.StatusOK)
 }
+
+func TestSendingReadinessPolicyTimeoutRecovers(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedTestDB(t)
+	module := sendingpolicy.NewPolicyModule(pool, readinessPolicySecrets(t), sendingpolicy.PolicySourceDatabase, sendingpolicy.DisabledPolicy())
+	if _, err := module.RegisterOperatorRecipients(ctx, "synthetic-operator", "test"); err != nil {
+		t.Fatal(err)
+	}
+	m := newReadinessMonitorWithConfig(pool, nil, module, time.Hour, time.Hour, 300*time.Millisecond)
+	defer m.Stop()
+	assertReadiness(t, m, http.StatusOK)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `LOCK TABLE sending_protection_runtime_policy IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	m.evaluate()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("policy probe escaped timeout: %v", elapsed)
+	}
+	assertReadiness(t, m, http.StatusServiceUnavailable)
+	if err = tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	m.evaluate()
+	assertReadiness(t, m, http.StatusOK)
+}

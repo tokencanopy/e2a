@@ -9,7 +9,7 @@ policy generation.
 ## Review a complete policy file
 
 `-sending-protection-policy-file` accepts a complete runtime-policy JSON object
-(not a server YAML config), up to 64 KiB. Unknown fields, invalid values,
+(not a server YAML config), up to 64 KiB. Unknown fields, duplicate object keys, invalid values,
 trailing content, and non-regular files are rejected. Config defaults and
 environment overrides never alter the file's policy. Read/validation errors do
 not echo file paths or contents.

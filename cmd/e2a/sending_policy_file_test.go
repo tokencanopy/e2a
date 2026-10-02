@@ -148,3 +148,23 @@ func TestPolicyFileActivationRequiresTrustRootsForEnabledControls(t *testing.T) 
 		t.Fatalf("missing trust root mutated policy: %+v %v", stored, err)
 	}
 }
+
+func TestPolicyFileRejectsDuplicateKeys(t *testing.T) {
+	p := sendingpolicy.DisabledPolicy()
+	p.ExternalSendingAccess = &sendingpolicy.ExternalSendingAccessPolicy{Mode: sendingpolicy.ModeEnforce, AccountsCreatedAtOrAfter: "2000-01-01T00:00:00Z", Unlocks: []sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval}}
+	raw, err := sendingpolicy.CanonicalBytes(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, input := range map[string]string{
+		"top level":   strings.Replace(string(raw), `"budget_mode":"disabled"`, `"budget_mode":"shadow","budget_mode":"disabled"`, 1),
+		"escaped key": strings.Replace(string(raw), `"budget_mode":"disabled"`, `"budget_mode":"shadow","\u0062udget_mode":"disabled"`, 1),
+		"nested":      strings.Replace(string(raw), `"mode":"enforce"`, `"mode":"disabled","mode":"enforce"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := readSendingPolicyFile(writePolicyFixture(t, []byte(input))); err == nil {
+				t.Fatal("ambiguous reviewed policy accepted")
+			}
+		})
+	}
+}
