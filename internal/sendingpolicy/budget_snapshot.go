@@ -31,7 +31,13 @@ func (m *Module) BudgetSnapshot(ctx context.Context) (BudgetSnapshot, error) {
 		defer cancel()
 		_ = tx.Rollback(cleanup)
 	}()
-	now := m.now().UTC()
+	// Use the same clock as ledgerDay: a process clock across UTC midnight
+	// must not publish a fresh observation of the wrong daily pool.
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return BudgetSnapshot{}, err
+	}
+	now = now.UTC()
 	out := BudgetSnapshot{UsedRatio: map[string]float64{}, ObservedAt: now}
 	policy := m.configPolicy
 	if m.source == PolicySourceDatabase {

@@ -46,7 +46,9 @@ func appendAccountTrustSamples(samples *[]budgetSample, st authState, err error)
 	var capacity *accountCapacityError
 	if errors.As(err, &capacity) {
 		scope := ScopeAccountDaily
-		if capacity.daily.SharedBinding {
+		// Reservation results carry usage, while SharedBinding is a preflight-only hint.
+		d := capacity.daily
+		if st.ramp.shared && d.SharedLimit-d.SharedUsed < d.Limit-d.Used {
 			scope = ScopeAccountSharedDaily
 		}
 		*samples = append(*samples, budgetSample{scope, "hold"})

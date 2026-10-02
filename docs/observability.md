@@ -224,7 +224,9 @@ containing operation identifiers is replaced by these bounded observations.
 Each process with Prometheus enabled samples immediately and every 30 seconds,
 with a 5-second timeout. One read-only database snapshot reads the effective
 policy and four indexed global-pool counters; it never scans account rows.
-Missing counters report zero, and disabled legacy probation reports zero.
+The UTC date and observation timestamp come from PostgreSQL, matching the
+clock used by authorization. Missing counters report zero, and disabled legacy
+probation reports zero.
 Ratios use the current policy limit, not a historical limit cached in the
 counter row. `/metrics` performs no database queries. A failed sample retains
 the previous gauges and timestamp; zero or stale freshness is not evidence of

@@ -12,8 +12,12 @@ func TestBudgetSnapshotUsesCurrentLimitsAndUTCDate(t *testing.T) {
 	f := newFixture(t)
 	p := enforcingPolicy(func(p *sendingpolicy.RuntimePolicy) { p.AllCustomerGlobalDailyRecipients = 10 })
 	m := f.gate(p).(*sendingpolicy.Module)
-	day := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	m.WithClock(func() time.Time { return day })
+	var day time.Time
+	if err := f.pool.QueryRow(f.ctx, `SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&day); err != nil {
+		t.Fatal(err)
+	}
+	// A process clock on another UTC day must not change which ledger is observed.
+	m.WithClock(func() time.Time { return day.Add(-24 * time.Hour) })
 	_, err := f.pool.Exec(f.ctx, `INSERT INTO sending_budget_counters(scope,scope_id,day,daily_limit,reserved_count,confirmed_count) VALUES ('global_all','all-customers',$1,999,15,10),('global_all','all-customers',$1::date-1,999,500,500),('account_daily','usr_synthetic',$1,20,20,20)`, day)
 	if err != nil {
 		t.Fatal(err)
@@ -27,6 +31,10 @@ func TestBudgetSnapshotUsesCurrentLimitsAndUTCDate(t *testing.T) {
 	}
 	if got.UsedRatio["global_violation"] != 0 {
 		t.Fatal("missing scope did not zero-fill")
+	}
+	// Moving only the previous-day counter into view must not resurrect it.
+	if _, err := f.pool.Exec(f.ctx, `DELETE FROM sending_budget_counters WHERE day=$1`, day); err != nil {
+		t.Fatal(err)
 	}
 	m.WithClock(func() time.Time { return day.Add(24 * time.Hour) })
 	got, err = m.BudgetSnapshot(f.ctx)

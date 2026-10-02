@@ -135,3 +135,29 @@ func TestBudgetObservationDoesNotPublishFailedConsume(t *testing.T) {
 		t.Fatalf("failed consume emitted %d samples", count)
 	}
 }
+
+func TestBudgetObservationSharedTrustCeiling(t *testing.T) {
+	f := newFixture(t)
+	samples := map[string]int{}
+	sendingpolicy.SetBudgetObserver(func(scope, decision string) { samples[scope+"/"+decision]++ })
+	t.Cleanup(func() { sendingpolicy.SetBudgetObserver(nil) })
+	p := sendingpolicy.DisabledPolicy()
+	p.AccountTrustEnabled = true
+	p.DisableLegacyDailyBudgets = true
+	g := f.gate(p)
+	user := f.user("standard")
+	f.plan(user, "scale")
+	if _, err := f.pool.Exec(f.ctx, `INSERT INTO account_sending_trust(user_id,archived_clean_days) VALUES($1,30)`, user); err != nil {
+		t.Fatal(err)
+	}
+	agent := f.agent(user)
+	if d := f.send(g, f.message(agent, "relay", 50)); !d.Allow {
+		t.Fatal(d)
+	}
+	if d := f.send(g, f.message(agent, "relay", 1)); d.Allow {
+		t.Fatal("expected shared ceiling hold")
+	}
+	if samples["account_shared_daily/hold"] != 1 || samples["account_daily/hold"] != 0 {
+		t.Fatalf("shared ceiling mislabeled: %v", samples)
+	}
+}
