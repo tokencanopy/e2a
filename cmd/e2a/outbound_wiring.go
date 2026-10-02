@@ -142,6 +142,7 @@ func installSendingPolicyObservers(m telemetry.Metrics) {
 	// Ledger retention: rows deleted per ledger table (on the shared janitor
 	// counter) and one run-outcome sample per pass.
 	sendingpolicy.SetLedgerRetentionObserver(m)
+	sendingpolicy.SetBudgetObserver(m.SendingBudgetDecision)
 }
 
 // nonEmpty returns the non-blank values, so an unset config string does not

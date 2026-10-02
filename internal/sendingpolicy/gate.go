@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -401,6 +400,7 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 		return Decision{}, AttemptRef{}, err
 	}
 	if deniedScope != "" {
+		emitBudgetSamples([]budgetSample{{deniedScope, "hold"}})
 		return holdDecision(holdReasonForScope(deniedScope), nextUTCMidnight(day)), out, nil
 	}
 	return allowDecision(), out, nil
@@ -541,7 +541,8 @@ func (m *Module) ConsumeAttempt(ctx context.Context, ref AttemptRef) (Decision, 
 		return decision, nil, nil
 	}
 
-	decision, err = m.reauthorizeBudget(ctx, tx, state)
+	var samples []budgetSample
+	decision, err = m.reauthorizeBudget(ctx, tx, state, &samples)
 	if err != nil {
 		return Decision{}, nil, err
 	}
@@ -549,6 +550,7 @@ func (m *Module) ConsumeAttempt(ctx context.Context, ref AttemptRef) (Decision, 
 		if err := m.commit(ctx, tx, "consume budget hold"); err != nil {
 			return Decision{}, nil, err
 		}
+		emitBudgetSamples(samples)
 		return decision, nil, nil
 	}
 
@@ -559,6 +561,7 @@ func (m *Module) ConsumeAttempt(ctx context.Context, ref AttemptRef) (Decision, 
 	if err := m.commit(ctx, tx, "consume authorize"); err != nil {
 		return Decision{}, nil, err
 	}
+	emitBudgetSamples(samples)
 	return allowDecision(), auth, nil
 }
 
@@ -1070,7 +1073,7 @@ func (m *Module) releaseStoredUnits(ctx context.Context, tx pgx.Tx, st authState
 // the acquisition cannot deadlock against each other or against another worker
 // doing the mirror image. A denial leaves the attempt released rather than
 // half-charged: a later fire-time pass re-arms it from scratch.
-func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState) (Decision, error) {
+func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState, samples *[]budgetSample) (Decision, error) {
 	stored := st.stored
 
 	// Trusted first-party accounts and the disabled budget mode both mean "no
@@ -1089,7 +1092,9 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 		if exempt || st.op.Purpose == PurposeTrustedSystem {
 			return allowDecision(), nil
 		}
-		if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
+		rampErr := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day)
+		appendAccountTrustSamples(samples, st, rampErr)
+		if err := rampErr; err != nil {
 			// releaseStoredUnits above already gave back whatever an earlier
 			// Reserve was holding, so every hold here leaves the ledger clean.
 			if hold, ok := rampHoldFor(err, st.day); ok {
@@ -1128,16 +1133,21 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 
 	deniedScope := Scope("")
 	for _, key := range currentKeys {
+		decision := "allow"
 		if !plan.acquire(ledgerRef{counterKey: key, Day: st.day}, st.units) {
 			deniedScope = key.Scope
-			if st.policy.BudgetMode == ModeEnforce {
-				break
+			decision = "hold"
+			if st.policy.BudgetMode == ModeShadow {
+				decision = "would_hold"
+				// Preserve actual demand beyond the cap during observation.
+				plan.overrun(ledgerRef{counterKey: key, Day: st.day}, st.units)
 			}
-			// Shadow deliberately overruns. Clamping the counter at the limit
-			// would make the shadow window prove only that the limit exists;
-			// what the rollout gate needs is the real aggregate demand, which
-			// is only visible if the counter is allowed past the cap.
-			plan.overrun(ledgerRef{counterKey: key, Day: st.day}, st.units)
+		}
+		if st.units > 0 && observeBudgetScope(st.policy, key.Scope) {
+			*samples = append(*samples, budgetSample{key.Scope, decision})
+		}
+		if deniedScope != "" && st.policy.BudgetMode == ModeEnforce {
+			break
 		}
 	}
 
@@ -1165,10 +1175,6 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 		return holdDecision(holdReasonForScope(deniedScope), nextUTCMidnight(st.day)), nil
 	}
 
-	if deniedScope != "" {
-		log.Printf("[sending-protection] shadow denial: purpose=%s scope=%s operation=%s units=%d",
-			st.op.Purpose, deniedScope, st.op.OperationID, st.units)
-	}
 	if err := plan.flush(ctx, tx); err != nil {
 		return Decision{}, err
 	}
@@ -1178,7 +1184,9 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 	// units this transaction just took are given straight back — holding them
 	// would charge an account for a send its own domain was not allowed to
 	// make.
-	if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
+	rampErr := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day)
+	appendAccountTrustSamples(samples, st, rampErr)
+	if err := rampErr; err != nil {
 		hold, ok := rampHoldFor(err, st.day)
 		if !ok {
 			return Decision{}, err
