@@ -49,6 +49,7 @@ type sendingProtectionFlags struct {
 	pauseClass    string
 	evidenceRef   string
 
+	policyFile         string
 	expectedGeneration int64
 	expectedPolicySHA  string
 	grandfather        bool
@@ -73,6 +74,9 @@ func (f *sendingProtectionFlags) commandRequested() bool {
 // modify, before anything starts: `-all` alone would otherwise be ignored
 // and the server would boot as if nothing had been asked.
 func (f *sendingProtectionFlags) validateStandalone() error {
+	if f.policyFile != "" && !f.inspect && !f.activate {
+		return errors.New("-sending-protection-policy-file requires -sending-protection-policy or -activate-sending-protection-policy")
+	}
 	if f.listAll && !f.listExternal {
 		return errors.New("-all is only valid with -list-external-sending-requests")
 	}
@@ -133,13 +137,37 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 	if err != nil {
 		return err
 	}
+	candidate := policy
+	if f.policyFile != "" {
+		candidate, err = readSendingPolicyFile(f.policyFile)
+		if err != nil {
+			return err
+		}
+	}
 	module := sendingpolicy.NewModule(pool, secrets)
 
 	switch {
 	case f.inspect:
-		return runPolicyInspect(ctx, module, source, policy, stdout)
+		if err := runPolicyInspect(ctx, module, source, policy, stdout); err != nil {
+			return err
+		}
+		if f.policyFile != "" {
+			hash, err := sendingpolicy.Hash(candidate)
+			if err != nil {
+				return err
+			}
+			canonical, err := sendingpolicy.CanonicalBytes(candidate)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "candidate_policy_sha256:  %s\ncandidate_policy_canonical: %s\n", hash, canonical)
+		}
+		return nil
 	case f.activate:
-		return runPolicyActivate(ctx, module, policy, f, stdout)
+		if !candidate.AllControlsDisabled() && (secrets.Keyring == nil || secrets.Recipients == nil) {
+			return errors.New("activating enabled sending controls requires both sending-protection trust roots")
+		}
+		return runPolicyActivate(ctx, module, candidate, f, stdout)
 	case f.register:
 		return runOperatorRegister(ctx, module, secrets.Recipients, f, stdout)
 	case f.attest:
@@ -206,10 +234,9 @@ func runPolicyInspect(ctx context.Context, module *sendingpolicy.Module, source 
 	return nil
 }
 
-// runPolicyActivate performs one reviewed CAS. There is no separately mounted
-// policy file: the payload is built from the same validated config the server
-// would use, and mutation requires the operator to present the exact hash they
-// reviewed. Any mismatch is zero writes.
+// runPolicyActivate performs one reviewed CAS using the selected file or config
+// payload. The operator must present its exact canonical hash; a mismatch
+// performs no policy or audit writes.
 func runPolicyActivate(ctx context.Context, module *sendingpolicy.Module, policy sendingpolicy.RuntimePolicy, f *sendingProtectionFlags, stdout io.Writer) error {
 	if strings.TrimSpace(f.reason) == "" {
 		return errors.New("-activate-sending-protection-policy requires a nonblank -reason")
@@ -230,7 +257,7 @@ func runPolicyActivate(ctx context.Context, module *sendingpolicy.Module, policy
 		return err
 	}
 	if reviewedHash != configHash {
-		return fmt.Errorf("reviewed hash does not match this config's policy (%s); zero writes performed", configHash)
+		return fmt.Errorf("reviewed hash does not match the selected policy (%s); zero writes performed", configHash)
 	}
 
 	snapshot, err := module.ActivatePolicy(ctx, sendingpolicy.ActivationRequest{

@@ -551,16 +551,17 @@ func HashBytes(canonical []byte) string {
 // ParsePolicy decodes and validates a stored or configured policy. Unknown
 // fields are rejected: a payload written by a newer binary carrying a control
 // this one does not implement must fail closed, not be silently ignored.
+// Duplicate object keys and trailing content are rejected before typed decoding.
 func ParsePolicy(raw []byte) (RuntimePolicy, error) {
+	if err := rejectDuplicateJSONKeys(string(raw), "policy"); err != nil {
+		return RuntimePolicy{}, err
+	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 
 	var p RuntimePolicy
 	if err := dec.Decode(&p); err != nil {
 		return RuntimePolicy{}, fmt.Errorf("sendingpolicy: decode policy: %w", err)
-	}
-	if dec.More() {
-		return RuntimePolicy{}, fmt.Errorf("sendingpolicy: trailing content after policy object")
 	}
 	if err := p.Validate(); err != nil {
 		return RuntimePolicy{}, err
