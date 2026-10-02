@@ -33,6 +33,7 @@ export class AgentIdentity {
     'outboundAllowlist'?: Array<string> | null;
     'outboundPolicy': string;
     'outboundPolicyAction': string;
+    'outboundRequireReview': boolean;
     'outboundScan': string;
     'outboundScanBlockThreshold': number;
     'outboundScanReviewThreshold': number;
@@ -171,6 +172,12 @@ export class AgentIdentity {
             "name": "outboundPolicyAction",
             "baseName": "outbound_policy_action",
             "type": "string",
+            "format": ""
+        },
+        {
+            "name": "outboundRequireReview",
+            "baseName": "outbound_require_review",
+            "type": "boolean",
             "format": ""
         },
         {

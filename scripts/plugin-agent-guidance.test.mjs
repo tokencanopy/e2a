@@ -137,9 +137,7 @@ test("the setup guide reaches a verified first inbox", async () => {
 
 const assertAlwaysReviewGuidance = (source, file) => {
   assert.match(source, /update_protection/, file);
-  assert.match(source, /outbound_gate_policy["`:\s]+allowlist/, file);
-  assert.match(source, /outbound_gate_allowlist["`:\s]+\[\]/, file);
-  assert.match(source, /outbound_gate_action["`:\s]+review/, file);
+  assert.match(source, /outbound_require_review["`:\s]+true/, file);
   assert.match(source, /holds_on_expiry["`:\s]+reject/, file);
   assert.match(source, /open.*review.*hold(?:s|ing)? nothing/is, file);
   assert.match(source, /only when the user (?:asks|requests)/i, file);

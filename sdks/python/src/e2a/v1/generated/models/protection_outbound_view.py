@@ -17,23 +17,22 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict
-from typing import Any, ClassVar, Dict, List
-from e2a.v1.generated.models.protection_direction_request import ProtectionDirectionRequest
-from e2a.v1.generated.models.protection_holds_request import ProtectionHoldsRequest
-from e2a.v1.generated.models.protection_outbound_request import ProtectionOutboundRequest
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from typing import Any, ClassVar, Dict, List, Optional
+from e2a.v1.generated.models.protection_gate_view import ProtectionGateView
+from e2a.v1.generated.models.protection_scan_view import ProtectionScanView
 from typing import Optional, Set
 from typing_extensions import Self
 
-class ProtectionConfigRequest(BaseModel):
+class ProtectionOutboundView(BaseModel):
     """
-    ProtectionConfigRequest
+    ProtectionOutboundView
     """ # noqa: E501
-    holds: ProtectionHoldsRequest
-    inbound: ProtectionDirectionRequest
-    outbound: ProtectionOutboundRequest
+    gate: ProtectionGateView
+    require_review: Optional[StrictBool] = Field(default=False, description="When true, hold every outbound send for review regardless of the gate policy, allowlist, or non-match action. A content scan can still block a message that crosses the scan block threshold.")
+    scan: ProtectionScanView
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["holds", "inbound", "outbound"]
+    __properties: ClassVar[List[str]] = ["gate", "require_review", "scan"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -53,7 +52,7 @@ class ProtectionConfigRequest(BaseModel):
 
     @classmethod
     def from_json(cls, json_str: str) -> Optional[Self]:
-        """Create an instance of ProtectionConfigRequest from a JSON string"""
+        """Create an instance of ProtectionOutboundView from a JSON string"""
         return cls.from_dict(json.loads(json_str))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -76,15 +75,12 @@ class ProtectionConfigRequest(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
-        # override the default output from pydantic by calling `to_dict()` of holds
-        if self.holds:
-            _dict['holds'] = self.holds.to_dict()
-        # override the default output from pydantic by calling `to_dict()` of inbound
-        if self.inbound:
-            _dict['inbound'] = self.inbound.to_dict()
-        # override the default output from pydantic by calling `to_dict()` of outbound
-        if self.outbound:
-            _dict['outbound'] = self.outbound.to_dict()
+        # override the default output from pydantic by calling `to_dict()` of gate
+        if self.gate:
+            _dict['gate'] = self.gate.to_dict()
+        # override the default output from pydantic by calling `to_dict()` of scan
+        if self.scan:
+            _dict['scan'] = self.scan.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
@@ -94,7 +90,7 @@ class ProtectionConfigRequest(BaseModel):
 
     @classmethod
     def from_dict(cls, obj: Optional[Dict[str, Any]]) -> Optional[Self]:
-        """Create an instance of ProtectionConfigRequest from a dict"""
+        """Create an instance of ProtectionOutboundView from a dict"""
         if obj is None:
             return None
 
@@ -102,9 +98,9 @@ class ProtectionConfigRequest(BaseModel):
             return cls.model_validate(obj)
 
         _obj = cls.model_validate({
-            "holds": ProtectionHoldsRequest.from_dict(obj["holds"]) if obj.get("holds") is not None else None,
-            "inbound": ProtectionDirectionRequest.from_dict(obj["inbound"]) if obj.get("inbound") is not None else None,
-            "outbound": ProtectionOutboundRequest.from_dict(obj["outbound"]) if obj.get("outbound") is not None else None
+            "gate": ProtectionGateView.from_dict(obj["gate"]) if obj.get("gate") is not None else None,
+            "require_review": obj.get("require_review") if obj.get("require_review") is not None else False,
+            "scan": ProtectionScanView.from_dict(obj["scan"]) if obj.get("scan") is not None else None
         })
         # store additional fields in additional_properties
         for _key in obj.keys():
