@@ -167,6 +167,10 @@ type Metrics interface {
 	// with the ledger table as the label.
 	SendingLedgerRetentionRun(outcome string)
 
+	// SendingBudgetDecision records a committed per-scope gate evaluation.
+	SendingBudgetDecision(scope, decision string)
+	SendingBudgetSnapshot(usedRatio map[string]float64, generation int64, mismatch bool, observedAt float64)
+
 	// WebhookAttempt records one webhook delivery attempt. outcome ∈
 	// {delivered, retryable_failure, exhausted, webhook_deleted,
 	// skipped_disabled}. statusClass is the HTTP status class of the
@@ -606,3 +610,11 @@ func (l *Log) SetThreadRelationshipPercent(string, float64) {}
 // Compile guard.
 var _ Metrics = NoOp{}
 var _ Metrics = (*Log)(nil)
+
+func (NoOp) SendingBudgetDecision(string, string) {}
+func (l *Log) SendingBudgetDecision(scope, decision string) {
+	log.Printf("[metrics] event=sending_budget.decision scope=%s decision=%s", enum(sendingBudgetScopeSet, scope), enum(sendingBudgetDecisionSet, decision))
+}
+
+func (NoOp) SendingBudgetSnapshot(map[string]float64, int64, bool, float64) {}
+func (*Log) SendingBudgetSnapshot(map[string]float64, int64, bool, float64) {}

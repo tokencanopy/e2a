@@ -1163,6 +1163,10 @@ func main() {
 	// (The auto-disable janitor is now a River periodic on QueueMaintenance; the
 	// legacy SubscriberRetryWorker is gone.)
 	bgCtx, bgCancel := context.WithCancel(context.Background())
+	if promBackend != nil {
+		workerWG.Add(1)
+		go func() { defer workerWG.Done(); observeSendingBudgets(bgCtx, outboundSending.module, metrics) }()
+	}
 
 	// Outbox publisher worker: drains webhook_events → subscriber_deliveries and
 	// enqueues River delivery jobs in-tx. Skipped when fan-out runs on River

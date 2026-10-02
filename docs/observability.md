@@ -193,6 +193,49 @@ Ambiguous anchors also emit a structured, process-wide rate-limited log (at
 most one line per minute). It contains only candidate/thread counts: no
 addresses, subjects, message content, or RFC Message-IDs.
 
+### Sending budget observation
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `e2a_sending_budget_decisions_total` | counter | `scope`, `decision` | Committed gate evaluations. Decisions: `allow`, `would_hold` (shadow), `hold` (enforced). |
+| `e2a_sending_budget_deferrals_total` | counter | `scope` | Enforced budget/trust holds; the same events as decisions with `decision="hold"`. |
+| `e2a_sending_budget_used_ratio` | gauge | `scope` | Current UTC day's reserved units (including confirmed units), divided by the effective policy limit. Global pools only. Shadow demand can exceed 1. |
+| `e2a_sending_protection_policy_generation` | gauge | — | Effective database policy generation; 0 for config source. |
+| `e2a_sending_protection_policy_config_mismatch` | gauge | — | Database policy differs from local config (1), or matches/config source (0). Intentional database activation can produce a mismatch. |
+| `e2a_sending_budget_observation_last_success_timestamp_seconds` | gauge | — | Unix timestamp of the last successful policy/counter snapshot; 0 before the first successful sample. |
+
+Decision scopes are the closed set `global_all`, `account_daily`,
+`account_shared_daily`, `global_probation`, `global_critical`, and
+`global_violation`. Unknown labels normalize to `other`. No account, operation,
+message, domain, recipient, or raw policy value is a label.
+
+Reserve reports early holds only; Consume reports each evaluated scope. Shadow
+mode reports every exceeded pool. Enforced evaluation stops at its first budget
+hold, so an earlier pool's `allow` does not mean the whole send was allowed.
+Account trust checks also report account/shared evaluations when enabled,
+including when platform budgets are disabled. If both legacy account budgets
+and account trust are enabled, both checks can report the same scope. Disabled
+legacy account/shared/probation checks emit no decisions. These counters count
+evaluations, not recipients, unique messages, or SMTP calls: retries can add
+samples, and a crash after commit but before emission can lose a sample.
+Rolled-back transactions do not emit samples. The former shadow-denial log
+containing operation identifiers is replaced by these bounded observations.
+
+Each process with Prometheus enabled samples immediately and every 30 seconds,
+with a 5-second timeout. One read-only database snapshot reads the effective
+policy and four indexed global-pool counters; it never scans account rows.
+The UTC date and observation timestamp come from PostgreSQL, matching the
+clock used by authorization. Missing counters report zero, and disabled legacy
+probation reports zero.
+Ratios use the current policy limit, not a historical limit cached in the
+counter row. `/metrics` performs no database queries. A failed sample retains
+the previous gauges and timestamp; zero or stale freshness is not evidence of
+unused capacity. Filter out stale samples before evaluating usage, and
+aggregate these shared-ledger ratios across replicas with **max**, not sum.
+Inspect generation, mismatch, and freshness separately for each serving slot.
+These observations do not change policy, enable enforcement, or establish
+readiness of the operator-recipient registry.
+
 ### Maintenance
 
 | Metric | Type | Labels | Meaning |
