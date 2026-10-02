@@ -110,7 +110,8 @@ func main() {
 	// migrations and exits without starting the server.
 	var spFlags sendingProtectionFlags
 	flag.BoolVar(&spFlags.inspect, "sending-protection-policy", false, "print the stored runtime policy state and the hash this config's policy would activate, then exit")
-	flag.BoolVar(&spFlags.activate, "activate-sending-protection-policy", false, "CAS-activate this config's sending-protection policy (requires -expected-generation, -expected-policy-sha256, -reason), then exit")
+	flag.BoolVar(&spFlags.activate, "activate-sending-protection-policy", false, "CAS-activate the selected sending-protection policy (file, or config if absent; requires -expected-generation, -expected-policy-sha256, -reason), then exit")
+	flag.StringVar(&spFlags.policyFile, "sending-protection-policy-file", "", "reviewed runtime-policy JSON file for inspection or activation (maximum 64 KiB; no config/env overrides)")
 	flag.Int64Var(&spFlags.expectedGeneration, "expected-generation", -1, "policy generation the operator reviewed (activation CAS)")
 	flag.StringVar(&spFlags.expectedPolicySHA, "expected-policy-sha256", "", "reviewed canonical policy hash (activation CAS)")
 	flag.BoolVar(&spFlags.grandfather, "grandfather-current-sending-domains", false, "one-shot: exempt currently sending-verified domains in the same transaction as the activation")
@@ -1000,7 +1001,7 @@ func main() {
 	// /v1 contract, so it lives on this mux and never enters api/openapi.yaml.
 	// The verdict is refreshed on a background ticker, so this handler never
 	// competes for a pooled connection — see readyz.go for why that matters.
-	readiness := newReadinessMonitor(pool, &draining)
+	readiness := newReadinessMonitor(pool, &draining, outboundSending.module)
 	defer readiness.Stop()
 	router.HandleFunc("/readyz", readiness.handler()).Methods(http.MethodGet)
 	// /selftest — deep dependency diagnostics (health+json), auth-gated by the

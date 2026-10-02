@@ -368,6 +368,12 @@ func (m *Module) ActivatePolicy(ctx context.Context, req ActivationRequest) (Pol
 // keeps the read/selection boundary explicit and composes with bootstrap or
 // repair tooling that might be running concurrently.
 func (m *Module) requireSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx, version int) error {
+	return m.checkSelectedOperatorRecipient(ctx, tx, version, " FOR SHARE")
+}
+
+// Readiness uses a consistent read-only snapshot; authorization and activation
+// retain their share lock through the wrapper above.
+func (m *Module) checkSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx, version int, lockClause string) error {
 	recipients := m.secrets.Recipients
 	if recipients == nil {
 		return fmt.Errorf("%w: local operator recipient map is not loaded", ErrOperatorRecipientUnavailable)
@@ -382,7 +388,7 @@ func (m *Module) requireSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx
 	err := tx.QueryRow(ctx,
 		`SELECT commitment_key_id, recipient_commitment
 		   FROM sending_operator_recipient_versions
-		  WHERE logical_version = $1 FOR SHARE`, version,
+		  WHERE logical_version = $1`+lockClause, version,
 	).Scan(&registeredKeyID, &registeredCommitment)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: logical version %d is not registered",

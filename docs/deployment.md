@@ -77,9 +77,10 @@ If you leave `shared_domain` empty, slug registration is disabled and every agen
 Wire your orchestrator to the two probe endpoints — they answer different
 questions and must not be swapped: `GET /api/health` is shallow liveness
 (restart policy; never checks the DB), `GET /readyz` is instance-local
-readiness (DB reachable + migrations applied + not draining; use it for load
+readiness (DB reachable + migrations applied + not draining; database-policy
+mode also validates the runtime policy and selected recipient registry entry). Use it for load
 balancer routing so instances leave rotation during deploys and graceful
-shutdown). Enable Prometheus metrics with the `metrics:` config block (or
+shutdown. Enable Prometheus metrics with the `metrics:` config block (or
 `E2A_METRICS_ENABLED=true`) — exposition binds a separate loopback-default
 listener, never the public API handler. For continuous black-box monitoring
 of the full critical path (SMTP round-trip, outbound, WebSocket push, MCP),
