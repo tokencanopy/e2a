@@ -11,6 +11,12 @@ export {};
 const PRIVACY_ENV_KEY = "NEXT_PUBLIC_PRIVACY_URL";
 const TERMS_ENV_KEY = "NEXT_PUBLIC_TERMS_URL";
 
+// Legal links must never render through next/link's <Link> — see the
+// comment on legalFooterLinks() in lib/site.ts for why (same-origin legal
+// paths can resolve outside this Next app, and <Link> prefetches the
+// route's RSC payload regardless). This mock tags anything that DOES go
+// through <Link> with a marker attribute so a Link-rendered legal link is
+// distinguishable from a plain <a> even though both render as <a> tags.
 jest.mock("next/link", () => {
   return function MockLink({
     href,
@@ -22,7 +28,7 @@ jest.mock("next/link", () => {
     [key: string]: unknown;
   }) {
     return (
-      <a href={href} {...props}>
+      <a href={href} {...props} data-next-link="true">
         {children}
       </a>
     );
@@ -70,6 +76,23 @@ describe("LegalFooterLinks", () => {
     expect(screen.getByRole("link", { name: "Terms" })).toHaveAttribute(
       "href",
       "/terms",
+    );
+  });
+
+  it("renders same-origin Privacy/Terms as plain anchors, never next/link's <Link>", () => {
+    // A same-origin legal path (e.g. "/privacy") may resolve outside this
+    // Next app on the hosted deployment (Caddy serves it as a static page,
+    // not a Next route). Rendering it with <Link> would prefetch a route
+    // this app doesn't own and 404. Regression coverage for that bug.
+    process.env[PRIVACY_ENV_KEY] = "/privacy";
+    process.env[TERMS_ENV_KEY] = "/terms";
+    const { LegalFooterLinks } = loadLegalFooterLinks();
+    render(<LegalFooterLinks />);
+    expect(screen.getByRole("link", { name: "Privacy" })).not.toHaveAttribute(
+      "data-next-link",
+    );
+    expect(screen.getByRole("link", { name: "Terms" })).not.toHaveAttribute(
+      "data-next-link",
     );
   });
 });

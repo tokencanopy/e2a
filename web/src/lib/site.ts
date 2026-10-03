@@ -92,7 +92,14 @@ export function isExternalURL(url: string): boolean {
   }
 }
 
-export type LegalLink = { label: string; href: string; external: boolean };
+export type LegalLink = {
+  label: string;
+  href: string;
+  external: boolean;
+  // Always true for these entries — see the comment on legalFooterLinks()
+  // below for why they must never be rendered with next/link's <Link>.
+  plain: boolean;
+};
 
 // Privacy/Terms entries for a public-page footer, in display order. Each
 // entry is present only when its URL is configured — see PRIVACY_URL /
@@ -100,13 +107,34 @@ export type LegalLink = { label: string; href: string; external: boolean };
 // a self-host or staging build. Centralized here so the landing page, blog,
 // docs, and MCP footers all present the same pair rather than each growing
 // its own copy that can drift.
+//
+// `plain: true` marks every entry here as operator-supplied and possibly
+// outside this Next app's own routing — the hosted deployment serves
+// /privacy and /terms as static pages via a Caddy route, not as Next routes.
+// Next's <Link> prefetches the target route's RSC payload on viewport/hover
+// regardless of whether that route exists in this app, so using it for a
+// same-origin legal path 404s the prefetch request in production even
+// though the visible link works. Callers must render `plain` entries with a
+// bare <a> — same-origin opens with no target, cross-origin (`external`)
+// keeps target="_blank" rel="noopener noreferrer" — and never next/link's
+// <Link>, even though the href looks same-origin.
 export function legalFooterLinks(): LegalLink[] {
   const links: LegalLink[] = [];
   if (PRIVACY_URL) {
-    links.push({ label: "Privacy", href: PRIVACY_URL, external: isExternalURL(PRIVACY_URL) });
+    links.push({
+      label: "Privacy",
+      href: PRIVACY_URL,
+      external: isExternalURL(PRIVACY_URL),
+      plain: true,
+    });
   }
   if (TERMS_URL) {
-    links.push({ label: "Terms", href: TERMS_URL, external: isExternalURL(TERMS_URL) });
+    links.push({
+      label: "Terms",
+      href: TERMS_URL,
+      external: isExternalURL(TERMS_URL),
+      plain: true,
+    });
   }
   return links;
 }
