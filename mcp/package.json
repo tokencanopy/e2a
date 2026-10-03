@@ -51,7 +51,7 @@
   "bugs": "https://github.com/tokencanopy/e2a/issues",
   "dependencies": {
     "@e2a/sdk": "^5.0.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "cors": "^2.8.5",
     "express": "^5.0.0",
     "zod": "^4.6.5"
@@ -59,10 +59,10 @@
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
-    "@types/node": "^26.6.1",
+    "@types/node": "^26.6.3",
     "@types/supertest": "^7.2.0",
-    "@vitest/coverage-v8": "^5.0.1",
-    "supertest": "^7.0.0",
+    "@vitest/coverage-v8": "^5.0.2",
+    "supertest": "^7.3.0",
     "typescript": "^7.0",
     "vitest": "^5.0.0"
   }
