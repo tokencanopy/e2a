@@ -446,6 +446,24 @@ guard for you:
 await client.messages.delete("bot@agents.e2a.dev", "msg_abc123", permanent=True)
 ```
 
+`client.account.delete()` follows the same trash-by-default pattern: every
+API key, OAuth grant, and dashboard session is revoked at once, every agent
+is trashed, and sending stops immediately, but the account itself stays
+restorable by signing in to the dashboard before the receipt's
+`purge_after` (API keys stay revoked and custom domains must be
+re-verified after a restore; there is no API restore call). Pass
+`permanent=True` for the old behavior — irreversible erasure right away
+(both the async and sync clients accept the keyword-only argument):
+
+```python
+receipt = await client.account.delete()  # mode: "trash", purge_after set
+await client.account.delete(permanent=True)  # mode: "permanent", erased at once
+```
+
+`messages_deleted` is always `0` on the trash path; the other counts on
+`DeleteUserDataResult` describe rows trashed/revoked/unverified rather than
+deleted, and `user_deleted` is `True` only for `mode="permanent"`.
+
 ## WebSocket (real-time delivery for local agents)
 
 ```python
