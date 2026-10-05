@@ -93,7 +93,9 @@ config-source rollback path.
 schema-versioned JSON object. Schema 1 includes the stored policy generation,
 hash and selected recipient version, distinct HMAC versions needed by unexpired
 feedback and owner-notice authorizations, distinct operator versions needed by
-unexpired notice authorizations, and the permanent recipient registry. Lists
+unexpired notice authorizations, and the permanent recipient registry. Current
+authorized attempts continue to pin their keys beyond nominal expiry until they
+are superseded or redeemed, matching ledger retention. Lists
 are sorted; empty lists are `[]`. It emits no account/message identifiers,
 addresses, secret bytes or audit actors. Capabilities advertise
 `sending_key_inventory_schema: 1` when the command is supported.

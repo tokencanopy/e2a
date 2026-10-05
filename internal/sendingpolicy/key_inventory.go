@@ -86,15 +86,19 @@ func readKeyInventory(ctx context.Context, tx pgx.Tx) (KeyInventory, error) {
 	}
 	// The same notice version column holds two different namespaces. Audience,
 	// not purpose, determines which one. Keep even started attempts until expiry.
-	// An orphaned notice reference is ambiguous and must block rather than vanish.
+	// Current authorizations remain redeemable beyond nominal expiry (the same
+	// conservative boundary as ledger retention). An orphaned notice reference is ambiguous and must block rather than vanish.
 	rows, err = tx.Query(ctx, `
  SELECT DISTINCT 'hmac',r.hmac_key_version
  FROM sending_feedback_recipients r JOIN sending_feedback_correlations c USING(correlation_id)
  WHERE c.expires_at IS NULL OR c.expires_at>now()
  UNION
  SELECT DISTINCT CASE d.audience WHEN 'owner' THEN 'hmac' WHEN 'operator' THEN 'recipient' ELSE 'unknown' END,r.notice_recipient_version
- FROM sending_budget_reservations r LEFT JOIN sending_protection_notice_deliveries d ON d.current_operation_id=r.operation_id
- WHERE r.notice_recipient_version IS NOT NULL AND r.expires_at>now() AND r.call_state IN ('authorized','started')
+ FROM sending_budget_reservations r
+ LEFT JOIN sending_protection_notice_deliveries d ON d.current_operation_id=r.operation_id
+ LEFT JOIN sending_provider_operations o ON o.operation_id=r.operation_id
+ WHERE r.notice_recipient_version IS NOT NULL AND r.call_state IN ('authorized','started')
+ AND (r.expires_at>now() OR (r.call_state='authorized' AND r.submission_attempt>=o.current_attempt))
  ORDER BY 1,2 LIMIT 4097`)
 	if err != nil {
 		return out, err

@@ -120,3 +120,25 @@ func TestKeyInventoryBoundAndRedaction(t *testing.T) {
 		t.Fatalf("partial result or unsafe error: %+v %v", got, err)
 	}
 }
+
+func TestKeyInventoryPinsExpiredCurrentAuthorization(t *testing.T) {
+	m, pool := newModule(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO sending_protection_notice_events(id,account_ref,kind,reason_code,budget_scope,ledger_day,expires_at) VALUES('notice_expired','account_test','budget_violation','budget_limit','account_daily',current_date,now()+interval '1 day')`,
+		`INSERT INTO sending_protection_notice_deliveries(event_id,audience,current_operation_id) VALUES('notice_expired','owner','expired_op')`,
+		`INSERT INTO sending_provider_operations(operation_id,policy_subject_ref,purpose,current_attempt,expires_at) VALUES('expired_op','subject_test','violation_operational',2,now()-interval '1 day')`,
+		`INSERT INTO sending_budget_reservations(operation_id,submission_attempt,policy_subject_ref,purpose,day,units,probation,state,call_state,authorization_nonce,notice_recipient_version,notice_recipient_commitment,expires_at) VALUES ('expired_op',1,'subject_test','violation_operational',current_date,1,false,'confirmed','authorized','nonce_old',23,'old_hmac',now()-interval '1 day'),('expired_op',2,'subject_test','violation_operational',current_date,1,false,'confirmed','authorized','nonce_current',24,'current_hmac',now()-interval '1 day')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := m.KeyInventory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.RequiredHMACVersions, []int{24}) {
+		t.Fatalf("expired current authorization must pin key, superseded must not: %v", got.RequiredHMACVersions)
+	}
+}
