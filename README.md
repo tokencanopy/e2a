@@ -342,6 +342,8 @@ domains/webhooks in the **web dashboard**.
 | `e2a metrics [<email>]` | Print delivery counters — account rollup, or one inbox (`--by-agent`, `--by-day`, `--json`) |
 | `e2a listen --agent <email>` | Stream inbound email for an agent over WebSocket (real-time; `--json` for raw, `--forward <url>` to bridge to a local HTTP handler) |
 | `e2a config [list\|get\|set]` | View or update the local config |
+| `e2a account delete` | Delete your account — moves to trash by default, restorable by signing back in; `--permanent --yes` erases immediately |
+| `e2a sending-access status\|request` | Check or request external sending access when the account is restricted to a shared-identity allowlist (beta) |
 
 When the `--forward <url>` endpoint path ends in `/v1/responses`, `listen` switches to **OpenAI Responses API forwarding**: each inbound email is formatted as a Responses payload and the model's output is sent back as an auto-reply. Add `--forward-token <token>` to attach a bearer token to the forwarded request:
 

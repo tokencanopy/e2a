@@ -285,7 +285,11 @@ take the agent `address` as the first argument. Beyond the resource tree,
 [WebSocket](#websocket-real-time-delivery-for-local-agents)). Also on `client.messages`:
 `getLifecycle(email, messageId, { cursor, limit })` (beta, 5.3.0) — page
 through a message's canonical lifecycle transitions (send, delivery, bounce,
-review, deletion, …).
+review, deletion, …); and `getMetrics(email, { start?, end? })` (beta, 5.7.0) —
+per-agent cohort-window delivery counters with null-safe rates.
+`client.account.metrics({ start?, end?, groupBy?: "agent", bucket?: "day" })`
+(beta, 5.7.0, account-scoped) rolls up the same counters across every agent,
+optionally broken down per-agent or bucketed by UTC day.
 
 Two more, both account-scoped: `client.reviews` — the human-review queue for
 messages held in `pending_review` (outbound drafts awaiting send approval,
