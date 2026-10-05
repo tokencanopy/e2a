@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -605,5 +606,35 @@ func TestListExternalSendingRequestsReportsTruncation(t *testing.T) {
 	// Newest first: the most recent request (g=1) is shown, the oldest dropped.
 	if !strings.Contains(out.String(), "esar_trunc_1\n") || strings.Contains(out.String(), fmt.Sprintf("esar_trunc_%d\n", sendingpolicy.MaxAccessRequestListing+1)) {
 		t.Fatal("-all must keep the newest requests when truncating")
+	}
+}
+
+func TestSendingKeyInventoryCommand(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.TestDB(t)
+	var out bytes.Buffer
+	flags := &sendingProtectionFlags{inventory: true}
+	if !flags.commandRequested() || flags.selectedCount() != 1 {
+		t.Fatal("inventory is not a standalone command")
+	}
+	if err := runSendingProtectionCommand(ctx, spTestConfig(), pool, sendingpolicy.Secrets{}, flags, &out); err != nil {
+		t.Fatal(err)
+	}
+	var inventory sendingpolicy.KeyInventory
+	if err := json.Unmarshal(out.Bytes(), &inventory); err != nil {
+		t.Fatalf("not a JSON contract: %v", err)
+	}
+	if inventory.SchemaVersion != 1 || inventory.RequiredHMACVersions == nil || inventory.RecipientRegistry == nil {
+		t.Fatalf("invalid inventory: %+v", inventory)
+	}
+	flags.inspect = true
+	out.Reset()
+	if err := runSendingProtectionCommand(ctx, spTestConfig(), pool, sendingpolicy.Secrets{}, flags, &out); err == nil || out.Len() != 0 {
+		t.Fatal("multiple commands accepted")
+	}
+	flags.inspect = false
+	flags.policyFile = "unused.json"
+	if err := flags.validateStandalone(); err == nil {
+		t.Fatal("policy file accepted for inventory")
 	}
 }

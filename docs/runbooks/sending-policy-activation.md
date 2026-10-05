@@ -86,3 +86,30 @@ readiness immediately. `/api/health` remains shallow liveness.
 Config-source deployments do not depend on stored policy or registry rows for
 readiness. This preserves the existing self-host defaults and the explicit
 config-source rollback path.
+
+## Read retained key requirements before a rotation
+
+`e2a -config config.yaml -sending-protection-key-inventory` prints a single
+schema-versioned JSON object. Schema 1 includes the stored policy generation,
+hash and selected recipient version, distinct HMAC versions needed by unexpired
+feedback and owner-notice authorizations, distinct operator versions needed by
+unexpired notice authorizations, and the permanent recipient registry. Lists
+are sorted; empty lists are `[]`. It emits no account/message identifiers,
+addresses, secret bytes or audit actors. Capabilities advertise
+`sending_key_inventory_schema: 1` when the command is supported.
+
+The read runs in one consistent read-only transaction, with a ten-second
+operation timeout and a 4,096-entry limit for registry and combined reference
+sets. A corrupt policy, ambiguous orphaned notice authorization, query failure,
+or exceeded bound returns a fixed error and no partial JSON. Startup migrations
+still precede the operator command. It never registers or repairs records.
+
+Inventory is evidence, not a lock against new authorizations. During deployment,
+retain both the old and new active signing keys in both slots, and retain every
+policy-selected recipient as well as outstanding references. Add keys to both
+slots before selecting a new signer. Serialize operator policy/secret changes
+with deployment; a snapshot does not make concurrent selector changes safe.
+Compare every configured operator commitment against permanent history even
+when its original secret payload has been retired. An absent registry entry for
+a selected version requires explicit registration before permitting rotation.
+Deployment tooling must recheck before cutover and rerun on manual rollback.
