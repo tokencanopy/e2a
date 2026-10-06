@@ -430,6 +430,23 @@ trashed agents):
 await client.agents.delete("bot@agents.e2a.dev", { permanent: true });
 ```
 
+`account.delete()` follows the same trash-by-default pattern: every API key,
+OAuth grant, and dashboard session is revoked at once, every agent is
+trashed, and sending stops immediately, but the account itself stays
+restorable by signing in to the dashboard before the receipt's `purgeAfter`
+(API keys stay revoked and custom domains must be re-verified after a
+restore; there is no API restore call). Pass `{ permanent: true }` for the
+old behavior — irreversible erasure right away:
+
+```ts
+const receipt = await client.account.delete(); // mode: "trash", purgeAfter set
+await client.account.delete({ permanent: true }); // mode: "permanent", erased at once
+```
+
+`messagesDeleted` is always `0` on the trash path; the other counts on
+`DeleteUserDataResult` describe rows trashed/revoked/unverified rather than
+deleted, and `userDeleted` is `true` only for `mode: "permanent"`.
+
 ## Application correlation and email threads
 
 `conversationId` is an optional, caller-owned opaque value for correlating mail
