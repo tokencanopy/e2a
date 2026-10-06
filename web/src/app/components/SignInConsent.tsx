@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { PRIVACY_URL, TERMS_URL } from "../../lib/site";
 
 // Rendered directly beneath the primary "Sign in" call to action — the
@@ -35,11 +34,16 @@ function LegalAnchor({
   children: React.ReactNode;
 }) {
   const style: React.CSSProperties = { textDecoration: "underline" };
+  // Legal URLs are operator-supplied and may resolve outside this Next app
+  // (the hosted deployment serves /privacy and /terms as static Caddy
+  // routes, not Next pages) — always a plain <a>, never next/link's <Link>,
+  // which would prefetch the route's RSC payload and 404 against a path
+  // Next doesn't own. See lib/site.ts's legalFooterLinks for the full story.
   if (href.startsWith("/")) {
     return (
-      <Link href={href} style={style}>
+      <a href={href} style={style}>
         {children}
-      </Link>
+      </a>
     );
   }
   return (
