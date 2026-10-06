@@ -86,6 +86,7 @@ func LoadSecretsFromEnv(source PolicySource, policy RuntimePolicy) (Secrets, err
 // gate. It carries commitments only: no addresses, no key material, no
 // customer data.
 type Capabilities struct {
+	KeyInventorySchema        int               `json:"sending_key_inventory_schema"`
 	SendingProtectionContract int               `json:"sending_protection_contract"`
 	RuntimePolicySource       string            `json:"runtime_policy_source"`
 	OperatorCommitments       map[string]string `json:"operator_notice_recipient_commitments"`
@@ -116,6 +117,7 @@ func BuildCapabilities(source PolicySource, secrets Secrets) Capabilities {
 		commitments = secrets.Recipients.Commitments()
 	}
 	return Capabilities{
+		KeyInventorySchema:        1,
 		SendingProtectionContract: ContractLevel,
 		RuntimePolicySource:       string(source),
 		OperatorCommitments:       commitments,

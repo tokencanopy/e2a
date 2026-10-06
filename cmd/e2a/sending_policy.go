@@ -24,6 +24,7 @@ import (
 // invocation; each runs after migrations and exits without starting the
 // server, following the -bootstrap-email pattern.
 type sendingProtectionFlags struct {
+	inventory    bool
 	inspect      bool
 	activate     bool
 	register     bool
@@ -65,7 +66,7 @@ type sendingProtectionFlags struct {
 }
 
 func (f *sendingProtectionFlags) commandRequested() bool {
-	return f.inspect || f.activate || f.register || f.attest || f.capabilities || f.reconcile ||
+	return f.inventory || f.inspect || f.activate || f.register || f.attest || f.capabilities || f.reconcile ||
 		f.inspectExternal || f.approveExternal || f.revokeExternal || f.declineExternal || f.listExternal ||
 		f.pauseAccount || f.resumeAccount || f.inspectPause
 }
@@ -85,7 +86,7 @@ func (f *sendingProtectionFlags) validateStandalone() error {
 
 func (f *sendingProtectionFlags) selectedCount() int {
 	n := 0
-	for _, set := range []bool{f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile,
+	for _, set := range []bool{f.inventory, f.inspect, f.activate, f.register, f.attest, f.capabilities, f.reconcile,
 		f.inspectExternal, f.approveExternal, f.revokeExternal, f.declineExternal, f.listExternal,
 		f.pauseAccount, f.resumeAccount, f.inspectPause} {
 		if set {
@@ -147,6 +148,12 @@ func runSendingProtectionCommand(ctx context.Context, cfg *config.Config, pool *
 	module := sendingpolicy.NewModule(pool, secrets)
 
 	switch {
+	case f.inventory:
+		inventory, err := module.KeyInventory(ctx)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(inventory)
 	case f.inspect:
 		if err := runPolicyInspect(ctx, module, source, policy, stdout); err != nil {
 			return err

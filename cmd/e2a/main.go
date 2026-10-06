@@ -109,6 +109,7 @@ func main() {
 	// Sending-protection local operator commands (Task 2). Each runs after
 	// migrations and exits without starting the server.
 	var spFlags sendingProtectionFlags
+	flag.BoolVar(&spFlags.inventory, "sending-protection-key-inventory", false, "print non-secret retained key references and permanent recipient registry as JSON, then exit")
 	flag.BoolVar(&spFlags.inspect, "sending-protection-policy", false, "print the stored runtime policy state and the hash this config's policy would activate, then exit")
 	flag.BoolVar(&spFlags.activate, "activate-sending-protection-policy", false, "CAS-activate the selected sending-protection policy (file, or config if absent; requires -expected-generation, -expected-policy-sha256, -reason), then exit")
 	flag.StringVar(&spFlags.policyFile, "sending-protection-policy-file", "", "reviewed runtime-policy JSON file for inspection or activation (maximum 64 KiB; no config/env overrides)")
