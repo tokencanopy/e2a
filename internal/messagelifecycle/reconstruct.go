@@ -624,10 +624,7 @@ func reconstructedID(messageID, sourceKind, sourceID, recipient string, reason R
 }
 
 func bounded(value string) string {
-	if len(value) <= maxDiagnosticStringBytes {
-		return value
-	}
-	return value[:maxDiagnosticStringBytes]
+	return SafeDiagnostic(value)
 }
 
 func cloneTransition(item MessageLifecycleTransition) MessageLifecycleTransition {
