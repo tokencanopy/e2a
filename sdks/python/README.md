@@ -335,7 +335,12 @@ attachments within the server's 256 KB inline cap.
 methods take the agent `address` first. Also on `client.messages`:
 `get_lifecycle(email, message_id, *, cursor=None, limit=None)` (beta) —
 page through a message's canonical lifecycle transitions (send, delivery,
-bounce, review, deletion, …).
+bounce, review, deletion, …); and `get_metrics(email, *, start=None,
+end=None)` (beta) — per-agent cohort-window delivery counters with
+`None`-safe rates. `client.account.metrics(*, start=None, end=None,
+group_by=None, bucket=None)` (beta, account-scoped) rolls up the same
+counters across every agent, optionally `group_by="agent"` or
+`bucket="day"`.
 
 Two more, both account-scoped: `client.reviews` — the human-review queue for
 messages held in `pending_review` (outbound drafts awaiting send approval,
