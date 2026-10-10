@@ -546,4 +546,6 @@ local server commands (`-approve-external-sending` / `-revoke-external-sending`
 with a revision CAS and append-only `external_sending_access_events`); no API
 credential can grant access. Owner-mailbox proof
 (`users.owner_email_verified_at` + the bound address) is written only by a
-verified Google login.
+verified Google login, or by an OIDC login whose ID token asserts
+`email_verified` for the account's current email (requires the `email` scope
+in `oidc.scopes`).

@@ -222,7 +222,7 @@ func (oa *OIDCAuth) discoverWithRetry(ctx context.Context) {
 					ClientSecret: oa.cfg.ClientSecret,
 					RedirectURL:  oa.cfg.RedirectURL,
 					Endpoint:     provider.Endpoint(),
-					Scopes:       []string{oidc.ScopeOpenID},
+					Scopes:       oa.cfg.EffectiveScopes(),
 				},
 				verifier: provider.Verifier(&oidc.Config{ClientID: oa.cfg.ClientID}),
 			})
@@ -602,6 +602,7 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	oa.recordOwnerEmailProof(r.Context(), user, claims)
 	sessionToken, err := oa.store.CreateUserSession(r.Context(), user.ID)
 	if err != nil {
 		oa.recordCallback("session_failed", "trusted", http.StatusInternalServerError, true)
@@ -656,6 +657,33 @@ func (oa *OIDCAuth) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	oa.recordCallback("success", "trusted", http.StatusFound, false)
 	http.Redirect(w, r, oa.baseURL+"/dashboard", http.StatusFound)
+}
+
+// recordOwnerEmailProof records owner-mailbox proof (external sending access)
+// when the ID token asserts a verified email equal to the account's email.
+//
+// Trust argument: the ID token was signature-verified against the issuer's
+// keys with audience and nonce checks, and the user_id_claim binds the login
+// to this exact account. email_verified is the IdP's own assertion, accepted
+// only as a JSON boolean true (a string "true" is not verified). Equality with
+// the account's CURRENT email is re-checked in SQL, so an email change between
+// lookup and write cannot record proof for a different address. Call only for
+// non-trashed accounts. Best effort: failure never fails the login, and the
+// email and raw claims are never logged. A missing, unverified or mismatching
+// claim silently records nothing.
+func (oa *OIDCAuth) recordOwnerEmailProof(ctx context.Context, user *identity.User, claims map[string]any) {
+	email, _ := claims["email"].(string)
+	verified, _ := claims["email_verified"].(bool)
+	if !verified || strings.TrimSpace(email) == "" {
+		return
+	}
+	// Same trim+lowercase rule as sendingpolicy.NormalizeOwnerMailbox.
+	if strings.ToLower(strings.TrimSpace(email)) != strings.ToLower(strings.TrimSpace(user.Email)) {
+		return
+	}
+	if _, err := oa.store.RecordOIDCOwnerEmailProof(ctx, user.ID, email); err != nil {
+		log.Printf("[auth] record owner email proof failed: user=%s err=%v", user.ID, err)
+	}
 }
 
 func isOIDCRequestCancellation(ctx context.Context, err error) bool {

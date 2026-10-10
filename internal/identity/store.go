@@ -6192,6 +6192,32 @@ func (s *Store) RecordGoogleOwnerEmailProof(ctx context.Context, userID, googleS
 	return tag.RowsAffected() == 1, nil
 }
 
+// RecordOIDCOwnerEmailProof records that an OIDC login whose verified ID token
+// asserted email_verified for verifiedEmail just proved the owner mailbox. The
+// caller has already verified the token and bound it to userID; the write is
+// guarded again in SQL: the account must not be trashed and its current email
+// must equal the verified address. Returns whether proof was recorded.
+func (s *Store) RecordOIDCOwnerEmailProof(ctx context.Context, userID, verifiedEmail string) (bool, error) {
+	// Same trim+lowercase rule as sendingpolicy.NormalizeOwnerMailbox (which
+	// identity may not import).
+	normalized := strings.ToLower(strings.TrimSpace(verifiedEmail))
+	if userID == "" || normalized == "" {
+		return false, nil
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE users
+		   SET owner_email_verified_at = now(),
+		       owner_email_verified_address = $2,
+		       owner_email_verified_source = 'oidc'
+		 WHERE id = $1 AND deleted_at IS NULL
+		   AND lower(btrim(email)) = $2`,
+		userID, normalized)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // SetAccountClass sets a user's account_class (standard|internal|system|demo).
 // Used by the prober's seed to mark the synthetic probe account as system so its
 // traffic is never metered (see usage.PolicyFor). The CHECK constraint in

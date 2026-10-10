@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -245,6 +246,32 @@ type OIDCConfig struct {
 	// deployments can use this to cascade logout through their OIDC control
 	// plane; it is never taken from a request parameter.
 	LogoutURL string `yaml:"logout_url"`
+	// Scopes are the OAuth scopes requested at the authorization endpoint.
+	// Default ["openid"]; it must contain "openid". Add "email" so the ID
+	// token carries email/email_verified, which lets a verified login record
+	// owner-mailbox proof. Override with E2A_OIDC_SCOPES (comma-separated).
+	// Only list scopes the provider's client registration allows, or logins
+	// fail with invalid_scope.
+	//
+	// TRUST: enable "email" only against an IdP that sets email_verified=true
+	// solely after a mailbox confirmation and resets it when the address
+	// changes. Some providers let a tenant admin set a mutable unverified
+	// email or report admin-set addresses as verified. A false proof unlocks
+	// owner-mailbox sending for a restricted account and also exempts sends
+	// to that address from the erase-defer check.
+	Scopes []string `yaml:"scopes"`
+}
+
+// DefaultOIDCScopes is the scope list used when oidc.scopes is unset.
+var DefaultOIDCScopes = []string{"openid"}
+
+// EffectiveScopes returns Scopes, or the default when none are configured.
+// Load already defaults; this exists for configs built without Load (tests).
+func (c OIDCConfig) EffectiveScopes() []string {
+	if len(c.Scopes) == 0 {
+		return append([]string(nil), DefaultOIDCScopes...)
+	}
+	return append([]string(nil), c.Scopes...)
 }
 
 type SigningConfig struct {
@@ -922,6 +949,20 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OIDC_LOGOUT_URL"); v != "" {
 		cfg.OIDC.LogoutURL = v
 	}
+	if v := os.Getenv("E2A_OIDC_SCOPES"); v != "" {
+		var scopes []string
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				scopes = append(scopes, part)
+			}
+		}
+		if len(scopes) == 0 {
+			// Only commas/whitespace: keep an empty entry so Validate fails
+			// at boot instead of silently using the default.
+			scopes = []string{""}
+		}
+		cfg.OIDC.Scopes = scopes
+	}
 	if v := os.Getenv("E2A_DELEGATED_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Delegated.Enabled = b
@@ -1109,6 +1150,12 @@ func Load(path string) (*Config, error) {
 	if cfg.HTTP.APIURL == "" {
 		cfg.HTTP.APIURL = cfg.HTTP.PublicURL
 	}
+	for i, scope := range cfg.OIDC.Scopes {
+		cfg.OIDC.Scopes[i] = strings.TrimSpace(scope)
+	}
+	if len(cfg.OIDC.Scopes) == 0 {
+		cfg.OIDC.Scopes = cfg.OIDC.EffectiveScopes()
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -1205,6 +1252,24 @@ func (c *Config) Validate() error {
 		redirectURL, err := absoluteHTTPURL(c.OIDC.RedirectURL)
 		if err != nil || redirectURL.Fragment != "" {
 			return fmt.Errorf("config: oidc.redirect_url must be an absolute http(s) URL without a fragment")
+		}
+	}
+	if len(c.OIDC.Scopes) > 0 {
+		seen := make(map[string]struct{}, len(c.OIDC.Scopes))
+		for _, scope := range c.OIDC.Scopes {
+			if strings.TrimSpace(scope) == "" {
+				return fmt.Errorf("config: oidc.scopes must not contain an empty entry")
+			}
+			if strings.IndexFunc(scope, unicode.IsSpace) >= 0 {
+				return fmt.Errorf("config: oidc.scopes entry %q contains whitespace; list each scope separately", scope)
+			}
+			if _, dup := seen[scope]; dup {
+				return fmt.Errorf("config: oidc.scopes contains duplicate entry %q", scope)
+			}
+			seen[scope] = struct{}{}
+		}
+		if _, ok := seen["openid"]; !ok {
+			return fmt.Errorf("config: oidc.scopes must include \"openid\"")
 		}
 	}
 	if c.OIDC.LogoutURL != "" {

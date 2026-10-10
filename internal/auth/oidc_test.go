@@ -23,6 +23,7 @@ import (
 
 	jose "github.com/go-jose/go-jose/v3"
 	"github.com/go-jose/go-jose/v3/jwt"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/auth"
 	"github.com/tokencanopy/e2a/internal/config"
@@ -63,6 +64,8 @@ type oidcFixture struct {
 	includeIDToken    bool
 	includeUserID     bool
 	userIDClaimValue  any
+	extraClaims       map[string]any
+	scopes            []string
 	tokenStatus       int
 	tokenFailureBody  string
 	tokenFailureType  string
@@ -149,6 +152,11 @@ func setupOIDCWithOptions(t *testing.T, opts ...auth.OIDCOption) *oidcFixture {
 
 func setupOIDCForAppWithOptions(t *testing.T, redirectURL, baseURL string, opts ...auth.OIDCOption) *oidcFixture {
 	t.Helper()
+	return setupOIDCFull(t, redirectURL, baseURL, nil, opts...)
+}
+
+func setupOIDCFull(t *testing.T, redirectURL, baseURL string, scopesForFixture []string, opts ...auth.OIDCOption) *oidcFixture {
+	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
@@ -184,6 +192,7 @@ func setupOIDCForAppWithOptions(t *testing.T, redirectURL, baseURL string, opts 
 		ClientSecret: testOIDCClientSecret,
 		RedirectURL:  redirectURL,
 		UserIDClaim:  testOIDCUserIDClaim,
+		Scopes:       scopesForFixture,
 	}
 	oidcOpts := []auth.OIDCOption{
 		auth.WithOIDCDiscoveryBackoff(testOIDCDiscoveryInitialBackoff, testOIDCDiscoveryMaxBackoff),
@@ -342,6 +351,9 @@ func (fx *oidcFixture) signIDToken(ctx context.Context) string {
 			value = fx.userID
 		}
 		private[testOIDCUserIDClaim] = value
+	}
+	for k, v := range fx.extraClaims {
+		private[k] = v
 	}
 	token, err := jwt.Signed(signer).Claims(claims).Claims(private).CompactSerialize()
 	if err != nil {
@@ -1630,5 +1642,106 @@ func TestOIDCCallbackIgnoresResumeCookieWithIncompleteCLIPair(t *testing.T) {
 	}
 	if got, want := w.Header().Get("Location"), "http://app.example.com/dashboard"; got != want {
 		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestOIDCLoginRequestsConfiguredScopes(t *testing.T) {
+	fx := setupOIDCFull(t, testOIDCRedirectURL, "http://app.example.com", []string{"openid", "email"})
+	w := httptest.NewRecorder()
+	fx.oidc.HandleLogin(w, httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil))
+	location, err := url.Parse(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if got := location.Query().Get("scope"); got != "openid email" {
+		t.Errorf("scope = %q, want %q", got, "openid email")
+	}
+}
+
+type ownerProofRow struct {
+	address, source *string
+}
+
+func readOwnerProof(t *testing.T, fx *oidcFixture, userID string) ownerProofRow {
+	t.Helper()
+	var row ownerProofRow
+	pool, err := pgxpool.New(context.Background(), testutil.TestDBURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	err = pool.QueryRow(context.Background(),
+		`SELECT owner_email_verified_address, owner_email_verified_source FROM users WHERE id = $1`, userID).
+		Scan(&row.address, &row.source)
+	if err != nil {
+		t.Fatalf("read owner proof: %v", err)
+	}
+	return row
+}
+
+func TestOIDCCallbackOwnerEmailProof(t *testing.T) {
+	cases := []struct {
+		name      string
+		claims    map[string]any
+		trash     bool
+		wantProof bool
+		wantAddr  string
+	}{
+		{"verified match", map[string]any{"email": "owner@example.com", "email_verified": true}, false, true, "owner@example.com"},
+		{"unverified", map[string]any{"email": "owner@example.com", "email_verified": false}, false, false, ""},
+		{"string true is not verified", map[string]any{"email": "owner@example.com", "email_verified": "true"}, false, false, ""},
+		{"different email", map[string]any{"email": "other@example.com", "email_verified": true}, false, false, ""},
+		{"case and whitespace", map[string]any{"email": "  Owner@Example.COM ", "email_verified": true}, false, true, "owner@example.com"},
+		{"claims absent", nil, false, false, ""},
+		{"numeric 1 is not verified", map[string]any{"email": "owner@example.com", "email_verified": 1}, false, false, ""},
+		{"numeric 1.0 is not verified", map[string]any{"email": "owner@example.com", "email_verified": 1.0}, false, false, ""},
+		{"email without verified flag", map[string]any{"email": "owner@example.com"}, false, false, ""},
+		{"trashed account", map[string]any{"email": "owner@example.com", "email_verified": true}, true, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := setupOIDC(t)
+			ctx := context.Background()
+			user, err := fx.store.CreateOrGetUser(ctx, "owner@example.com", "Owner", "google-sub-"+strings.ReplaceAll(tc.name, " ", "-"))
+			if err != nil {
+				t.Fatalf("CreateOrGetUser: %v", err)
+			}
+			if tc.trash {
+				if _, err := fx.store.TrashAccount(ctx, user.ID, nil); err != nil {
+					t.Fatalf("TrashAccount: %v", err)
+				}
+			}
+			fx.userID = user.ID
+			fx.extraClaims = tc.claims
+			tx := beginOIDCLogin(t, fx)
+
+			w := httptest.NewRecorder()
+			fx.oidc.HandleCallback(w, callbackRequest(tx, "code=valid-code&state="+url.QueryEscape(tx.state)))
+			if w.Code != http.StatusFound {
+				t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
+			}
+			session := findCookie(w.Result().Cookies(), auth.SessionCookieName)
+			if tc.trash {
+				assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "account_trashed", trust: "trusted", statusClass: "3xx"})
+			} else {
+				if got := w.Header().Get("Location"); got != "http://app.example.com/dashboard" {
+					t.Errorf("Location = %q", got)
+				}
+				if session == nil || session.Value == "" {
+					t.Fatal("expected session cookie")
+				}
+				assertCallbackMetric(t, fx, oidcMetricEvent{outcome: "success", trust: "trusted", statusClass: "3xx"})
+			}
+			row := readOwnerProof(t, fx, user.ID)
+			if !tc.wantProof {
+				if row.address != nil || row.source != nil {
+					t.Fatalf("unexpected proof recorded: %+v", row)
+				}
+				return
+			}
+			if row.address == nil || *row.address != tc.wantAddr || row.source == nil || *row.source != "oidc" {
+				t.Fatalf("proof = %+v, want address %q source oidc", row, tc.wantAddr)
+			}
+		})
 	}
 }
