@@ -1463,6 +1463,33 @@ func resolveOutboundConversationID(explicit, msgType string, referenced *identit
 	return identity.NewConversationID()
 }
 
+// messageSendReserver is the accept-time reservation surface a limits
+// Enforcer may expose (limits.DBEnforcer does). It is asserted rather than
+// added to limits.Enforcer so test enforcers that only pre-check stay
+// unchanged, and an enforcer without it keeps today's pre-check-only
+// behavior.
+type messageSendReserver interface {
+	ReserveMessageSendTx(ctx context.Context, tx pgx.Tx, userID string, units int) error
+}
+
+// limitExceededDetails mirrors httpapi.LimitExceededDetails for a 402 raised
+// inside the accept transaction, so both the pre-check and the reservation
+// produce the same envelope details.
+func limitExceededDetails(le *limits.LimitExceededError) map[string]any {
+	d := map[string]any{
+		"resource": le.Resource,
+		"limit":    le.Limit,
+		"current":  le.Current,
+	}
+	if le.Limits.PlanCode != "" {
+		d["plan_code"] = le.Limits.PlanCode
+	}
+	if le.Limits.UpgradeURL != "" {
+		d["upgrade_url"] = le.Limits.UpgradeURL
+	}
+	return d
+}
+
 func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *identity.AgentIdentity, req outbound.SendRequest, msgType, replyToEmailMessageID string, referenced *identity.Message, idemCompleteTx AcceptIdemCompleter) (*OutboundResult, *OutboundError) {
 	parentMessageID := ""
 	if msgType == "reply" && referenced != nil {
@@ -1598,6 +1625,11 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	if scheduledAt != nil {
 		acceptStatus = "scheduled"
 	}
+	// Units this send costs, counted with the same normalizer the terminal
+	// meter uses. Only immediate sends reserve here: a scheduled send's flow
+	// cap is judged against the month it fires in by the worker's fire-time
+	// gate, not the month it was accepted in.
+	units := identity.UniqueRecipientCount(comp.To, comp.CC, comp.BCC)
 	var accepted *identity.Message
 	// Crash boundary:
 	//   - Before Commit returns, WithTx rolls back the message, River job, and
@@ -1608,6 +1640,17 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 	//     202/message id. Without a key, that ambiguous retry is a new request and
 	//     may enqueue a duplicate (the public guarantee is at-least-once).
 	if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
+		// The accept-time quota reservation runs first, before the insert, so
+		// the count it reads under the per-user lock cannot miss a send this
+		// transaction is racing. An immediate send that would cross
+		// max_messages_month is refused with the message row rolled back.
+		if scheduledAt == nil {
+			if reserver, ok := a.enforcer.(messageSendReserver); ok {
+				if err := reserver.ReserveMessageSendTx(ctx, tx, user.ID, units); err != nil {
+					return err
+				}
+			}
+		}
 		msg, err := a.store.CreateOutboundMessageThreadedTx(ctx, tx, parentMessageID, agent.ID, comp.To, comp.CC, comp.BCC, req.Subject, msgType, comp.Method, "", req.ConversationID, comp.Raw, "accepted", comp.EnvelopeFrom, comp.SentAs)
 		if err != nil {
 			return err
@@ -1638,6 +1681,17 @@ func (a *API) DeliverOutbound(ctx context.Context, user *identity.User, agent *i
 		accepted = msg
 		return nil
 	}); txErr != nil {
+		if le, ok := limits.IsLimitExceeded(txErr); ok {
+			// The accept-time reservation refused this send; the message row
+			// rolled back with it. Carry the same 402 details the pre-check
+			// path produces so the handler renders one envelope shape.
+			return nil, &OutboundError{
+				Status:  http.StatusPaymentRequired,
+				Code:    "limit_exceeded",
+				Msg:     le.Error(),
+				Details: limitExceededDetails(le),
+			}
+		}
 		if errors.Is(txErr, outboundsend.ErrSendingPaused) {
 			// The account is paused for sending abuse: refuse at the door
 			// rather than queue mail that can never leave. Nothing was
@@ -1767,6 +1821,14 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 	}
 	var accepted *identity.Message
 	if txErr := a.store.WithTx(ctx, func(tx pgx.Tx) error {
+		// Same accept-time reservation as DeliverOutbound's immediate branch:
+		// the platform test send is metered against the owner's flow cap, so
+		// it must reserve before inserting too.
+		if reserver, ok := a.enforcer.(messageSendReserver); ok {
+			if err := reserver.ReserveMessageSendTx(ctx, tx, agent.UserID, identity.UniqueRecipientCount(comp.To, comp.CC, comp.BCC)); err != nil {
+				return err
+			}
+		}
 		msg, err := a.store.CreateOutboundMessageTx(ctx, tx, agent.ID, comp.To, comp.CC, comp.BCC, req.Subject, msgType, comp.Method, "", req.ConversationID, comp.Raw, "accepted", comp.EnvelopeFrom, comp.SentAs)
 		if err != nil {
 			return err
@@ -1781,6 +1843,14 @@ func (a *API) acceptPlatformSend(ctx context.Context, agent *identity.AgentIdent
 		accepted = msg
 		return nil
 	}); txErr != nil {
+		if le, ok := limits.IsLimitExceeded(txErr); ok {
+			return nil, &OutboundError{
+				Status:  http.StatusPaymentRequired,
+				Code:    "limit_exceeded",
+				Msg:     le.Error(),
+				Details: limitExceededDetails(le),
+			}
+		}
 		if errors.Is(txErr, outboundsend.ErrSendingPaused) {
 			return nil, &OutboundError{Status: http.StatusForbidden, Code: "sending_paused", Msg: "sending is paused for this account"}
 		}

@@ -52,6 +52,13 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// rowQuerier is the subset of *pgxpool.Pool and pgx.Tx the counters need, so
+// the same read serves both the pooling callers and the accept-time
+// reservation running on the accept transaction.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
@@ -207,24 +214,49 @@ func (s *Store) CountDomainsByUser(ctx context.Context, userID string) (int, err
 }
 
 // MessagesThisMonth returns the user's OUTBOUND recipient-delivery count
-// for the current UTC calendar month, summed from usage_summaries.
-// Inbound mail is recorded (inbound_count feeds analytics and dashboards)
-// but is free and unmetered — it does not consume the monthly allowance.
-// Returns 0 with no error if the user has no rows yet. The reference is
-// time.Now().UTC() so server clocks crossing midnight UTC roll the
-// counter consistently with the daily bucket_date written by
+// for the current UTC calendar month: the terminally-metered total from
+// usage_summaries plus the units of sends that are durably accepted but not
+// yet terminal. Inbound mail is recorded (inbound_count feeds analytics and
+// dashboards) but is free and unmetered — it does not consume the monthly
+// allowance. Returns 0 with no error if the user has no usage yet. The
+// reference is time.Now().UTC() so server clocks crossing midnight UTC roll
+// the counter consistently with the daily bucket_date written by
 // IncrementUsageSummary.
+//
+// The accepted-but-unmetered units are the accept-time quota reservations:
+// the metering write happens only at a send's terminal outcome, so without
+// counting the accepted rows every send already in flight would be invisible
+// to the cap and a burst could all pass against the same pre-increment total.
 func (s *Store) MessagesThisMonth(ctx context.Context, userID string) (int, error) {
+	return s.messagesThisMonth(ctx, s.pool, userID)
+}
+
+// MessagesThisMonthTx is MessagesThisMonth on a caller-owned transaction. The
+// accept-time reservation reads under the per-user advisory lock, and doing
+// that read on the accept transaction's own connection keeps it from needing a
+// second pool connection while the lock is held (a saturated pool would
+// otherwise deadlock the accept path).
+func (s *Store) MessagesThisMonthTx(ctx context.Context, tx pgx.Tx, userID string) (int, error) {
+	return s.messagesThisMonth(ctx, tx, userID)
+}
+
+func (s *Store) messagesThisMonth(ctx context.Context, q rowQuerier, userID string) (int, error) {
 	now := time.Now().UTC()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	var count int
-	err := s.pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`SELECT COALESCE(SUM(outbound_count), 0)
 		   FROM usage_summaries
 		  WHERE user_id = $1 AND bucket_date >= $2`,
-		userID, monthStart,
-	).Scan(&count)
-	return count, err
+		userID, monthStart.Format("2006-01-02"),
+	).Scan(&count); err != nil {
+		return 0, err
+	}
+	pending, err := s.pendingOutboundUnits(ctx, q, userID, monthStart, monthStart.AddDate(0, 1, 0))
+	if err != nil {
+		return 0, err
+	}
+	return count + pending, nil
 }
 
 // MessagesToday returns the user's OUTBOUND recipient-delivery count for
@@ -232,16 +264,62 @@ func (s *Store) MessagesThisMonth(ctx context.Context, userID string) (int, erro
 // no error if the user has no row for today. Shares CurrentDate()'s UTC
 // bucketing with IncrementUsageSummary so the day rolls consistently.
 func (s *Store) MessagesToday(ctx context.Context, userID string) (int, error) {
+	return s.messagesToday(ctx, s.pool, userID)
+}
+
+// MessagesTodayTx is MessagesToday on a caller-owned transaction; see
+// MessagesThisMonthTx for why the reservation reads on the accept tx.
+func (s *Store) MessagesTodayTx(ctx context.Context, tx pgx.Tx, userID string) (int, error) {
+	return s.messagesToday(ctx, tx, userID)
+}
+
+func (s *Store) messagesToday(ctx context.Context, q rowQuerier, userID string) (int, error) {
 	var count int
-	err := s.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT outbound_count FROM usage_summaries
 		  WHERE user_id = $1 AND bucket_date = $2`,
 		userID, CurrentDate(),
 	).Scan(&count)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
 	}
-	return count, err
+	now := time.Now().UTC()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	pending, err := s.pendingOutboundUnits(ctx, q, userID, dayStart, dayStart.AddDate(0, 0, 1))
+	if err != nil {
+		return 0, err
+	}
+	return count + pending, nil
+}
+
+// pendingOutboundUnits returns the recipient-delivery units of outbound
+// messages created in [from, until) that are durably accepted but have not
+// reached a terminal delivery status. These rows are the accept-time quota
+// reservations that make MessagesThisMonth / MessagesToday see a concurrent
+// burst. Scheduled sends are excluded — their quota is judged against the
+// target month by the fire-time gate, not the month they were accepted in —
+// and review holds are excluded because they are re-checked when released.
+// Units are the deduplicated to ∪ cc ∪ bcc set, matching
+// identity.UniqueRecipientCount and the units IncrementUsageSummary writes.
+func (s *Store) pendingOutboundUnits(ctx context.Context, q rowQuerier, userID string, from, until time.Time) (int, error) {
+	var units int
+	err := q.QueryRow(ctx, `
+		SELECT COALESCE(SUM((
+			SELECT count(DISTINCT lower(trim(addr)))
+			  FROM unnest(COALESCE(m.to_recipients, '{}') || COALESCE(m.cc, '{}') || COALESCE(m.bcc, '{}')) AS addr
+			 WHERE trim(addr) <> ''
+		)), 0)
+		  FROM messages m
+		  JOIN agent_identities a ON a.id = m.agent_id
+		 WHERE a.user_id = $1
+		   AND m.direction = 'outbound'
+		   AND m.delivery_status IN ('accepted', 'sending', 'queued')
+		   AND m.status IS DISTINCT FROM 'pending_review'
+		   AND m.scheduled_at IS NULL
+		   AND m.created_at >= $2
+		   AND m.created_at < $3`,
+		userID, from, until).Scan(&units)
+	return units, err
 }
 
 // GetStorageBytes returns the user's current materialized storage bytes
