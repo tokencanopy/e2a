@@ -1,6 +1,7 @@
 package mailparse
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,61 @@ func TestBase64Decoded(t *testing.T) {
 	got, _ := ParsedBody([]byte(raw), 0)
 	if got != "Hello base64" {
 		t.Fatalf("base64 decode: got %q", got)
+	}
+}
+
+func TestParseBase64Padding(t *testing.T) {
+	cases := []struct {
+		name, contentType, body, wantText string
+	}{
+		{"plain two padding characters", "text/plain", "test", "test"},
+		{"plain one padding character", "text/plain", "hello", "hello"},
+		{"html two padding characters", "text/html", "<p>ABC</p>", "ABC"},
+		{"html one padding character", "text/html", "<p>A</p>", "A"},
+	}
+	for _, tc := range cases {
+		for name, encoding := range map[string]*base64.Encoding{
+			"padded":   base64.StdEncoding,
+			"unpadded": base64.RawStdEncoding,
+		} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				encoded := encoding.EncodeToString([]byte(tc.body))
+				// MIME bodies can contain line breaks, spaces, and tabs.
+				encoded = encoded[:4] + " \t\r\n" + encoded[4:]
+				raw := "Content-Type: " + tc.contentType + "\r\n" +
+					"Content-Transfer-Encoding: base64\r\n\r\n" + encoded
+				got := Parse([]byte(raw), 0)
+				if got.Text != tc.wantText || got.Truncated {
+					t.Errorf("Text = %q, Truncated = %v; want %q, false", got.Text, got.Truncated, tc.wantText)
+				}
+				wantHTML := ""
+				if tc.contentType == "text/html" {
+					wantHTML = tc.body
+				}
+				if got.HTML != wantHTML {
+					t.Errorf("HTML = %q, want %q", got.HTML, wantHTML)
+				}
+			})
+		}
+	}
+}
+
+func TestBase64InvalidPreservesRaw(t *testing.T) {
+	for name, raw := range map[string]string{
+		"invalid character after valid prefix": " \tZm9v$\r\n",
+		"impossible length":                    "Zm9vA",
+		"incomplete padding":                   "Zg=",
+		"extra padding":                        "Zg===",
+		"URL-safe alphabet":                    "-_8",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := decode(strings.NewReader(raw), "base64"); got != raw {
+				t.Errorf("decode = %q, want original %q", got, raw)
+			}
+			if got := decodeBytes(strings.NewReader(raw), "base64"); string(got) != raw {
+				t.Errorf("decodeBytes = %q, want original %q", got, raw)
+			}
+		})
 	}
 }
 
