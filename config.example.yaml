@@ -90,6 +90,13 @@ oidc:
   # URL with no query or fragment; do not derive it from browser input.
   # Override: E2A_OIDC_LOGOUT_URL
   logout_url: ""
+  # OAuth scopes requested at login. Default: [openid]. Must include openid.
+  # Add "email" so the ID token carries email/email_verified: a login whose
+  # token asserts email_verified for the account's current email then records
+  # owner-mailbox proof (external sending access). Only add scopes the
+  # provider's client registration allows, or logins fail with invalid_scope.
+  # Override: E2A_OIDC_SCOPES (comma-separated, e.g. "openid,email")
+  # scopes: [openid]
   # Enable with: E2A_OIDC_ENABLED=true
 
 # — Delegated access tokens ——————————————————————————————————————————————————

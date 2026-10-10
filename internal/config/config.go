@@ -245,6 +245,24 @@ type OIDCConfig struct {
 	// deployments can use this to cascade logout through their OIDC control
 	// plane; it is never taken from a request parameter.
 	LogoutURL string `yaml:"logout_url"`
+	// Scopes are the OAuth scopes requested at the authorization endpoint.
+	// Default ["openid"]; it must contain "openid". Add "email" so the ID
+	// token carries email/email_verified, which lets a verified login record
+	// owner-mailbox proof. Override with E2A_OIDC_SCOPES (comma-separated).
+	// Only list scopes the provider's client registration allows, or logins
+	// fail with invalid_scope.
+	Scopes []string `yaml:"scopes"`
+}
+
+// DefaultOIDCScopes is the scope list used when oidc.scopes is unset.
+var DefaultOIDCScopes = []string{"openid"}
+
+// EffectiveScopes returns Scopes, or the default when none are configured.
+func (c OIDCConfig) EffectiveScopes() []string {
+	if len(c.Scopes) == 0 {
+		return append([]string(nil), DefaultOIDCScopes...)
+	}
+	return append([]string(nil), c.Scopes...)
 }
 
 type SigningConfig struct {
@@ -922,6 +940,15 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("E2A_OIDC_LOGOUT_URL"); v != "" {
 		cfg.OIDC.LogoutURL = v
 	}
+	if v := os.Getenv("E2A_OIDC_SCOPES"); v != "" {
+		var scopes []string
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				scopes = append(scopes, part)
+			}
+		}
+		cfg.OIDC.Scopes = scopes
+	}
 	if v := os.Getenv("E2A_DELEGATED_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Delegated.Enabled = b
@@ -1109,6 +1136,9 @@ func Load(path string) (*Config, error) {
 	if cfg.HTTP.APIURL == "" {
 		cfg.HTTP.APIURL = cfg.HTTP.PublicURL
 	}
+	if len(cfg.OIDC.Scopes) == 0 {
+		cfg.OIDC.Scopes = cfg.OIDC.EffectiveScopes()
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -1205,6 +1235,21 @@ func (c *Config) Validate() error {
 		redirectURL, err := absoluteHTTPURL(c.OIDC.RedirectURL)
 		if err != nil || redirectURL.Fragment != "" {
 			return fmt.Errorf("config: oidc.redirect_url must be an absolute http(s) URL without a fragment")
+		}
+	}
+	if len(c.OIDC.Scopes) > 0 {
+		seen := make(map[string]struct{}, len(c.OIDC.Scopes))
+		for _, scope := range c.OIDC.Scopes {
+			if strings.TrimSpace(scope) == "" {
+				return fmt.Errorf("config: oidc.scopes must not contain an empty entry")
+			}
+			if _, dup := seen[scope]; dup {
+				return fmt.Errorf("config: oidc.scopes contains duplicate entry %q", scope)
+			}
+			seen[scope] = struct{}{}
+		}
+		if _, ok := seen["openid"]; !ok {
+			return fmt.Errorf("config: oidc.scopes must include \"openid\"")
 		}
 	}
 	if c.OIDC.LogoutURL != "" {
