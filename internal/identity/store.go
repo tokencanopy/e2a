@@ -151,16 +151,21 @@ type AgentIdentity struct {
 	// outbound_allowlist are the egress recipient gate (open|allowlist|domain);
 	// inbound_scan/outbound_scan toggle the content scan with a review/block
 	// threshold ladder. See docs/design/2026-06-20-agent-screening-hitl.md §4.1.
-	InboundPolicyAction         string   `json:"inbound_policy_action"`
-	OutboundPolicy              string   `json:"outbound_policy"`
-	OutboundAllowlist           []string `json:"outbound_allowlist,omitempty"`
-	OutboundPolicyAction        string   `json:"outbound_policy_action"`
-	InboundScan                 string   `json:"inbound_scan"`
-	InboundScanReviewThreshold  float64  `json:"inbound_scan_review_threshold"`
-	InboundScanBlockThreshold   float64  `json:"inbound_scan_block_threshold"`
-	OutboundScan                string   `json:"outbound_scan"`
-	OutboundScanReviewThreshold float64  `json:"outbound_scan_review_threshold"`
-	OutboundScanBlockThreshold  float64  `json:"outbound_scan_block_threshold"`
+	InboundPolicyAction  string   `json:"inbound_policy_action"`
+	OutboundPolicy       string   `json:"outbound_policy"`
+	OutboundAllowlist    []string `json:"outbound_allowlist,omitempty"`
+	OutboundPolicyAction string   `json:"outbound_policy_action"`
+	// OutboundRequireReview (migration 125, issue #989) holds every outbound
+	// send for review regardless of the gate policy, allowlist, or configured
+	// non-match action. It replaces the empty-allowlist composition ("nothing
+	// matched") as the way to say "we decided to hold everything".
+	OutboundRequireReview       bool    `json:"outbound_require_review"`
+	InboundScan                 string  `json:"inbound_scan"`
+	InboundScanReviewThreshold  float64 `json:"inbound_scan_review_threshold"`
+	InboundScanBlockThreshold   float64 `json:"inbound_scan_block_threshold"`
+	OutboundScan                string  `json:"outbound_scan"`
+	OutboundScanReviewThreshold float64 `json:"outbound_scan_review_threshold"`
+	OutboundScanBlockThreshold  float64 `json:"outbound_scan_block_threshold"`
 	// Scan sensitivity (migration 045) is the protection API's content-scan knob
 	// (off|low|medium|high). It is the read-back source of truth; the float
 	// thresholds above are derived from it on write and are what the piguard
@@ -2223,6 +2228,7 @@ func loadAgentByID(ctx context.Context, exec agentRowQuerier, id string, include
 		        COALESCE(a.inbound_policy, 'open'), a.inbound_allowlist,
 		        a.inbound_policy_action,
 		        a.outbound_policy, a.outbound_allowlist, a.outbound_policy_action,
+		        a.outbound_require_review,
 		        a.inbound_scan, a.inbound_scan_review_threshold, a.inbound_scan_block_threshold,
 		        a.outbound_scan, a.outbound_scan_review_threshold, a.outbound_scan_block_threshold,
 		        a.inbound_scan_sensitivity, a.outbound_scan_sensitivity,
@@ -2241,6 +2247,7 @@ func loadAgentByID(ctx context.Context, exec agentRowQuerier, id string, include
 		&a.InboundPolicy, &a.InboundAllowlist,
 		&a.InboundPolicyAction,
 		&a.OutboundPolicy, &a.OutboundAllowlist, &a.OutboundPolicyAction,
+		&a.OutboundRequireReview,
 		&a.InboundScan, &a.InboundScanReviewThreshold, &a.InboundScanBlockThreshold,
 		&a.OutboundScan, &a.OutboundScanReviewThreshold, &a.OutboundScanBlockThreshold,
 		&a.InboundScanSensitivity, &a.OutboundScanSensitivity,
@@ -2583,6 +2590,7 @@ func (s *Store) listAgentsByUser(ctx context.Context, userID string, limit int, 
 		        COALESCE(a.inbound_policy, 'open'), a.inbound_allowlist,
 		        a.inbound_policy_action,
 		        a.outbound_policy, a.outbound_allowlist, a.outbound_policy_action,
+		        a.outbound_require_review,
 		        a.inbound_scan, a.inbound_scan_review_threshold, a.inbound_scan_block_threshold,
 		        a.outbound_scan, a.outbound_scan_review_threshold, a.outbound_scan_block_threshold,
 		        a.inbound_scan_sensitivity, a.outbound_scan_sensitivity,
@@ -2650,6 +2658,7 @@ func (s *Store) listAgentsByUser(ctx context.Context, userID string, limit int, 
 			&a.InboundPolicy, &a.InboundAllowlist,
 			&a.InboundPolicyAction,
 			&a.OutboundPolicy, &a.OutboundAllowlist, &a.OutboundPolicyAction,
+			&a.OutboundRequireReview,
 			&a.InboundScan, &a.InboundScanReviewThreshold, &a.InboundScanBlockThreshold,
 			&a.OutboundScan, &a.OutboundScanReviewThreshold, &a.OutboundScanBlockThreshold,
 			&a.InboundScanSensitivity, &a.OutboundScanSensitivity,

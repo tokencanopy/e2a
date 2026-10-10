@@ -5,8 +5,8 @@ import { Chip, Eyebrow } from "@e2a/ui";
 import { setProtection } from "../../../components/onboarding/api";
 import type {
   ProtectionConfig,
-  ProtectionGate,
-  ProtectionScan,
+  ProtectionDirection,
+  ProtectionOutboundDirection,
 } from "../../../components/onboarding/types";
 
 // Beta protection editor for the inbox-settings page. Exposes the whole
@@ -48,22 +48,22 @@ type Sensitivity = "off" | "low" | "medium" | "high";
 
 // One direction's draft state (gate policy/action/allowlist + scan).
 // allowlist is kept as raw textarea text; split into lines on save.
+// requireReview is outbound-only; inbound drafts leave it false.
 type DirectionDraft = {
   policy: Policy;
   action: Action;
   allowlist: string;
   scan: Sensitivity;
+  requireReview: boolean;
 };
 
-function directionFromConfig(d: {
-  gate: ProtectionGate;
-  scan: ProtectionScan;
-}): DirectionDraft {
+function directionFromConfig(d: ProtectionDirection | ProtectionOutboundDirection): DirectionDraft {
   return {
     policy: (d.gate.policy ?? "open") as Policy,
     action: (d.gate.action ?? "flag") as Action,
     allowlist: (d.gate.allowlist ?? []).join("\n"),
     scan: (d.scan.sensitivity ?? "off") as Sensitivity,
+    requireReview: "require_review" in d ? Boolean(d.require_review) : false,
   };
 }
 
@@ -84,10 +84,16 @@ function directionToConfig(d: DirectionDraft) {
   };
 }
 
+// Outbound carries require_review alongside the shared gate/scan shape.
+function outboundToConfig(d: DirectionDraft) {
+  return { ...directionToConfig(d), require_review: d.requireReview };
+}
+
 function isDirectionDirty(current: DirectionDraft, baseline: DirectionDraft): boolean {
   if (current.policy !== baseline.policy) return true;
   if (current.action !== baseline.action) return true;
   if (current.scan !== baseline.scan) return true;
+  if (current.requireReview !== baseline.requireReview) return true;
   if (current.policy !== "open" && current.allowlist !== baseline.allowlist) {
     return true;
   }
@@ -131,11 +137,13 @@ function DirectionFields({
   gateLabel,
   draft,
   onChange,
+  requireReviewControl = false,
 }: {
   title: string;
   gateLabel: string;
   draft: DirectionDraft;
   onChange: (next: DirectionDraft) => void;
+  requireReviewControl?: boolean;
 }) {
   return (
     <div className="space-y-2 border border-border rounded-md p-3">
@@ -188,6 +196,25 @@ function DirectionFields({
           onChange={(scan) => onChange({ ...draft, scan })}
         />
       </div>
+
+      {requireReviewControl && (
+        <label className="flex items-start gap-1.5 text-xs pt-1">
+          <input
+            type="checkbox"
+            checked={draft.requireReview}
+            onChange={(e) => onChange({ ...draft, requireReview: e.target.checked })}
+            className="mt-0.5"
+            aria-label={`${title} always require human review`}
+          />
+          <span>
+            Always require human review
+            <span className="block text-muted">
+              Hold every outbound send, whatever the gate above says. A content
+              scan can still block a message outright.
+            </span>
+          </span>
+        </label>
+      )}
     </div>
   );
 }
@@ -247,7 +274,7 @@ export function ProtectionEditor({
     try {
       await setProtection(email, {
         inbound: directionToConfig(inbound),
-        outbound: directionToConfig(outbound),
+        outbound: outboundToConfig(outbound),
         holds: { ttl_seconds: ttl, on_expiry: onExpiry },
       });
       setBaseline({
@@ -319,6 +346,7 @@ export function ProtectionEditor({
         gateLabel="Who this inbox may send to"
         draft={outbound}
         onChange={(d) => { setOutbound(d); setSaved(false); }}
+        requireReviewControl
       />
 
       {/* Review queue (holds) — what happens to messages a gate or scan

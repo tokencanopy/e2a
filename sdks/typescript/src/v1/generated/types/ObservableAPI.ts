@@ -116,6 +116,8 @@ import { ProtectionGateRequest } from '../models/ProtectionGateRequest.js';
 import { ProtectionGateView } from '../models/ProtectionGateView.js';
 import { ProtectionHoldsRequest } from '../models/ProtectionHoldsRequest.js';
 import { ProtectionHoldsView } from '../models/ProtectionHoldsView.js';
+import { ProtectionOutboundRequest } from '../models/ProtectionOutboundRequest.js';
+import { ProtectionOutboundView } from '../models/ProtectionOutboundView.js';
 import { ProtectionScanRequest } from '../models/ProtectionScanRequest.js';
 import { ProtectionScanView } from '../models/ProtectionScanView.js';
 import { RateLimitedDetails } from '../models/RateLimitedDetails.js';

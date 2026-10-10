@@ -45,6 +45,7 @@ func protectionServer(t *testing.T) (*httptest.Server, *identity.AgentIdentity) 
 			ag.InboundScanSensitivity = cfg.InboundScanSensitivity
 			ag.OutboundPolicy = cfg.OutboundGatePolicy
 			ag.OutboundPolicyAction = cfg.OutboundGateAction
+			ag.OutboundRequireReview = cfg.OutboundRequireReview
 			ag.OutboundScanSensitivity = cfg.OutboundScanSensitivity
 			ag.HITLTTLSeconds = cfg.HITLTTLSeconds
 			ag.HITLExpirationAction = cfg.HITLExpirationAction
@@ -99,6 +100,52 @@ func TestProtectionPutGetRoundTrip(t *testing.T) {
 	}
 	if holds["suppress_notifications"] != true {
 		t.Errorf("holds.suppress_notifications = %v, want true", holds["suppress_notifications"])
+	}
+}
+
+// TestProtectionPutRequireReview: outbound.require_review round-trips through
+// the PUT/GET pair while the gate stays at its permissive default, and it does
+// not appear on the inbound direction (#989).
+func TestProtectionPutRequireReview(t *testing.T) {
+	srv, ag := protectionServer(t)
+	put := map[string]any{
+		"inbound": map[string]any{
+			"gate": map[string]any{"policy": "open", "action": "flag"},
+			"scan": map[string]any{"sensitivity": "off"},
+		},
+		"outbound": map[string]any{
+			"gate":           map[string]any{"policy": "open", "action": "flag"},
+			"scan":           map[string]any{"sensitivity": "off"},
+			"require_review": true,
+		},
+		"holds": map[string]any{"ttl_seconds": 3600, "on_expiry": "reject"},
+	}
+	code, body := sendJSON(t, "PUT", srv.URL+"/v1/agents/support%40acme.com/protection", "good", put)
+	if code != 200 {
+		t.Fatalf("PUT status %d body %v", code, body)
+	}
+	if !ag.OutboundRequireReview {
+		t.Error("PUT did not carry outbound require_review into the store config")
+	}
+	outbound, _ := body["outbound"].(map[string]any)
+	if outbound["require_review"] != true {
+		t.Errorf("PUT echo outbound.require_review = %v, want true", outbound["require_review"])
+	}
+	if _, leaked := body["inbound"].(map[string]any)["require_review"]; leaked {
+		t.Error("inbound direction advertises require_review, which is outbound-only")
+	}
+
+	code, got := sendJSON(t, "GET", srv.URL+"/v1/agents/support%40acme.com/protection", "good", nil)
+	if code != 200 {
+		t.Fatalf("GET status %d body %v", code, got)
+	}
+	outbound, _ = got["outbound"].(map[string]any)
+	if outbound["require_review"] != true {
+		t.Errorf("GET outbound.require_review = %v, want true", outbound["require_review"])
+	}
+	gate, _ := outbound["gate"].(map[string]any)
+	if gate["policy"] != "open" || gate["action"] != "flag" {
+		t.Errorf("require_review must leave the gate alone, got %v", gate)
 	}
 }
 
