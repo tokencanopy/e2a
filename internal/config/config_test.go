@@ -1251,6 +1251,10 @@ func TestOIDCScopes(t *testing.T) {
 		{name: "missing openid", yaml: "oidc:\n  scopes: [email]\n", wantErr: "openid"},
 		{name: "empty entry", yaml: "oidc:\n  scopes: [openid, \" \"]\n", wantErr: "empty entry"},
 		{name: "duplicate", yaml: "oidc:\n  scopes: [openid, email, openid]\n", wantErr: "duplicate"},
+		{name: "yaml entries trimmed", yaml: "oidc:\n  scopes: [\" openid \", email]\n", want: []string{"openid", "email"}},
+		{name: "internal whitespace", yaml: "oidc:\n  scopes: [openid, \"email profile\"]\n", wantErr: "whitespace"},
+		{name: "env only comma", env: ",", wantErr: "empty entry"},
+		{name: "env only commas and spaces", env: " , ", wantErr: "empty entry"},
 		{name: "env missing openid", env: "email", wantErr: "openid"},
 	}
 	for _, tc := range cases {

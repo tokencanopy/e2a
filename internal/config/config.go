@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -251,6 +252,13 @@ type OIDCConfig struct {
 	// owner-mailbox proof. Override with E2A_OIDC_SCOPES (comma-separated).
 	// Only list scopes the provider's client registration allows, or logins
 	// fail with invalid_scope.
+	//
+	// TRUST: enable "email" only against an IdP that sets email_verified=true
+	// solely after a mailbox confirmation and resets it when the address
+	// changes. Some providers let a tenant admin set a mutable unverified
+	// email or report admin-set addresses as verified. A false proof unlocks
+	// owner-mailbox sending for a restricted account and also exempts sends
+	// to that address from the erase-defer check.
 	Scopes []string `yaml:"scopes"`
 }
 
@@ -258,6 +266,7 @@ type OIDCConfig struct {
 var DefaultOIDCScopes = []string{"openid"}
 
 // EffectiveScopes returns Scopes, or the default when none are configured.
+// Load already defaults; this exists for configs built without Load (tests).
 func (c OIDCConfig) EffectiveScopes() []string {
 	if len(c.Scopes) == 0 {
 		return append([]string(nil), DefaultOIDCScopes...)
@@ -947,6 +956,11 @@ func Load(path string) (*Config, error) {
 				scopes = append(scopes, part)
 			}
 		}
+		if len(scopes) == 0 {
+			// Only commas/whitespace: keep an empty entry so Validate fails
+			// at boot instead of silently using the default.
+			scopes = []string{""}
+		}
 		cfg.OIDC.Scopes = scopes
 	}
 	if v := os.Getenv("E2A_DELEGATED_ENABLED"); v != "" {
@@ -1136,6 +1150,9 @@ func Load(path string) (*Config, error) {
 	if cfg.HTTP.APIURL == "" {
 		cfg.HTTP.APIURL = cfg.HTTP.PublicURL
 	}
+	for i, scope := range cfg.OIDC.Scopes {
+		cfg.OIDC.Scopes[i] = strings.TrimSpace(scope)
+	}
 	if len(cfg.OIDC.Scopes) == 0 {
 		cfg.OIDC.Scopes = cfg.OIDC.EffectiveScopes()
 	}
@@ -1242,6 +1259,9 @@ func (c *Config) Validate() error {
 		for _, scope := range c.OIDC.Scopes {
 			if strings.TrimSpace(scope) == "" {
 				return fmt.Errorf("config: oidc.scopes must not contain an empty entry")
+			}
+			if strings.IndexFunc(scope, unicode.IsSpace) >= 0 {
+				return fmt.Errorf("config: oidc.scopes entry %q contains whitespace; list each scope separately", scope)
 			}
 			if _, dup := seen[scope]; dup {
 				return fmt.Errorf("config: oidc.scopes contains duplicate entry %q", scope)

@@ -1693,6 +1693,8 @@ func TestOIDCCallbackOwnerEmailProof(t *testing.T) {
 		{"different email", map[string]any{"email": "other@example.com", "email_verified": true}, false, false, ""},
 		{"case and whitespace", map[string]any{"email": "  Owner@Example.COM ", "email_verified": true}, false, true, "owner@example.com"},
 		{"claims absent", nil, false, false, ""},
+		{"numeric 1 is not verified", map[string]any{"email": "owner@example.com", "email_verified": 1}, false, false, ""},
+		{"numeric 1.0 is not verified", map[string]any{"email": "owner@example.com", "email_verified": 1.0}, false, false, ""},
 		{"email without verified flag", map[string]any{"email": "owner@example.com"}, false, false, ""},
 		{"trashed account", map[string]any{"email": "owner@example.com", "email_verified": true}, true, false, ""},
 	}
