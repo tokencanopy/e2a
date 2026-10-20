@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from typing import Any, ClassVar, Dict, List
 from e2a.v1.generated.models.protection_direction_view import ProtectionDirectionView
 from e2a.v1.generated.models.protection_holds_view import ProtectionHoldsView
+from e2a.v1.generated.models.protection_outbound_view import ProtectionOutboundView
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -30,7 +31,7 @@ class ProtectionConfigView(BaseModel):
     """ # noqa: E501
     holds: ProtectionHoldsView
     inbound: ProtectionDirectionView
-    outbound: ProtectionDirectionView
+    outbound: ProtectionOutboundView
     additional_properties: Dict[str, Any] = {}
     __properties: ClassVar[List[str]] = ["holds", "inbound", "outbound"]
 
@@ -103,7 +104,7 @@ class ProtectionConfigView(BaseModel):
         _obj = cls.model_validate({
             "holds": ProtectionHoldsView.from_dict(obj["holds"]) if obj.get("holds") is not None else None,
             "inbound": ProtectionDirectionView.from_dict(obj["inbound"]) if obj.get("inbound") is not None else None,
-            "outbound": ProtectionDirectionView.from_dict(obj["outbound"]) if obj.get("outbound") is not None else None
+            "outbound": ProtectionOutboundView.from_dict(obj["outbound"]) if obj.get("outbound") is not None else None
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

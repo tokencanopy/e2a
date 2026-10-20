@@ -2,6 +2,7 @@ import type {
   ProtectionConfigView,
   ProtectionConfigRequest,
   ProtectionDirectionView,
+  ProtectionOutboundView,
 } from "@e2a/sdk/v1";
 import { createClient } from "../sdk.js";
 import { EXIT, fail } from "../exit.js";
@@ -25,7 +26,7 @@ function summarize(config: ProtectionConfigView): string {
   const dir = (d: ProtectionDirectionView) =>
     `gate=${d.gate.policy ?? "open"}/${d.gate.action ?? "flag"} scan=${d.scan.sensitivity ?? "off"}`;
   return (
-    `outbound: ${dir(config.outbound)}\n` +
+    `outbound: ${dir(config.outbound)} require_review=${config.outbound.requireReview ? "on" : "off"}\n` +
     `inbound:  ${dir(config.inbound)}\n` +
     `holds:    ttl=${config.holds.ttlSeconds ?? 604800}s on_expiry=${config.holds.onExpiry ?? "reject"} notifications=${config.holds.suppressNotifications ? "suppressed" : "enabled"}\n`
   );
@@ -63,6 +64,18 @@ function applyReview(direction: ProtectionDirectionView, mode: "on" | "off"): vo
   }
 }
 
+/**
+ * Outbound review also flips require_review (#989). Without it, "hold for
+ * review" only fires on recipients that fail the gate, so under the default
+ * "open" policy the action never runs and the switch would look on while
+ * holding nothing; the scan below was the old workaround for that. With
+ * require_review the gate holds every send outright.
+ */
+function applyOutboundReview(direction: ProtectionOutboundView, mode: "on" | "off"): void {
+  applyReview(direction, mode);
+  direction.requireReview = mode === "on";
+}
+
 export async function protectionSet(
   email: string | undefined,
   opts: ProtectionSetOptions,
@@ -86,7 +99,7 @@ export async function protectionSet(
   // flow). A thrown GET propagates and the PUT below is never reached.
   const config = await client.agents.getProtection(email);
 
-  if (opts.outboundReview) applyReview(config.outbound, opts.outboundReview as "on" | "off");
+  if (opts.outboundReview) applyOutboundReview(config.outbound, opts.outboundReview as "on" | "off");
   if (opts.inboundReview) applyReview(config.inbound, opts.inboundReview as "on" | "off");
   if (opts.suppressNotifications !== undefined) {
     config.holds.suppressNotifications = opts.suppressNotifications === "on";

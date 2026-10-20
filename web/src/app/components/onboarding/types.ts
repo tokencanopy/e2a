@@ -169,9 +169,7 @@ export type AgentCreateResponse = {
 };
 
 // ── Protection config (GET/PUT /v1/agents/{email}/protection) ──
-// Mirrors ProtectionConfigView. Beta. The dashboard only edits the
-// `holds` section; inbound/outbound are read + passed back unchanged on
-// the wholesale PUT.
+// Mirrors ProtectionConfigView. Beta.
 
 export type ProtectionGate = {
   policy?: "open" | "allowlist" | "domain";
@@ -188,6 +186,11 @@ export type ProtectionDirection = {
   scan: ProtectionScan;
 };
 
+// Outbound adds require_review (#989): hold every send regardless of the gate.
+export type ProtectionOutboundDirection = ProtectionDirection & {
+  require_review?: boolean;
+};
+
 export type ProtectionHolds = {
   ttl_seconds?: number;
   on_expiry?: "approve" | "reject";
@@ -195,6 +198,6 @@ export type ProtectionHolds = {
 
 export type ProtectionConfig = {
   inbound: ProtectionDirection;
-  outbound: ProtectionDirection;
+  outbound: ProtectionOutboundDirection;
   holds: ProtectionHolds;
 };

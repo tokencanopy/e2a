@@ -96,6 +96,53 @@ func TestUpdateAgentProtectionRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpdateAgentProtectionRequireReviewRoundTrip: the outbound require_review
+// switch (#989) defaults off for a fresh agent, persists when set, and clears
+// again on an explicit false — the full replace keeps no stale hold-everything
+// state behind.
+func TestUpdateAgentProtectionRequireReviewRoundTrip(t *testing.T) {
+	store, ctx, agentID, userID := newProtectionAgent(t, "prot-rr")
+
+	fresh, err := store.GetAgentByID(ctx, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentByID: %v", err)
+	}
+	if fresh.OutboundRequireReview {
+		t.Error("fresh agent defaults to outbound require_review=true, want false")
+	}
+
+	base := identity.ProtectionConfig{
+		InboundGatePolicy: "open", InboundGateAction: "flag", InboundScanSensitivity: "off",
+		OutboundGatePolicy: "open", OutboundGateAction: "flag", OutboundScanSensitivity: "off",
+		HITLTTLSeconds: 604800, HITLExpirationAction: "reject",
+	}
+	on := base
+	on.OutboundRequireReview = true
+	if _, err := store.UpdateAgentProtection(ctx, agentID, userID, on); err != nil {
+		t.Fatalf("UpdateAgentProtection(on): %v", err)
+	}
+	got, err := store.GetAgentByID(ctx, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentByID after on: %v", err)
+	}
+	if !got.OutboundRequireReview {
+		t.Error("outbound require_review did not persist as true")
+	}
+
+	off := base
+	off.OutboundRequireReview = false
+	if _, err := store.UpdateAgentProtection(ctx, agentID, userID, off); err != nil {
+		t.Fatalf("UpdateAgentProtection(off): %v", err)
+	}
+	got, err = store.GetAgentByID(ctx, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentByID after off: %v", err)
+	}
+	if got.OutboundRequireReview {
+		t.Error("outbound require_review did not clear on an explicit false")
+	}
+}
+
 // TestUpdateAgentProtectionSensitivityMapping pins each level to its derived band.
 func TestUpdateAgentProtectionSensitivityMapping(t *testing.T) {
 	store, ctx, agentID, userID := newProtectionAgent(t, "prot-map")

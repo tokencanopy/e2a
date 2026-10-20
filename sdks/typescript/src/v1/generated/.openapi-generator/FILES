@@ -134,6 +134,8 @@ models/ProtectionGateRequest.ts
 models/ProtectionGateView.ts
 models/ProtectionHoldsRequest.ts
 models/ProtectionHoldsView.ts
+models/ProtectionOutboundRequest.ts
+models/ProtectionOutboundView.ts
 models/ProtectionScanRequest.ts
 models/ProtectionScanView.ts
 models/RateLimitedDetails.ts

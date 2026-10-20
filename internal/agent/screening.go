@@ -21,6 +21,7 @@ import (
 // email.blocked. Mirrors relay.inboundScreenResult on the egress side.
 type outboundVerdict struct {
 	Applied       piguard.Action // most-severe of gate + scan
+	gateAction    piguard.Action // the gate's own action (for its audit row)
 	scanAction    piguard.Action // the scan's own action (for its audit row)
 	ReviewReason  string         // recipient_gate | outbound_scan (drives denorm + event)
 	ScanScore     *float64
@@ -75,6 +76,15 @@ func allRecipients(req outbound.SendRequest) []string {
 	out = append(out, req.CC...)
 	out = append(out, req.BCC...)
 	return out
+}
+
+// firstSendRecipient anchors the audit row for a require_review hold, where no
+// recipient tripped the gate but the send still needs a subject address.
+func firstSendRecipient(req outbound.SendRequest) string {
+	if recips := allRecipients(req); len(recips) > 0 {
+		return recips[0]
+	}
+	return ""
 }
 
 func domainOf(addr string) string {
@@ -172,11 +182,23 @@ func (a *API) screenOutbound(ctx context.Context, agent *identity.AgentIdentity,
 	var v outboundVerdict
 
 	gateAction := piguard.ActionAllow
-	if flagged, addr := recipientGate(agent, req); flagged {
-		gateAction = piguard.Action(agent.OutboundPolicyAction)
+	switch {
+	case agent.OutboundRequireReview:
+		// require_review short-circuits the recipient match (#989): every send
+		// is held for review whatever the policy, allowlist, or non-match action
+		// says, so "hold everything" no longer depends on matching nothing. The
+		// first recipient anchors the audit row since none actually tripped.
+		gateAction = piguard.ActionReview
 		v.gateFlagged = true
-		v.GateAddr = addr
+		v.GateAddr = firstSendRecipient(req)
+	default:
+		if flagged, addr := recipientGate(agent, req); flagged {
+			gateAction = piguard.Action(agent.OutboundPolicyAction)
+			v.gateFlagged = true
+			v.GateAddr = addr
+		}
 	}
+	v.gateAction = gateAction
 
 	scanAction := piguard.ActionAllow
 	if identity.ContentScanEnabled() && agent.OutboundScan == identity.ScanOn && a.screen != nil {
@@ -221,7 +243,11 @@ func (a *API) screenOutbound(ctx context.Context, agent *identity.AgentIdentity,
 		v.ReviewReason = identity.ReviewReasonOutboundScan
 	}
 	if v.Reason == "" && v.gateFlagged {
-		v.Reason = "recipient not permitted by outbound policy"
+		if agent.OutboundRequireReview {
+			v.Reason = "require_review holds every outbound send"
+		} else {
+			v.Reason = "recipient not permitted by outbound policy"
+		}
 	}
 	return v
 }
@@ -239,7 +265,7 @@ func (v outboundVerdict) screeningEvents(messageID string, agent *identity.Agent
 			Direction:   "outbound",
 			Source:      identity.ScreeningSourceGate,
 			Reason:      identity.ReviewReasonRecipientGate,
-			Action:      agent.OutboundPolicyAction,
+			Action:      string(v.gateAction),
 			SubjectAddr: v.GateAddr,
 		})
 	}
