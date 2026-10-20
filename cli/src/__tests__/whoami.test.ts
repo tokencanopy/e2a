@@ -40,6 +40,15 @@ describe("whoami command", () => {
     vi.clearAllMocks();
   });
 
+  it("shows the external daily allowance and shared subset", async () => {
+    mockAccountGet.mockResolvedValue(makeAccount({dailyLimit:{limit:88,used:17,sharedLimit:50,sharedUsed:6,cleanActiveDays:1,resetsAt:new Date("2026-01-02T00:00:00Z")}}));
+    const {whoami}=await import("../commands/whoami.js");await whoami({});
+    const output=mockStdout.mock.calls.map((c:unknown[])=>c[0]).join("");
+    expect(output).toContain("daily: 17/88 external recipients");
+    expect(output).toContain("shared identity: 6/50");
+    expect(output).toContain("2026-01-02T00:00:00.000Z");
+  });
+
   it("prints identity, scope, plan, and usage for an account key", async () => {
     mockAccountGet.mockResolvedValue(makeAccount());
     const { whoami } = await import("../commands/whoami.js");
@@ -188,6 +197,29 @@ describe("whoami command", () => {
 
     const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
     expect(output).not.toContain("External sending:");
+  });
+
+  it("a paid plan is not a grant where available_unlocks omits paid_entitlement", async () => {
+    mockAccountGet.mockResolvedValue(
+      makeAccount({
+        sendingAccess: {
+          enforcementApplies: true,
+          sharedExternalApproved: false,
+          paidExternalSendingEntitled: true,
+          ownerRecipientVerified: true,
+          availableUnlocks: ["operator_approval"],
+        },
+      }),
+    );
+    const { whoami } = await import("../commands/whoami.js");
+    await whoami({});
+
+    const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+    expect(output).toContain("External sending: restricted");
+    expect(output).toContain("request approval");
+    // Only routes the deployment honors are offered.
+    expect(output).not.toContain("verified domain");
+    expect(output).not.toContain("paid plan");
   });
 
   it("says nothing new when sending_access is omitted (older/self-host deployment)", async () => {

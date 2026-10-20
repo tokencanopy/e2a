@@ -277,8 +277,8 @@ func TestAccountEraseThroughRestrictedSession(t *testing.T) {
 // ErrEraseHeld to 409 erase_held.
 func TestDeleteAgentPermanentIsHeldWhilePaused(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (int64, error) {
-			return 0, identity.ErrEraseHeld
+		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (identity.AgentPurgeResult, error) {
+			return identity.AgentPurgeResult{}, identity.ErrEraseHeld
 		}
 	})
 	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com?confirm=DELETE&permanent=true", "good", nil)
@@ -298,5 +298,62 @@ func TestCreateAgentOnAHeldAddressIsAgentTaken(t *testing.T) {
 	code, body := postJSON(t, srv.URL+"/v1/agents", "good", map[string]any{"email": "held@acme.com"})
 	if code != 409 || errCode(body) != "agent_taken" {
 		t.Fatalf("want 409 agent_taken, got %d %v", code, body)
+	}
+}
+
+// A permanent erase deferred because the account recently emailed external
+// recipients is a 200 trash receipt with the additive erase_deferred,
+// purge_after and message fields — never an error.
+func TestDeleteAccountReportsADeferredErase(t *testing.T) {
+	purgeAfter := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	srv := testServer(t, func(d *Deps) {
+		d.DeleteUserData = func(context.Context, *identity.User, bool) (*identity.DeleteUserDataResult, error) {
+			return &identity.DeleteUserDataResult{
+				Mode: identity.AccountDeleteModeTrash, PurgeAfter: &purgeAfter, AgentsDeleted: 1,
+				EraseDeferred: true, Message: identity.EraseDeferredMessage,
+			}, nil
+		}
+	})
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/account?confirm=DELETE&permanent=true", "good", nil)
+	if code != 200 || body["deleted"] != true || body["mode"] != "trash" || body["erase_deferred"] != true ||
+		body["user_deleted"] != false || body["purge_after"] != "2026-10-26T00:00:00Z" || body["message"] != identity.EraseDeferredMessage {
+		t.Fatalf("deferred receipt = %d %v", code, body)
+	}
+}
+
+// The interstitial's "erase now" on a recent external sender leaves the
+// account in the trash: the restricted session survives so the restore
+// offer keeps working.
+func TestAccountEraseDeferredKeepsTheRestrictedSession(t *testing.T) {
+	deleted := time.Now().Add(-time.Hour)
+	purgeAfter := deleted.Add(30 * 24 * time.Hour)
+	srv := testServer(t, func(d *Deps) {
+		d.RestrictedSession = func(r *http.Request) (*identity.User, string, error) {
+			c, err := r.Cookie("e2a_restore_session")
+			if err != nil || c.Value != "sess_restricted" {
+				return nil, "", pgx.ErrNoRows
+			}
+			return &identity.User{ID: "u_trashed", Email: "gone@example.test", DeletedAt: &deleted}, c.Value, nil
+		}
+		d.RestoreAccount = func(context.Context, string, string) (*identity.User, error) { return nil, errors.New("unused") }
+		d.DeleteUserData = func(context.Context, *identity.User, bool) (*identity.DeleteUserDataResult, error) {
+			return &identity.DeleteUserDataResult{
+				Mode: identity.AccountDeleteModeTrash, PurgeAfter: &purgeAfter,
+				EraseDeferred: true, Message: identity.EraseDeferredMessage,
+			}, nil
+		}
+		d.SameOriginRequest = func(r *http.Request) bool { return r.Header.Get("Origin") == "https://app.example.test" }
+		d.ClearRestoreSessionCookie = func(w http.ResponseWriter) {
+			http.SetCookie(w, &http.Cookie{Name: "e2a_restore_session", Value: "", MaxAge: -1})
+		}
+	})
+	code, body, resp := doCookie(t, srv.Client(), "POST", srv.URL+"/api/account/erase", "sess_restricted")
+	if code != 200 || body["mode"] != "trash" || body["erase_deferred"] != true || body["purge_after"] == nil {
+		t.Fatalf("deferred interstitial erase = %d %v", code, body)
+	}
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "e2a_restore_session" && ck.MaxAge < 0 {
+			t.Fatal("a deferred erase cleared the restricted session; the account is still restorable")
+		}
 	}
 }

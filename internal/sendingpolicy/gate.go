@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -89,20 +88,21 @@ func (m *Module) effectivePolicy(ctx context.Context, tx pgx.Tx) (RuntimePolicy,
 
 // reservationRow is one row of sending_budget_reservations.
 type reservationRow struct {
-	OperationID      string
-	Attempt          int
-	SourceAccountRef *string
-	PolicySubjectRef string
-	Purpose          Purpose
-	Day              time.Time
-	Units            int
-	Probation        bool
-	State            string
-	CallState        string
-	Nonce            *string
-	NoticeVersion    *int
-	NoticeCommitment []byte
-	Exists           bool
+	OperationID       string
+	Attempt           int
+	SourceAccountRef  *string
+	PolicySubjectRef  string
+	Purpose           Purpose
+	Day               time.Time
+	Units             int
+	AccountTrustUnits *int
+	Probation         bool
+	State             string
+	CallState         string
+	Nonce             *string
+	NoticeVersion     *int
+	NoticeCommitment  []byte
+	Exists            bool
 }
 
 // scopeKeys returns the counters this stored reservation charged, using only
@@ -127,13 +127,13 @@ func lockReservation(ctx context.Context, tx pgx.Tx, operationID string, attempt
 	err := tx.QueryRow(ctx, `
 		SELECT operation_id, submission_attempt, source_account_ref, policy_subject_ref,
 		       purpose, day, units, probation, state, call_state, authorization_nonce,
-		       notice_recipient_version, notice_recipient_commitment
+		       notice_recipient_version, notice_recipient_commitment, account_trust_units
 		  FROM sending_budget_reservations
 		 WHERE operation_id = $1 AND submission_attempt = $2
 		   FOR UPDATE`, operationID, attempt,
 	).Scan(&r.OperationID, &r.Attempt, &r.SourceAccountRef, &r.PolicySubjectRef,
 		&r.Purpose, &r.Day, &r.Units, &r.Probation, &r.State, &r.CallState, &r.Nonce,
-		&r.NoticeVersion, &r.NoticeCommitment)
+		&r.NoticeVersion, &r.NoticeCommitment, &r.AccountTrustUnits)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return reservationRow{}, nil
 	}
@@ -299,6 +299,16 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 	if err != nil {
 		return Decision{}, AttemptRef{}, err
 	}
+	if policy.AccountTrustEnabled && op.Purpose == PurposeCustomerMessage {
+		envelope, e := messageEnvelopeQ(ctx, tx, op.OperationID)
+		if e != nil {
+			return Decision{}, AttemptRef{}, e
+		}
+		units, err = externalRecipientCount(ctx, tx, op.accountRef(), envelope)
+		if err != nil {
+			return Decision{}, AttemptRef{}, err
+		}
+	}
 
 	day, err := ledgerDay(ctx, tx)
 	if err != nil {
@@ -390,6 +400,7 @@ func (m *Module) Reserve(ctx context.Context, ref OperationRef) (Decision, Attem
 		return Decision{}, AttemptRef{}, err
 	}
 	if deniedScope != "" {
+		emitBudgetSamples([]budgetSample{{deniedScope, "hold"}})
 		return holdDecision(holdReasonForScope(deniedScope), nextUTCMidnight(day)), out, nil
 	}
 	return allowDecision(), out, nil
@@ -530,7 +541,8 @@ func (m *Module) ConsumeAttempt(ctx context.Context, ref AttemptRef) (Decision, 
 		return decision, nil, nil
 	}
 
-	decision, err = m.reauthorizeBudget(ctx, tx, state)
+	var samples []budgetSample
+	decision, err = m.reauthorizeBudget(ctx, tx, state, &samples)
 	if err != nil {
 		return Decision{}, nil, err
 	}
@@ -538,6 +550,7 @@ func (m *Module) ConsumeAttempt(ctx context.Context, ref AttemptRef) (Decision, 
 		if err := m.commit(ctx, tx, "consume budget hold"); err != nil {
 			return Decision{}, nil, err
 		}
+		emitBudgetSamples(samples)
 		return decision, nil, nil
 	}
 
@@ -548,6 +561,7 @@ func (m *Module) ConsumeAttempt(ctx context.Context, ref AttemptRef) (Decision, 
 	if err := m.commit(ctx, tx, "consume authorize"); err != nil {
 		return Decision{}, nil, err
 	}
+	emitBudgetSamples(samples)
 	return allowDecision(), auth, nil
 }
 
@@ -707,6 +721,9 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		if errors.Is(err, ErrSourceUnavailable) {
 			return st, terminalHold(ReasonSourceUnavailable), nil
 		}
+		if d, ok := rampHoldFor(err, st.day); ok {
+			return st, d, nil
+		}
 		return st, Decision{}, err
 	}
 
@@ -798,6 +815,12 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 	}
 	st.envelope = envelope
 	st.units = len(st.envelope)
+	if policy.AccountTrustEnabled && op.Purpose == PurposeCustomerMessage {
+		st.units, err = externalRecipientCount(ctx, tx, op.accountRef(), st.envelope)
+		if err != nil {
+			return st, Decision{}, err
+		}
+	}
 
 	// External sending access, decided under the locks just taken: the users
 	// row (FOR SHARE), the account control row and the plan row are all held
@@ -825,6 +848,9 @@ func (m *Module) readAuthState(ctx context.Context, tx pgx.Tx, ref AttemptRef) (
 		// vanished source is not something a retry can restore.
 		if errors.Is(err, ErrSourceUnavailable) {
 			return st, terminalHold(ReasonSourceUnavailable), nil
+		}
+		if d, ok := rampHoldFor(err, st.day); ok {
+			return st, d, nil
 		}
 		return st, Decision{}, err
 	}
@@ -1047,7 +1073,7 @@ func (m *Module) releaseStoredUnits(ctx context.Context, tx pgx.Tx, st authState
 // the acquisition cannot deadlock against each other or against another worker
 // doing the mirror image. A denial leaves the attempt released rather than
 // half-charged: a later fire-time pass re-arms it from scratch.
-func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState) (Decision, error) {
+func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState, samples *[]budgetSample) (Decision, error) {
 	stored := st.stored
 
 	// Trusted first-party accounts and the disabled budget mode both mean "no
@@ -1066,7 +1092,9 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 		if exempt || st.op.Purpose == PurposeTrustedSystem {
 			return allowDecision(), nil
 		}
-		if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
+		rampErr := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day)
+		appendAccountTrustSamples(samples, st, rampErr)
+		if err := rampErr; err != nil {
 			// releaseStoredUnits above already gave back whatever an earlier
 			// Reserve was holding, so every hold here leaves the ledger clean.
 			if hold, ok := rampHoldFor(err, st.day); ok {
@@ -1105,16 +1133,21 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 
 	deniedScope := Scope("")
 	for _, key := range currentKeys {
+		decision := "allow"
 		if !plan.acquire(ledgerRef{counterKey: key, Day: st.day}, st.units) {
 			deniedScope = key.Scope
-			if st.policy.BudgetMode == ModeEnforce {
-				break
+			decision = "hold"
+			if st.policy.BudgetMode == ModeShadow {
+				decision = "would_hold"
+				// Preserve actual demand beyond the cap during observation.
+				plan.overrun(ledgerRef{counterKey: key, Day: st.day}, st.units)
 			}
-			// Shadow deliberately overruns. Clamping the counter at the limit
-			// would make the shadow window prove only that the limit exists;
-			// what the rollout gate needs is the real aggregate demand, which
-			// is only visible if the counter is allowed past the cap.
-			plan.overrun(ledgerRef{counterKey: key, Day: st.day}, st.units)
+		}
+		if st.units > 0 && observeBudgetScope(st.policy, key.Scope) {
+			*samples = append(*samples, budgetSample{key.Scope, decision})
+		}
+		if deniedScope != "" && st.policy.BudgetMode == ModeEnforce {
+			break
 		}
 	}
 
@@ -1142,10 +1175,6 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 		return holdDecision(holdReasonForScope(deniedScope), nextUTCMidnight(st.day)), nil
 	}
 
-	if deniedScope != "" {
-		log.Printf("[sending-protection] shadow denial: purpose=%s scope=%s operation=%s units=%d",
-			st.op.Purpose, deniedScope, st.op.OperationID, st.units)
-	}
 	if err := plan.flush(ctx, tx); err != nil {
 		return Decision{}, err
 	}
@@ -1155,7 +1184,9 @@ func (m *Module) reauthorizeBudget(ctx context.Context, tx pgx.Tx, st authState)
 	// units this transaction just took are given straight back — holding them
 	// would charge an account for a send its own domain was not allowed to
 	// make.
-	if err := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day); err != nil {
+	rampErr := m.rampAuthorize(ctx, tx, st.policy, st.ramp, st.day)
+	appendAccountTrustSamples(samples, st, rampErr)
+	if err := rampErr; err != nil {
 		hold, ok := rampHoldFor(err, st.day)
 		if !ok {
 			return Decision{}, err
@@ -1208,6 +1239,16 @@ func (m *Module) releaseReacquiredUnits(ctx context.Context, tx pgx.Tx, st authS
 	return nil
 }
 
+// accountTrustUnits records the meaning of attempt units at authorization.
+// Null marks legacy/all-recipient accounting, which cannot earn trust credit.
+func accountTrustUnits(st authState) *int {
+	if st.policy.AccountTrustEnabled && st.op.Purpose == PurposeCustomerMessage {
+		n := st.units
+		return &n
+	}
+	return nil
+}
+
 // authorize confirms the capacity, mints the single-use nonce, records the
 // provenance correlation, and returns the token.
 func (m *Module) authorize(ctx context.Context, tx pgx.Tx, st authState) (*ProviderAuthorization, error) {
@@ -1243,8 +1284,8 @@ func (m *Module) authorize(ctx context.Context, tx pgx.Tx, st authState) (*Provi
 		INSERT INTO sending_budget_reservations
 		    (operation_id, submission_attempt, source_account_ref, policy_subject_ref,
 		     purpose, day, units, probation, state, call_state, authorization_nonce,
-		     notice_recipient_version, notice_recipient_commitment)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'confirmed', 'authorized', $9, $10, $11)
+		     notice_recipient_version, notice_recipient_commitment, account_trust_units)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'confirmed', 'authorized', $9, $10, $11, $12)
 		ON CONFLICT (operation_id, submission_attempt) DO UPDATE
 		   SET day = EXCLUDED.day,
 		       units = EXCLUDED.units,
@@ -1254,11 +1295,12 @@ func (m *Module) authorize(ctx context.Context, tx pgx.Tx, st authState) (*Provi
 		       authorization_nonce = EXCLUDED.authorization_nonce,
 		       notice_recipient_version = EXCLUDED.notice_recipient_version,
 		       notice_recipient_commitment = EXCLUDED.notice_recipient_commitment,
+ account_trust_units = EXCLUDED.account_trust_units,
 		       provider_call_started_at = NULL,
 		       updated_at = now()`,
 		st.op.OperationID, attempt, st.op.SourceAccountRef, st.op.PolicySubjectRef,
 		st.op.Purpose, st.day, st.units, st.probation, nonce,
-		noticeVersion, noticeCommitment,
+		noticeVersion, noticeCommitment, accountTrustUnits(st),
 	); err != nil {
 		return nil, fmt.Errorf("sendingpolicy: confirm reservation: %w", err)
 	}
@@ -1356,8 +1398,16 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 	// wait out a fixed timer before complaining. The post-deletion janitor sets
 	// their horizon. A non-customer operation has no account to outlive, so it
 	// receives the configured horizon at creation.
+	//
+	// So does customer-purpose traffic from a system or internal account
+	// (probers, monitors, conformance runs). Those accounts are never deleted,
+	// so "account lifetime" would mean forever, and their traffic is
+	// synthetic: the standing prober alone writes thousands of correlations a
+	// day. The class is the server-owned users.account_class, read under the
+	// FOR SHARE lock readAuthState already holds — the same value that exempts
+	// the account from budgets. Standard and demo accounts are unchanged.
 	var expires *time.Time
-	if !st.op.Purpose.isCustomer() {
+	if !st.op.Purpose.isCustomer() || accountClassExempt(st.class) {
 		horizon := time.Now().UTC().Add(
 			time.Duration(st.policy.SendingFeedbackPostAcctRetention) * 24 * time.Hour)
 		expires = &horizon
@@ -1384,7 +1434,11 @@ func (m *Module) recordCorrelation(ctx context.Context, tx pgx.Tx, st authState,
 		return correlationID, nil
 	}
 	for _, addr := range st.envelope {
-		version, mac := m.secrets.Keyring.Sign([]byte(addr))
+		// canonicalRecipient, not the envelope string: authorization accepts
+		// an internationalized domain as typed (Unicode), while the provider
+		// may report it back in A-label form. Feedback verifies against the
+		// same canonical form, so both spellings produce one HMAC.
+		version, mac := m.secrets.Keyring.Sign([]byte(canonicalRecipient(addr)))
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO sending_feedback_recipients (correlation_id, recipient_hmac, hmac_key_version)
 			VALUES ($1, $2, $3)
@@ -1619,6 +1673,19 @@ func (m *Module) RedeemProviderCall(ctx context.Context, auth ProviderAuthorizat
 	}
 	if !stored.Exists || stored.CallState != "authorized" || stored.Nonce == nil || *stored.Nonce != auth.nonce {
 		return m.invalidate(ctx, tx, auth.attempt)
+	}
+
+	if op.Purpose == PurposeCustomerMessage && policy.AccountTrustEnabled != (stored.AccountTrustUnits != nil) {
+		return m.invalidate(ctx, tx, auth.attempt)
+	}
+	if policy.AccountTrustEnabled && op.Purpose == PurposeCustomerMessage {
+		valid, err := m.recheckAccountTrustGrant(ctx, tx, op, stored)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return m.invalidate(ctx, tx, auth.attempt)
+		}
 	}
 
 	if auth.notice != nil {
@@ -1994,7 +2061,11 @@ func (m *Module) settle(ctx context.Context, operationID string, attempt int, se
 	// Ramp keys come last in the normative order, after the correlation row,
 	// which is keyed by this operation and already held under its lock.
 	if op.Purpose == PurposeCustomerMessage {
-		if err := m.rampSettle(ctx, tx, op.OperationID, settlement.Outcome); err != nil {
+		acceptedUnits := 0
+		if stored.AccountTrustUnits != nil {
+			acceptedUnits = *stored.AccountTrustUnits
+		}
+		if err := m.rampSettle(ctx, tx, op.OperationID, settlement.Outcome, stored.Day, acceptedUnits); err != nil {
 			return err
 		}
 	}

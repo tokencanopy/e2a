@@ -148,6 +148,29 @@ type Metrics interface {
 	// Bounded labels only: never an account id, address or domain.
 	ExternalAccessDecision(stage, route, mode string)
 
+	// SendingFeedbackIngested records one deletion-resistant SES feedback
+	// ingestion result (internal/sendingpolicy). outcome ∈ {correlated,
+	// dead_account, unmatched_recipient, uncorrelated_with_marker,
+	// uncorrelated, duplicate}; bucket ∈ {delivered, hard_bounce, complaint,
+	// terminal_other, none}. One sample per recipient of a first-seen
+	// correlated event, one per uncorrelated or duplicate event.
+	// uncorrelated_with_marker is e2a-stamped mail whose retained
+	// correlation is missing — the spec's alerting signal. Bounded labels
+	// only: never an address, account, correlation or provider id.
+	SendingFeedbackIngested(outcome, bucket string)
+
+	// SendingLedgerRetentionRun records one sending-ledger retention pass
+	// (internal/sendingpolicy). outcome ∈ {complete, partial, failed}:
+	// partial = a table hit its per-run batch cap and continues next run;
+	// failed = a table's batch failed (lock/statement timeout) and is
+	// retried next run. Rows it deletes are counted on JanitorRowsDeleted
+	// with the ledger table as the label.
+	SendingLedgerRetentionRun(outcome string)
+
+	// SendingBudgetDecision records a committed per-scope gate evaluation.
+	SendingBudgetDecision(scope, decision string)
+	SendingBudgetSnapshot(usedRatio map[string]float64, generation int64, mismatch bool, observedAt float64)
+
 	// WebhookAttempt records one webhook delivery attempt. outcome ∈
 	// {delivered, retryable_failure, exhausted, webhook_deleted,
 	// skipped_disabled}. statusClass is the HTTP status class of the
@@ -318,6 +341,8 @@ func (NoOp) OutboundTerminalLatency(float64)               {}
 func (NoOp) OutboundAttempt(string, float64)               {}
 func (NoOp) OutboundRateDeferred()                         {}
 func (NoOp) ExternalAccessDecision(string, string, string) {}
+func (NoOp) SendingFeedbackIngested(string, string)        {}
+func (NoOp) SendingLedgerRetentionRun(string)              {}
 func (NoOp) WebhookAttempt(string, string, float64)        {}
 func (NoOp) WebhookTerminal(string, string, int)           {}
 func (NoOp) WebhookNotify(string, string)                  {}
@@ -452,6 +477,14 @@ func (l *Log) ExternalAccessDecision(stage, route, mode string) {
 	log.Printf("[metrics] event=external_access.decision stage=%s route=%s mode=%s", stage, route, mode)
 }
 
+func (l *Log) SendingFeedbackIngested(outcome, bucket string) {
+	log.Printf("[metrics] event=sending_feedback.ingested outcome=%s bucket=%s", outcome, bucket)
+}
+
+func (l *Log) SendingLedgerRetentionRun(outcome string) {
+	log.Printf("[metrics] event=sending_ledger.retention_run outcome=%s", outcome)
+}
+
 func (l *Log) WebhookAttempt(outcome, statusClass string, seconds float64) {
 	log.Printf("[metrics] event=webhook.attempt outcome=%s status_class=%s duration=%.3f", outcome, statusClass, seconds)
 }
@@ -577,3 +610,11 @@ func (l *Log) SetThreadRelationshipPercent(string, float64) {}
 // Compile guard.
 var _ Metrics = NoOp{}
 var _ Metrics = (*Log)(nil)
+
+func (NoOp) SendingBudgetDecision(string, string) {}
+func (l *Log) SendingBudgetDecision(scope, decision string) {
+	log.Printf("[metrics] event=sending_budget.decision scope=%s decision=%s", enum(sendingBudgetScopeSet, scope), enum(sendingBudgetDecisionSet, decision))
+}
+
+func (NoOp) SendingBudgetSnapshot(map[string]float64, int64, bool, float64) {}
+func (*Log) SendingBudgetSnapshot(map[string]float64, int64, bool, float64) {}

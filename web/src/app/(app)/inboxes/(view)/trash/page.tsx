@@ -20,7 +20,7 @@ import {
   invalidateAgentMessages,
   invalidateAgentUnread,
 } from "../../../../../lib/swrKeys";
-import { TRASH_RETENTION_DAYS, daysLeft } from "../../../../../lib/trash";
+import { TRASH_RETENTION_DAYS, daysLeft, deferredCopy, isDeferred } from "../../../../../lib/trash";
 import type { MessageSummary } from "../../../../components/types";
 
 export default function AgentTrashPage() {
@@ -45,14 +45,21 @@ function AgentTrashContent() {
   // Per-row in-flight + error state, keyed by message id.
   const [busy, setBusy] = useState<string | null>(null);
   const [rowError, setRowError] = useState<{ id: string; msg: string } | null>(null);
+  // A "Delete forever" the server deferred (the message went to people
+  // outside e2a recently): it stays in the trash until purge_after.
+  const [rowNotice, setRowNotice] = useState<{ id: string; msg: string } | null>(null);
   // Two-click "Delete forever": first click arms, second click fires.
   const [armed, setArmed] = useState<string | null>(null);
 
-  const run = async (id: string, op: () => Promise<void>) => {
+  const run = async (id: string, op: () => Promise<unknown>) => {
     setBusy(id);
     setRowError(null);
+    setRowNotice(null);
     try {
-      await op();
+      const receipt = await op();
+      if (isDeferred(receipt)) {
+        setRowNotice({ id, msg: deferredCopy("This message went to people outside e2a recently", receipt.purge_after) });
+      }
       await mutate(); // refresh the trash list
       // The live inbox views are stale after a restore.
       void invalidateAgentMessages(email);
@@ -146,6 +153,11 @@ function AgentTrashContent() {
                       </>
                     )}
                   </div>
+                  {rowNotice?.id === m.id && (
+                    <div role="status" className="mt-1 text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                      {rowNotice.msg}
+                    </div>
+                  )}
                   {rowError?.id === m.id && (
                     <div
                       className="mt-1 text-[12px]"

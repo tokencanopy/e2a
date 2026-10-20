@@ -15,11 +15,9 @@ package mailparse
 
 import (
 	"bytes"
-	"encoding/base64"
 	"io"
 	"mime"
 	"mime/multipart"
-	"mime/quotedprintable"
 	"net/mail"
 	"regexp"
 	"strings"
@@ -186,28 +184,7 @@ func walkParts(contentType, cte string, body io.Reader, depth int) (plain, htmlT
 // decode reads a body applying its Content-Transfer-Encoding (base64 /
 // quoted-printable / identity).
 func decode(body io.Reader, cte string) string {
-	switch strings.ToLower(strings.TrimSpace(cte)) {
-	case "quoted-printable":
-		b, _ := io.ReadAll(quotedprintable.NewReader(body))
-		return string(b)
-	case "base64":
-		raw, _ := io.ReadAll(body)
-		// base64 bodies are line-wrapped; strip all whitespace then decode.
-		clean := strings.Map(func(r rune) rune {
-			if r == '\r' || r == '\n' || r == ' ' || r == '\t' {
-				return -1
-			}
-			return r
-		}, string(raw))
-		dec, err := base64.StdEncoding.DecodeString(clean)
-		if err != nil {
-			return string(raw)
-		}
-		return string(dec)
-	default:
-		b, _ := io.ReadAll(body)
-		return string(b)
-	}
+	return string(decodeBytes(body, cte))
 }
 
 // HTMLToText renders an HTML body to readable plain text — the same rendition

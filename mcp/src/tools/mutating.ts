@@ -74,6 +74,8 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "delete_suppression",
   "create_agent_suppression",
   "delete_agent_suppression",
+  // external sending access (beta)
+  "request_sending_access",
 ]);
 
 /** Tools that only read — they keep working for a read-only account. */
@@ -117,6 +119,7 @@ export const NON_MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "list_agent_suppressions",
   "get_agent_metrics",
   "get_account_metrics",
+  "get_sending_access_request",
 ]);
 
 /**
@@ -216,6 +219,9 @@ export const TOOL_OPERATIONS: Readonly<Record<string, readonly string[]>> = {
   // metrics
   get_agent_metrics: ["getAgentMetrics"],
   get_account_metrics: ["getAccountMetrics"],
+  // external sending access (beta)
+  get_sending_access_request: ["getSendingAccessRequest"],
+  request_sending_access: ["createSendingAccessRequest"],
 };
 
 /** The `_meta` key under which every tool advertises its mutating flag. */

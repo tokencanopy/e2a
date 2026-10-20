@@ -90,6 +90,19 @@ oidc:
   # URL with no query or fragment; do not derive it from browser input.
   # Override: E2A_OIDC_LOGOUT_URL
   logout_url: ""
+  # OAuth scopes requested at login. Default: [openid]. Must include openid.
+  # Add "email" so the ID token carries email/email_verified: a login whose
+  # token asserts email_verified for the account's current email then records
+  # owner-mailbox proof (external sending access). Only add scopes the
+  # provider's client registration allows, or logins fail with invalid_scope.
+  # TRUST: enable "email" ONLY against an IdP that sets email_verified: true
+  # solely after a mailbox confirmation and resets it when the address
+  # changes. Some providers let a tenant admin set a mutable unverified email
+  # or report admin-set addresses as verified; a false proof unlocks
+  # owner-mailbox sending for a restricted account and also exempts sends to
+  # that address from the erase-defer check.
+  # Override: E2A_OIDC_SCOPES (comma-separated, e.g. "openid,email")
+  # scopes: [openid]
   # Enable with: E2A_OIDC_ENABLED=true
 
 # — Delegated access tokens ——————————————————————————————————————————————————
@@ -308,6 +321,13 @@ sender_identity:
 # established self-host-compatible default of 50, so the hashes intentionally
 # differ even though both policies are disabled.
 sending_ramp:
+  # Opt-in replacement: one account allowance (20 to 2,000), with shared
+  # identity capped at 50 and only external recipients counted. Independent
+  # of the legacy enabled/schedule fields below. Review existing-account
+  # seeding before activation; see docs/design/account-trust-ladder.md.
+  account_trust_enabled: false
+  # Retire probation/account/shared budget caps; global and notice pools stay.
+  disable_legacy_daily_budgets: false
   enabled: false
   start_daily: 50
   target_daily: 2000
@@ -349,15 +369,28 @@ sending_protection:
   operator_notice_recipient_version: 1
   # External sending access (optional, absent = disabled). When set, accounts
   # created at/after the cutoff may reach only their verified owner mailbox
-  # and their own live agents through the shared sending identity until an
-  # operator approves them (`e2a -approve-external-sending`), a billing writer
-  # sets account_limits.external_sending_entitled (active paid base plan), or
-  # they send from their own verified domain.
+  # and their own live agents through the shared sending identity until one
+  # of the configured unlocks applies:
+  #   operator_approval  an operator approves them (`e2a -approve-external-sending`);
+  #                      always available — customers file a request, and the
+  #                      owner is emailed the decision
+  #   verified_domain    they send from their own verified domain
+  #   paid_entitlement   a billing writer sets
+  #                      account_limits.external_sending_entitled (paid base plan)
+  # `unlocks` omitted = all three (the behavior before the key existed, and the
+  # same policy hash). An empty list, or one without operator_approval, is a
+  # startup error. The hosted e2a service runs `unlocks: [operator_approval]`
+  # with the cutoff at the epoch: every account is restricted until an operator
+  # approves it, and a verified domain or paid plan is a signal the operator
+  # weighs rather than an automatic unlock (a stolen-card paid signup must not
+  # unlock bulk sending on its own). Pre-grant legitimate accounts before
+  # narrowing the set or moving the cutoff.
   # The cutoff is an immutable RFC3339 UTC instant; leave the block out to keep
   # existing behavior (and the existing policy hash).
   # external_sending_access:
   #   mode: shadow                                   # disabled | shadow | enforce
   #   accounts_created_at_or_after: "2026-10-01T00:00:00Z"
+  #   unlocks: [operator_approval, verified_domain, paid_entitlement]
 
 # Outbound delivery feedback (decision 9 / Slice 4b). When ses_configuration_set
 # is set, outbound mail is tagged with X-SES-CONFIGURATION-SET so SES publishes
@@ -461,9 +494,32 @@ rate_limits:
 # -inspect-tombstone-keys shows the active version, the known versions and
 # how many live tombstones depend on each.
 # E2A_TRASH_IDENTITY_TOMBSTONES=true overrides the flag.
+#
+# recent_sender_erase_defer_days (default 14; 0 disables everywhere): an
+# on-demand permanent delete of an account (DELETE /v1/account?permanent=true,
+# or "erase now" on the restore screen), an agent (DELETE
+# /v1/agents/{email}?permanent=true) or a trashed message (?permanent=true)
+# that emailed an external recipient — anyone other than the account's own
+# agents, its verified owner mailbox, or an address on the shared agent
+# domain — within this many days is deferred: it goes to (or stays in) its
+# normal trash (receipt erase_deferred: true, purge_after) and is purged when
+# that trash window ends, so complaints and bounces that arrive days after a
+# send still land on the account's sending controls. The account deferral has
+# no effect when account trash is disabled. Unset means 14, lowered to the
+# shortest trash window; an explicit value larger than retention_days or
+# account_retention_days is refused at startup (the janitor purges at
+# deleted_at + retention). System and internal account classes are never
+# deferred. E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS overrides it.
+#
+# erase_defer_exempt_domains (default [simulator.amazonses.com]): recipient
+# domains that never count as external — provider test mailboxes the prober
+# and e2e harnesses send to. shared_domain is always exempt too.
+# E2A_TRASH_ERASE_DEFER_EXEMPT_DOMAINS (comma-separated) overrides it.
 trash:
   retention_days: 30
   # account_retention_days: 30
+  # recent_sender_erase_defer_days: 14
+  # erase_defer_exempt_domains: [simulator.amazonses.com]
   identity_tombstones: false
 
 # — Metrics (Prometheus) ——————————————————————————————————————————————————————

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/mail"
 	"net/netip"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -243,6 +246,32 @@ type OIDCConfig struct {
 	// deployments can use this to cascade logout through their OIDC control
 	// plane; it is never taken from a request parameter.
 	LogoutURL string `yaml:"logout_url"`
+	// Scopes are the OAuth scopes requested at the authorization endpoint.
+	// Default ["openid"]; it must contain "openid". Add "email" so the ID
+	// token carries email/email_verified, which lets a verified login record
+	// owner-mailbox proof. Override with E2A_OIDC_SCOPES (comma-separated).
+	// Only list scopes the provider's client registration allows, or logins
+	// fail with invalid_scope.
+	//
+	// TRUST: enable "email" only against an IdP that sets email_verified=true
+	// solely after a mailbox confirmation and resets it when the address
+	// changes. Some providers let a tenant admin set a mutable unverified
+	// email or report admin-set addresses as verified. A false proof unlocks
+	// owner-mailbox sending for a restricted account and also exempts sends
+	// to that address from the erase-defer check.
+	Scopes []string `yaml:"scopes"`
+}
+
+// DefaultOIDCScopes is the scope list used when oidc.scopes is unset.
+var DefaultOIDCScopes = []string{"openid"}
+
+// EffectiveScopes returns Scopes, or the default when none are configured.
+// Load already defaults; this exists for configs built without Load (tests).
+func (c OIDCConfig) EffectiveScopes() []string {
+	if len(c.Scopes) == 0 {
+		return append([]string(nil), DefaultOIDCScopes...)
+	}
+	return append([]string(nil), c.Scopes...)
 }
 
 type SigningConfig struct {
@@ -518,10 +547,12 @@ type SenderIdentityConfig struct {
 // public API. Values are snapshotted when a domain first sends, so later config
 // changes do not reshape an in-flight ramp.
 type SendingRampConfig struct {
-	Enabled     bool `yaml:"enabled"`
-	StartDaily  int  `yaml:"start_daily"`
-	TargetDaily int  `yaml:"target_daily"`
-	RampDays    int  `yaml:"ramp_days"`
+	DisableLegacyDailyBudgets bool `yaml:"disable_legacy_daily_budgets"`
+	AccountTrustEnabled       bool `yaml:"account_trust_enabled"`
+	Enabled                   bool `yaml:"enabled"`
+	StartDaily                int  `yaml:"start_daily"`
+	TargetDaily               int  `yaml:"target_daily"`
+	RampDays                  int  `yaml:"ramp_days"`
 }
 
 // SendingProtectionConfig carries the non-schedule half of the sending
@@ -575,9 +606,16 @@ type SendingProtectionConfig struct {
 // Mode is disabled|shadow|enforce; AccountsCreatedAtOrAfter is the immutable
 // RFC3339 UTC cohort cutoff (for example 2026-10-01T00:00:00Z). Both are
 // validated by internal/sendingpolicy.
+//
+// Unlocks optionally narrows which routes may lift the restriction, from the
+// closed vocabulary operator_approval, verified_domain, paid_entitlement.
+// Absent (nil) means all three — the behavior before the key existed. An
+// explicit empty list, or a list without operator_approval, is a startup
+// error. Hosted e2a runs [operator_approval]: explicit approval only.
 type ExternalSendingAccessConfig struct {
-	Mode                     string `yaml:"mode"`
-	AccountsCreatedAtOrAfter string `yaml:"accounts_created_at_or_after"`
+	Mode                     string   `yaml:"mode"`
+	AccountsCreatedAtOrAfter string   `yaml:"accounts_created_at_or_after"`
+	Unlocks                  []string `yaml:"unlocks"`
 }
 
 // LimitsConfig is the operator-configured fallback applied to any user
@@ -663,6 +701,33 @@ type TrashConfig struct {
 	// account soft deletion existed. Override with
 	// E2A_TRASH_ACCOUNT_RETENTION_DAYS.
 	AccountRetentionDays *int `yaml:"account_retention_days"`
+	// RecentSenderEraseDeferDays defers an on-demand permanent erase of
+	// anything that emailed an external recipient within this many days:
+	// the account (DELETE /v1/account?permanent=true, or the restore
+	// interstitial's "erase now"), an agent (DELETE
+	// /v1/agents/{email}?permanent=true) or a message (permanent delete of a
+	// trashed message). Each goes to (or stays in) its normal trash and is
+	// purged at the end of that trash window, so late provider feedback
+	// (complaints, bounces) still lands on the account's sending controls and
+	// aggregates, and the evidence the account check reads cannot be removed
+	// inside the window. Default 14; 0 disables it everywhere. The account
+	// deferral has no effect when account trash is disabled
+	// (account_retention_days: 0).
+	// Override with E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS.
+	//
+	// Unset (nil) means 14, lowered to the shortest trash window when a
+	// deployment's trash is shorter, so existing configs keep starting. An
+	// explicit value longer than retention_days or account_retention_days is
+	// rejected: the janitor purges at deleted_at + retention, which would
+	// purge deferred evidence before the window ends.
+	RecentSenderEraseDeferDays *int `yaml:"recent_sender_erase_defer_days"`
+	// EraseDeferExemptDomains are recipient domains that never count as
+	// external for RecentSenderEraseDeferDays — provider test mailboxes the
+	// prober and e2e harnesses send to. The deployment's shared_domain is
+	// always exempt in addition. Default [simulator.amazonses.com]; an
+	// explicit empty list exempts only the shared domain. Override with
+	// E2A_TRASH_ERASE_DEFER_EXEMPT_DOMAINS (comma-separated).
+	EraseDeferExemptDomains []string `yaml:"erase_defer_exempt_domains"`
 	// IdentityTombstones enables identity tombstones: every account purge
 	// holds the account's login subject(s) and email (and, for an
 	// abuse-paused account, its verified domains) as keyed digests so the
@@ -671,6 +736,42 @@ type TrashConfig struct {
 	// E2A_TOMBSTONE_KEY secret; without it signup fails closed (503) and
 	// purges are skipped. Override with E2A_TRASH_IDENTITY_TOMBSTONES.
 	IdentityTombstones bool `yaml:"identity_tombstones"`
+}
+
+// DefaultRecentSenderEraseDeferDays is the deferral window when
+// recent_sender_erase_defer_days is unset.
+const DefaultRecentSenderEraseDeferDays = 14
+
+// RecentSenderEraseDefer returns the effective deferral window in days
+// (0 = disabled): the explicit value, or the default lowered to the
+// shortest trash window.
+func (t TrashConfig) RecentSenderEraseDefer() int {
+	if t.RecentSenderEraseDeferDays != nil {
+		return *t.RecentSenderEraseDeferDays
+	}
+	d := DefaultRecentSenderEraseDeferDays
+	if t.RetentionDays < d {
+		d = t.RetentionDays
+	}
+	if ar := t.AccountRetention(); ar > 0 && ar < d {
+		d = ar
+	}
+	return d
+}
+
+// EraseDeferExemptDomainList is the full exempt-domain list the server uses
+// for the recent-sender purge deferral: the configured test domains plus the
+// deployment's shared agent domain by name (its domains row may be owned by
+// the probe account, so the unowned-row rule alone would miss it). Entries are
+// trimmed and lower-cased; empty ones are dropped.
+func (c *Config) EraseDeferExemptDomainList() []string {
+	out := make([]string, 0, len(c.Trash.EraseDeferExemptDomains)+1)
+	for _, d := range append(append([]string(nil), c.Trash.EraseDeferExemptDomains...), c.SharedDomain) {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // AccountRetention returns the effective account trash window in days
@@ -749,7 +850,10 @@ func Load(path string) (*Config, error) {
 		},
 		RateLimits: RateLimitsConfig{PollPerMinute: 240},
 		Metrics:    MetricsConfig{ListenAddr: "127.0.0.1:9091"},
-		Trash:      TrashConfig{RetentionDays: 30},
+		Trash: TrashConfig{
+			RetentionDays:           30,
+			EraseDeferExemptDomains: []string{"simulator.amazonses.com"},
+		},
 		// An absent sender_identity block keeps the fixture expiry default;
 		// an explicit `fixture_ttl: 0` survives unmarshal and disables it.
 		// The reclaim defaults are the SAFE ones: disarmed, no zones (which
@@ -775,6 +879,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, err
+	}
+	if err := checkSendingProtectionStrict(data); err != nil {
 		return nil, err
 	}
 
@@ -841,6 +948,20 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("E2A_OIDC_LOGOUT_URL"); v != "" {
 		cfg.OIDC.LogoutURL = v
+	}
+	if v := os.Getenv("E2A_OIDC_SCOPES"); v != "" {
+		var scopes []string
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				scopes = append(scopes, part)
+			}
+		}
+		if len(scopes) == 0 {
+			// Only commas/whitespace: keep an empty entry so Validate fails
+			// at boot instead of silently using the default.
+			scopes = []string{""}
+		}
+		cfg.OIDC.Scopes = scopes
 	}
 	if v := os.Getenv("E2A_DELEGATED_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -981,6 +1102,21 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.Trash.AccountRetentionDays = &d
 	}
+	if v := os.Getenv("E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS"); v != "" {
+		d, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("config: E2A_TRASH_RECENT_SENDER_ERASE_DEFER_DAYS must be a whole number of days, got %q", v)
+		}
+		cfg.Trash.RecentSenderEraseDeferDays = &d
+	}
+	if v, ok := os.LookupEnv("E2A_TRASH_ERASE_DEFER_EXEMPT_DOMAINS"); ok {
+		cfg.Trash.EraseDeferExemptDomains = nil
+		for _, d := range strings.Split(v, ",") {
+			if d = strings.TrimSpace(d); d != "" {
+				cfg.Trash.EraseDeferExemptDomains = append(cfg.Trash.EraseDeferExemptDomains, d)
+			}
+		}
+	}
 	if v := os.Getenv("E2A_TRASH_IDENTITY_TOMBSTONES"); v != "" {
 		b, err := strconv.ParseBool(strings.TrimSpace(v))
 		if err != nil {
@@ -1013,6 +1149,12 @@ func Load(path string) (*Config, error) {
 	// Split deployments (web on one host, API/MCP on another) set api_url.
 	if cfg.HTTP.APIURL == "" {
 		cfg.HTTP.APIURL = cfg.HTTP.PublicURL
+	}
+	for i, scope := range cfg.OIDC.Scopes {
+		cfg.OIDC.Scopes[i] = strings.TrimSpace(scope)
+	}
+	if len(cfg.OIDC.Scopes) == 0 {
+		cfg.OIDC.Scopes = cfg.OIDC.EffectiveScopes()
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -1051,6 +1193,25 @@ func (c *Config) Validate() error {
 	}
 	if c.Trash.AccountRetentionDays != nil && *c.Trash.AccountRetentionDays < 0 {
 		return fmt.Errorf("config: trash.account_retention_days must be 0 (erase immediately) or a positive number of days (got %d)", *c.Trash.AccountRetentionDays)
+	}
+	if d := c.Trash.RecentSenderEraseDeferDays; d != nil {
+		if *d < 0 {
+			return fmt.Errorf("config: trash.recent_sender_erase_defer_days must be 0 (never defer) or a positive number of days (got %d)", *d)
+		}
+		// The janitor purges trashed items at deleted_at + retention, so a
+		// defer window longer than a trash window would let deferred
+		// evidence be purged before the window ends.
+		if *d > c.Trash.RetentionDays {
+			return fmt.Errorf("config: trash.recent_sender_erase_defer_days (%d) must not exceed trash.retention_days (%d): deferred agents and messages are purged when their trash window ends", *d, c.Trash.RetentionDays)
+		}
+		if ar := c.Trash.AccountRetention(); ar > 0 && *d > ar {
+			return fmt.Errorf("config: trash.recent_sender_erase_defer_days (%d) must not exceed trash.account_retention_days (%d): deferred accounts are purged when the account trash window ends", *d, ar)
+		}
+	}
+	for _, dom := range c.Trash.EraseDeferExemptDomains {
+		if dom = strings.TrimSpace(dom); dom == "" || strings.Contains(dom, "@") {
+			return fmt.Errorf("config: trash.erase_defer_exempt_domains entries must be bare domain names (got %q)", dom)
+		}
 	}
 	if c.Trash.RetentionDays < 1 {
 		return fmt.Errorf("config: trash.retention_days must be at least 1 (got %d) — the stable API promises soft-deleted resources stay restorable", c.Trash.RetentionDays)
@@ -1091,6 +1252,24 @@ func (c *Config) Validate() error {
 		redirectURL, err := absoluteHTTPURL(c.OIDC.RedirectURL)
 		if err != nil || redirectURL.Fragment != "" {
 			return fmt.Errorf("config: oidc.redirect_url must be an absolute http(s) URL without a fragment")
+		}
+	}
+	if len(c.OIDC.Scopes) > 0 {
+		seen := make(map[string]struct{}, len(c.OIDC.Scopes))
+		for _, scope := range c.OIDC.Scopes {
+			if strings.TrimSpace(scope) == "" {
+				return fmt.Errorf("config: oidc.scopes must not contain an empty entry")
+			}
+			if strings.IndexFunc(scope, unicode.IsSpace) >= 0 {
+				return fmt.Errorf("config: oidc.scopes entry %q contains whitespace; list each scope separately", scope)
+			}
+			if _, dup := seen[scope]; dup {
+				return fmt.Errorf("config: oidc.scopes contains duplicate entry %q", scope)
+			}
+			seen[scope] = struct{}{}
+		}
+		if _, ok := seen["openid"]; !ok {
+			return fmt.Errorf("config: oidc.scopes must include \"openid\"")
 		}
 	}
 	if c.OIDC.LogoutURL != "" {
@@ -1282,4 +1461,84 @@ func absoluteHTTPURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("invalid absolute http(s) URL")
 	}
 	return parsed, nil
+}
+
+// checkSendingProtectionStrict re-decodes ONLY the `sending_protection`
+// subtree with unknown keys rejected. The rest of the file stays lenient
+// (self-hosters carry keys from older docs), but this block is a security
+// policy: a misspelled `unlock:` or `Unlocks:` under external_sending_access,
+// or a key indented one level off, would otherwise silently mean "every
+// unlock". It also rejects an explicitly null or blank `unlocks:` — yaml.v3
+// decodes `unlocks:`, `unlocks: null` and `unlocks: ~` to a nil slice without
+// ever invoking a custom unmarshaler, which would read as "absent = all
+// three" and bypass the empty-list rejection. Presence is therefore detected
+// on the YAML node itself.
+func checkSendingProtectionStrict(data []byte) error {
+	// One strict decode of the WHOLE document, so anchors, aliases and merge
+	// keys defined anywhere resolve exactly as in the lenient decode. Only
+	// sending_protection is typed; every other top-level key lands in the
+	// inline map, which keeps the rest of the file lenient.
+	var strict struct {
+		SP   SendingProtectionConfig `yaml:"sending_protection"`
+		Rest map[string]yaml.Node    `yaml:",inline"`
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&strict); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("sending_protection: %w", err)
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	if len(root.Content) == 0 {
+		return nil
+	}
+	esa := mappingValue(mappingValue(root.Content[0], "sending_protection"), "external_sending_access")
+	if esa == nil {
+		return nil
+	}
+	if v := mappingValue(esa, "unlocks"); v != nil && v.ShortTag() == "!!null" {
+		return errors.New("sending_protection.external_sending_access.unlocks is null or blank; omit the key to allow every unlock, or list the unlocks (it must contain operator_approval)")
+	}
+	return nil
+}
+
+// mappingValue returns the value node for key in a mapping node, or nil.
+// Aliases are followed, and `<<` merge keys are searched after the mapping's
+// own keys (an explicit key wins, as in YAML merge semantics).
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	m = resolveAlias(m)
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return resolveAlias(m.Content[i+1])
+		}
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != "<<" {
+			continue
+		}
+		merged := resolveAlias(m.Content[i+1])
+		sources := []*yaml.Node{merged}
+		if merged != nil && merged.Kind == yaml.SequenceNode {
+			sources = merged.Content
+		}
+		for _, src := range sources {
+			if v := mappingValue(src, key); v != nil {
+				return v
+			}
+		}
+	}
+	return nil
+}
+
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for depth := 0; n != nil && n.Kind == yaml.AliasNode && depth < 16; depth++ {
+		n = n.Alias
+	}
+	return n
 }

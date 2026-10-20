@@ -3,6 +3,8 @@ package outboundsend_test
 import (
 	"context"
 	"errors"
+	"github.com/tokencanopy/e2a/internal/sendramp"
+	"strings"
 	"testing"
 	"time"
 
@@ -553,5 +555,18 @@ func TestGatedWorker_ExternalSendingNotEnabledFailsWithItsReason(t *testing.T) {
 	})
 	if err := w.Work(context.Background(), job("msg_esa_legacy", 1)); !isCancel(err) || len(st.failed) != 1 || st.failed[0].reason != messagelifecycle.ReasonSubmissionExternalSendingNotEnabled {
 		t.Fatalf("legacy refusal: err=%v failed=%+v", err, st.failed)
+	}
+}
+
+func TestGatedWorkerPersistsDailyLimitHoldDetail(t *testing.T) {
+	st := &fakeStore{job: acceptedJob("msg_daily_hold")}
+	reset := time.Now().UTC().Add(time.Hour)
+	g := &fakeGate{reserve: sendingpolicy.Decision{Reason: sendingpolicy.ReasonRampCapacity, RetryAt: reset, DailyLimit: &sendramp.AccountDailyLimit{Limit: 20, Used: 20, SharedLimit: 20, SharedUsed: 20, ResetsAt: reset}}}
+	err := outboundsend.NewSendWorker(st, &fakeDeliverer{}).WithGate(g).Work(context.Background(), gatedJob("msg_daily_hold", 1))
+	if !isSnooze(err) {
+		t.Fatalf("hold: %v", err)
+	}
+	if len(st.holdDetails) != 1 || !strings.Contains(st.holdDetails[0], "limit=20 used=20") || !strings.Contains(st.holdDetails[0], reset.Format(time.RFC3339)) {
+		t.Fatalf("missing persisted allowance/reset: %v", st.holdDetails)
 	}
 }

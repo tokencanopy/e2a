@@ -89,7 +89,7 @@ func TestLatestMigrationAppliedRecognizesLegacyAlias(t *testing.T) {
 func TestReadyzHandler_Ready(t *testing.T) {
 	pool := migratedTestDB(t)
 	rec := httptest.NewRecorder()
-	newReadinessMonitor(pool, nil).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	newReadinessMonitor(pool, nil, nil).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -114,7 +114,7 @@ func TestReadyzHandler_DBUnreachable(t *testing.T) {
 	pool.Close()
 
 	rec := httptest.NewRecorder()
-	newReadinessMonitor(pool, nil).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	newReadinessMonitor(pool, nil, nil).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
@@ -140,7 +140,7 @@ func TestReadyzHandler_Draining(t *testing.T) {
 	var drain atomic.Bool
 	drain.Store(true)
 	rec := httptest.NewRecorder()
-	newReadinessMonitor(pool, &drain).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	newReadinessMonitor(pool, &drain, nil).handler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
@@ -160,7 +160,7 @@ func TestReadyzHandler_Draining(t *testing.T) {
 // DOWN and answered every request — including ones that never touch the DB —
 // with its own 503.
 func TestReadinessToleratesTransientFailureWithinGrace(t *testing.T) {
-	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, time.Hour, time.Hour, 2*time.Second)
+	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, nil, time.Hour, time.Hour, 2*time.Second)
 	defer m.Stop()
 
 	rec := httptest.NewRecorder()
@@ -183,7 +183,7 @@ func TestReadinessToleratesTransientFailureWithinGrace(t *testing.T) {
 // A failure that outlives the grace window must still flip readiness — the
 // tolerance above must not become "never report a dead database".
 func TestReadinessFlipsAfterGraceExpires(t *testing.T) {
-	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, time.Hour, 0, 2*time.Second)
+	m := newReadinessMonitorWithConfig(migratedTestDB(t), nil, nil, time.Hour, 0, 2*time.Second)
 	defer m.Stop()
 
 	m.probeFn = func() (string, error) { return "database unreachable", errNotApplied }
@@ -204,7 +204,7 @@ func TestReadinessFlipsAfterGraceExpires(t *testing.T) {
 // held open and the probe must still succeed.
 func TestReadinessProbeSurvivesPoolExhaustion(t *testing.T) {
 	pool := migratedTestDB(t)
-	m := newReadinessMonitorWithConfig(pool, nil, time.Hour, 0, 3*time.Second)
+	m := newReadinessMonitorWithConfig(pool, nil, nil, time.Hour, 0, 3*time.Second)
 	defer m.Stop()
 
 	ctx := context.Background()
@@ -246,7 +246,7 @@ func TestReadinessHandlerDoesNotTouchPool(t *testing.T) {
 	}
 	dead.Close()
 
-	m := newReadinessMonitorWithConfig(dead, nil, time.Hour, time.Hour, 2*time.Second)
+	m := newReadinessMonitorWithConfig(dead, nil, nil, time.Hour, time.Hour, 2*time.Second)
 	defer m.Stop()
 
 	start := time.Now()

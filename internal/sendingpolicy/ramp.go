@@ -55,6 +55,9 @@ const ReasonRampCapacity = "sending_ramp_capacity_exhausted"
 // rampSubject is everything the ramp needs about one customer message, read
 // from the locked source rows.
 type rampSubject struct {
+	account   bool
+	shared    bool
+	planCap   *int
 	messageID string
 	userID    string
 	domain    string
@@ -72,6 +75,9 @@ type rampSubject struct {
 // shared with that worker during the migration. Two different notions of
 // "eligible" would let one path reserve capacity the other never released.
 func (m *Module) rampSubjectFor(ctx context.Context, tx pgx.Tx, policy RuntimePolicy, op operationRow, units int) (rampSubject, error) {
+	if policy.AccountTrustEnabled {
+		return m.accountTrustSubject(ctx, tx, op)
+	}
 	if !policy.RampEnabled || op.Purpose != PurposeCustomerMessage || op.Shared {
 		return rampSubject{}, nil
 	}
@@ -115,6 +121,9 @@ func (m *Module) rampSubjectFor(ctx context.Context, tx pgx.Tx, policy RuntimePo
 // probation concept for custom domains at all, and the account and platform
 // pools still bound the traffic.
 func (m *Module) rampProbation(ctx context.Context, tx pgx.Tx, policy RuntimePolicy, op operationRow) (bool, error) {
+	if policy.AccountTrustEnabled {
+		return false, nil
+	}
 	if op.Shared {
 		return true, nil
 	}
@@ -143,6 +152,20 @@ func (m *Module) rampProbation(ctx context.Context, tx pgx.Tx, policy RuntimePol
 // platform pool.
 func (m *Module) rampAuthorize(ctx context.Context, tx pgx.Tx, policy RuntimePolicy, subject rampSubject, day time.Time) error {
 	if !subject.applies {
+		return nil
+	}
+	if subject.account {
+		d, err := sendramp.ReserveAccountTx(ctx, tx, sendramp.AccountReserveRequest{UserID: subject.userID, MessageID: subject.messageID, Units: subject.units, Shared: subject.shared, Day: day, PlanCap: subject.planCap})
+		if err != nil {
+			var permanent *sendramp.PermanentError
+			if errors.As(err, &permanent) {
+				return fmt.Errorf("%w: %v", errRampUnavailable, err)
+			}
+			return err
+		}
+		if !d.Allowed {
+			return &accountCapacityError{daily: d}
+		}
 		return nil
 	}
 	decision, err := sendramp.ReserveTx(ctx, tx, sendramp.ReserveRequest{
@@ -188,6 +211,12 @@ func (m *Module) rampAuthorize(ctx context.Context, tx pgx.Tx, policy RuntimePol
 // writing one: the two call sites have released their units at different
 // points, and only they know which.
 func rampHoldFor(err error, day time.Time) (Decision, bool) {
+	var capacity *accountCapacityError
+	if errors.As(err, &capacity) {
+		d := holdDecision(ReasonRampCapacity, capacity.daily.ResetsAt)
+		d.DailyLimit = &capacity.daily
+		return d, true
+	}
 	switch {
 	case errors.Is(err, errRampCapacity):
 		return holdDecision(ReasonRampCapacity, nextUTCMidnight(day)), true
@@ -207,6 +236,9 @@ func rampHoldFor(err error, day time.Time) (Decision, bool) {
 // merely slowed down, and releasing its ramp claim would let the same message
 // re-qualify a stage it has already qualified.
 func (m *Module) rampRelease(ctx context.Context, tx pgx.Tx, messageID string) error {
+	if err := sendramp.SettleAccountTx(ctx, tx, messageID, false, time.Time{}, 0); err != nil {
+		return err
+	}
 	if err := sendramp.ReleaseTx(ctx, tx, messageID); err != nil {
 		return fmt.Errorf("sendingpolicy: release ramp capacity: %w", err)
 	}
@@ -221,13 +253,19 @@ func (m *Module) rampRelease(ctx context.Context, tx pgx.Tx, messageID string) e
 // gives the units back. Retryable and ambiguous results are deliberately absent
 // from the closed outcome set and leave the reservation standing: a message
 // that might have been delivered must not release ramp capacity.
-func (m *Module) rampSettle(ctx context.Context, tx pgx.Tx, messageID string, outcome SettlementOutcome) error {
+func (m *Module) rampSettle(ctx context.Context, tx pgx.Tx, messageID string, outcome SettlementOutcome, day time.Time, units int) error {
 	switch outcome {
 	case SettlementProviderAccepted:
+		if err := sendramp.SettleAccountTx(ctx, tx, messageID, true, day, units); err != nil {
+			return err
+		}
 		if err := sendramp.ConfirmTx(ctx, tx, messageID); err != nil {
 			return fmt.Errorf("sendingpolicy: confirm ramp capacity: %w", err)
 		}
 	case SettlementProviderPermanentlyRejected:
+		if err := sendramp.SettleAccountTx(ctx, tx, messageID, false, time.Time{}, 0); err != nil {
+			return err
+		}
 		if err := sendramp.ReleaseTx(ctx, tx, messageID); err != nil {
 			return fmt.Errorf("sendingpolicy: release ramp capacity: %w", err)
 		}

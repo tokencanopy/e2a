@@ -19,6 +19,7 @@ index.ts
 middleware.ts
 models/APIKeyExportEntry.ts
 models/APIKeyView.ts
+models/AccountDailyLimit.ts
 models/AccountMetricsView.ts
 models/AccountUserView.ts
 models/AccountView.ts

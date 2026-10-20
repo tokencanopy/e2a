@@ -434,6 +434,11 @@ func accountLoginIdentifiersTx(ctx context.Context, tx pgx.Tx, userID, email, su
 // with ErrEraseHeld so an operator can classify the pause before the content
 // goes (the account can still be trashed; the janitor purges it after the
 // window, writing abuse tombstones when the history says abuse).
+//
+// An account that sent to an external recipient within
+// RecentSenderEraseDefer is not purged: it stays in the trash (trashed here
+// if it was live) and the receipt is mode "trash" with erase_deferred — see
+// account_erase_defer.go. The pause refusal above takes precedence.
 func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx func(ctx context.Context, tx pgx.Tx, domain string) error) (*DeleteUserDataResult, error) {
 	res := &DeleteUserDataResult{Mode: AccountDeleteModePermanent}
 	// Fast path with no side effects; the authoritative check runs under the
@@ -454,16 +459,45 @@ func (s *Store) EraseAccount(ctx context.Context, userID string, perDomainInTx f
 	if s.tombstones.Enabled && s.tombstones.Keyring == nil {
 		return nil, ErrTombstoneKeyUnavailable
 	}
+	var trashRes *DeleteUserDataResult
 	if u.DeletedAt == nil {
-		if _, err := s.TrashAccount(ctx, userID, perDomainInTx); err != nil && !errors.Is(err, ErrAccountTrashed) {
+		if trashRes, err = s.TrashAccount(ctx, userID, perDomainInTx); err != nil && !errors.Is(err, ErrAccountTrashed) {
 			return nil, err
 		}
 	}
+	// Deferred erase for recent external senders: decided inside the purge
+	// claim, under the user row lock, after the trash committed (a trashed
+	// account can no longer send).
 	purged, err := s.purgeAccount(ctx, userID, true, perDomainInTx)
+	if errors.Is(err, errAccountEraseDeferred) {
+		return s.deferredEraseReceipt(ctx, userID, trashRes)
+	}
 	if err != nil {
 		return nil, err
 	}
 	res.UserDeleted = purged
+	return res, nil
+}
+
+// deferredEraseReceipt is the receipt of a permanent erase deferred to the
+// trash: mode "trash" with erase_deferred and purge_after. When this request
+// trashed the account the trash counts are kept; for an account that was
+// already in the trash (the restore interstitial's "erase now") nothing new
+// was trashed and the counts are zero.
+func (s *Store) deferredEraseReceipt(ctx context.Context, userID string, trashRes *DeleteUserDataResult) (*DeleteUserDataResult, error) {
+	res := trashRes
+	if res == nil {
+		res = &DeleteUserDataResult{Mode: AccountDeleteModeTrash}
+	}
+	if res.PurgeAfter == nil {
+		u, err := s.GetUserByIDAnyState(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		res.PurgeAfter = u.PurgeAfter()
+	}
+	res.EraseDeferred = true
+	res.Message = EraseDeferredMessage
 	return res, nil
 }
 
@@ -647,6 +681,23 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 			if paused {
 				return ErrEraseHeld
 			}
+			// Deferred erase for recent external senders, under the same
+			// lock. A failed check (a transient database error, a statement
+			// timeout) defers rather than erases: erasure is irreversible
+			// while a deferral is not — the account is already trashed, the
+			// owner sees a successful delete either way, and the janitor
+			// purges it at the end of the window. Failing open would let an
+			// induced error destroy exactly the evidence this check protects;
+			// failing with an error would leave the caller retrying against
+			// the same fault.
+			deferred, err := accountEraseDeferredTx(ctx, tx, userID)
+			if err != nil {
+				log.Printf("[identity] erase deferral check failed; keeping the account in the trash: user=%s err=%v", userID, err)
+				deferred = true
+			}
+			if deferred {
+				return errAccountEraseDeferred
+			}
 		}
 		if purgeToken != nil {
 			token = *purgeToken
@@ -707,6 +758,13 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		}
 	}
 
+	// The post-deletion feedback horizon, resolved now from the effective
+	// sending policy (not cached at boot), before the seal takes its locks.
+	feedbackRetention, err := s.resolveFeedbackRetention(ctx)
+	if err != nil {
+		return false, fmt.Errorf("purge: %w", err)
+	}
+
 	// Seal: the remaining account rows and the user itself.
 	err = s.WithTx(ctx, func(tx pgx.Tx) error {
 		var locked string
@@ -732,6 +790,32 @@ func (s *Store) purgeAccount(ctx context.Context, userID string, force bool, per
 		if _, err := tx.Exec(ctx, `DELETE FROM usage_events WHERE user_id = $1`, userID); err != nil {
 			return fmt.Errorf("purge: usage_events: %w", err)
 		}
+
+		// Deletion-resistant feedback provenance (B8): the account is
+		// genuinely gone at this seal step — either an immediate permanent
+		// erase, or a trashed account's retention window expiring — so this
+		// is where the post-deletion horizon is stamped on its retained
+		// correlations/events (which carry no FK and no plaintext recipient,
+		// so a controlled recipient cannot erase a complaint by deleting the
+		// account first). TrashAccount deliberately does NOT stamp this: a
+		// restore must not resurrect rows whose retention countdown already
+		// started, and the trash window itself is not the deletion event.
+		if _, err := tx.Exec(ctx, `
+			UPDATE sending_feedback_correlations
+			   SET expires_at = $2
+			 WHERE source_account_ref = $1 AND expires_at IS NULL`,
+			userID, time.Now().UTC().Add(feedbackRetention)); err != nil {
+			return fmt.Errorf("purge: stamp feedback retention: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE sending_feedback_events e
+			   SET expires_at = c.expires_at
+			  FROM sending_feedback_correlations c
+			 WHERE c.correlation_id = e.correlation_id AND c.source_account_ref = $1 AND e.expires_at IS NULL`,
+			userID); err != nil {
+			return fmt.Errorf("purge: stamp feedback event retention: %w", err)
+		}
+
 		// A domain other accounts' agents live on (the shared domain a probe
 		// account adopted) cannot cascade away with this user — the agents'
 		// FK is ON DELETE NO ACTION and the purge would wedge forever. Hand it

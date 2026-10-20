@@ -149,6 +149,12 @@ type testEnv struct {
 	// throwaway accounts the account-deletion scenarios delete.
 	disposableTrashAPIKey string
 	disposableEraseAPIKey string
+	// disposableDeferredEraseAPIKey authenticates the throwaway account with
+	// a recent external send, whose permanent erase is deferred.
+	disposableDeferredEraseAPIKey string
+	// deferredPurgeAPIKey authenticates the account whose agent and message
+	// permanent deletes are deferred.
+	deferredPurgeAPIKey string
 	// readOnlyAPIKey authenticates the abuse-paused (read-only) account.
 	readOnlyAPIKey string
 }
@@ -182,6 +188,9 @@ func setupEnv(t *testing.T) *testEnv {
 
 		disposableTrashAPIKey: cs.DisposableTrashAPIKey,
 		disposableEraseAPIKey: cs.DisposableEraseAPIKey,
+
+		disposableDeferredEraseAPIKey: cs.DisposableDeferredEraseAPIKey,
+		deferredPurgeAPIKey:           cs.DeferredPurgeAPIKey,
 
 		readOnlyAPIKey: cs.ReadOnlyAPIKey,
 	}
@@ -382,6 +391,8 @@ func (r *runner) resolve(s string) string {
 	s = strings.ReplaceAll(s, restrictedKeyPlaceholder, r.env.restrictedAPIKey)
 	s = strings.ReplaceAll(s, "{disposable_trash_api_key}", r.env.disposableTrashAPIKey)
 	s = strings.ReplaceAll(s, "{disposable_erase_api_key}", r.env.disposableEraseAPIKey)
+	s = strings.ReplaceAll(s, "{disposable_deferred_erase_api_key}", r.env.disposableDeferredEraseAPIKey)
+	s = strings.ReplaceAll(s, "{deferred_purge_api_key}", r.env.deferredPurgeAPIKey)
 	s = strings.ReplaceAll(s, readOnlyKeyPlaceholder, r.env.readOnlyAPIKey)
 	for k, v := range r.vars {
 		s = strings.ReplaceAll(s, "{"+k+"}", v)

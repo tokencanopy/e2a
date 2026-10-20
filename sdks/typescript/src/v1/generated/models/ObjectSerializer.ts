@@ -1,5 +1,6 @@
 export * from '../models/APIKeyExportEntry.js';
 export * from '../models/APIKeyView.js';
+export * from '../models/AccountDailyLimit.js';
 export * from '../models/AccountMetricsView.js';
 export * from '../models/AccountUserView.js';
 export * from '../models/AccountView.js';
@@ -172,6 +173,7 @@ export * from '../models/WebhookView.js';
 
 import { APIKeyExportEntry } from '../models/APIKeyExportEntry.js';
 import { APIKeyView } from '../models/APIKeyView.js';
+import { AccountDailyLimit } from '../models/AccountDailyLimit.js';
 import { AccountMetricsView } from '../models/AccountMetricsView.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { AccountView } from '../models/AccountView.js';
@@ -384,6 +386,7 @@ let enumsMap: Set<string> = new Set<string>([
 let typeMap: {[index: string]: any} = {
     "APIKeyExportEntry": APIKeyExportEntry,
     "APIKeyView": APIKeyView,
+    "AccountDailyLimit": AccountDailyLimit,
     "AccountMetricsView": AccountMetricsView,
     "AccountUserView": AccountUserView,
     "AccountView": AccountView,

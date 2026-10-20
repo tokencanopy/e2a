@@ -212,6 +212,15 @@ func (a *outboundSendStore) RecordHold(ctx context.Context, messageID string, cl
 	return a.store.RecordOutboundHold(ctx, messageID, string(class), anchor)
 }
 
+// RecordHoldDetail persists only the current claim's safe quota diagnostic.
+// The terminal sent/failed transitions clear or replace this field.
+func (a *outboundSendStore) RecordHoldDetail(ctx context.Context, messageID string, jobID int64, detail string) error {
+	return a.store.WithTx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE messages SET delivery_detail=$3 WHERE id=$1 AND send_job_id=$2 AND delivery_status IN ('accepted','sending')`, messageID, jobID, messagelifecycle.SafeDiagnostic(detail))
+		return err
+	})
+}
+
 // SuppressedRecipients backs the SendWorker's pre-provider suppression guard:
 // the effective account-wide + exact-agent subset (the store normalizes both
 // sides).
@@ -304,7 +313,9 @@ func (a *outboundSendStore) meterSentTx(ctx context.Context, tx pgx.Tx, info *id
 }
 
 // FinalizeScheduledCancellationTx performs the canonical guarded terminal
-// transition for a scheduled message restored after its cutoff. Authoritative
+// transition for a canceled scheduled message (restored after its cutoff, or
+// its agent's permanent delete deferred to the trash); detail is recorded as
+// the delivery detail. Authoritative
 // provider-accept evidence wins and is settled as sent; otherwise the
 // cancellation becomes failed with a deterministic email.failed event.
 func (a *outboundSendStore) FinalizeScheduledCancellationTx(
@@ -313,6 +324,7 @@ func (a *outboundSendStore) FinalizeScheduledCancellationTx(
 	messageID string,
 	jobID int64,
 	occurredAt time.Time,
+	detail string,
 ) error {
 	info, providerID, err := a.store.ResolveOutboundProviderAcceptedTx(ctx, tx, messageID)
 	if err != nil {
@@ -322,7 +334,6 @@ func (a *outboundSendStore) FinalizeScheduledCancellationTx(
 		return a.finalizeSentTx(ctx, tx, info, jobID, 0, info.ProviderAcceptedAt, providerID)
 	}
 
-	const detail = "scheduled send canceled because it was restored after scheduled_at"
 	finfo, err := a.store.MarkOutboundFailedTx(ctx, tx, messageID, detail, delivery.FailureSourceLocal)
 	if err != nil {
 		return err

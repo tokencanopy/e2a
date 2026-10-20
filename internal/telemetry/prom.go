@@ -18,47 +18,55 @@ import (
 // addresses, URLs, or credentials — see docs/observability.md for the
 // full catalog and the cardinality contract.
 type Prom struct {
-	reg *prometheus.Registry
+	reg                           *prometheus.Registry
+	sendingBudgetUsed             *prometheus.GaugeVec
+	sendingPolicyGeneration       prometheus.Gauge
+	sendingPolicyMismatch         prometheus.Gauge
+	sendingObservationLastSuccess prometheus.Gauge
 
-	httpRequests       *prometheus.CounterVec
-	httpDuration       *prometheus.HistogramVec
-	smtpInbound        *prometheus.CounterVec
-	smtpDuration       prometheus.Histogram
-	outQueueWait       prometheus.Histogram
-	outTerminal        *prometheus.CounterVec
-	outTerminalLat     prometheus.Histogram
-	outAttempts        *prometheus.CounterVec
-	outAttemptDur      prometheus.Histogram
-	outRateDeferred    prometheus.Counter
-	externalAccess     *prometheus.CounterVec
-	whAttempts         *prometheus.CounterVec
-	whAttemptDur       prometheus.Histogram
-	whTerminal         *prometheus.CounterVec
-	whNotify           *prometheus.CounterVec
-	whExpiredPending   prometheus.Counter
-	whFanOutRescued    prometheus.Counter
-	whDeliveryRescued  prometheus.Counter
-	whFirstTryLat      prometheus.Histogram
-	wsConnects         prometheus.Counter
-	wsDisconnects      *prometheus.CounterVec
-	wsRejected         *prometheus.CounterVec
-	delegatedFailures  *prometheus.CounterVec
-	delegatedRefresh   *prometheus.CounterVec
-	oidcDiscovery      *prometheus.CounterVec
-	oidcCallback       *prometheus.CounterVec
-	provisioning       *prometheus.CounterVec
-	wsDrained          prometheus.Counter
-	wsSendFailures     prometheus.Counter
-	wsActive           prometheus.Gauge
-	inboundProcess     *prometheus.CounterVec
-	inboundDuration    prometheus.Histogram
-	queueDepth         *prometheus.GaugeVec
-	queueOldestAge     *prometheus.GaugeVec
-	threadResolution   *prometheus.CounterVec
-	threadHeaderParse  *prometheus.CounterVec
-	threadNull         *prometheus.GaugeVec
-	threadViolations   *prometheus.GaugeVec
-	threadRelationship *prometheus.GaugeVec
+	httpRequests           *prometheus.CounterVec
+	httpDuration           *prometheus.HistogramVec
+	smtpInbound            *prometheus.CounterVec
+	smtpDuration           prometheus.Histogram
+	outQueueWait           prometheus.Histogram
+	outTerminal            *prometheus.CounterVec
+	outTerminalLat         prometheus.Histogram
+	outAttempts            *prometheus.CounterVec
+	outAttemptDur          prometheus.Histogram
+	outRateDeferred        prometheus.Counter
+	externalAccess         *prometheus.CounterVec
+	sendingFeedback        *prometheus.CounterVec
+	sendingLedgerRuns      *prometheus.CounterVec
+	sendingBudgetDecisions *prometheus.CounterVec
+	sendingBudgetDeferrals *prometheus.CounterVec
+	whAttempts             *prometheus.CounterVec
+	whAttemptDur           prometheus.Histogram
+	whTerminal             *prometheus.CounterVec
+	whNotify               *prometheus.CounterVec
+	whExpiredPending       prometheus.Counter
+	whFanOutRescued        prometheus.Counter
+	whDeliveryRescued      prometheus.Counter
+	whFirstTryLat          prometheus.Histogram
+	wsConnects             prometheus.Counter
+	wsDisconnects          *prometheus.CounterVec
+	wsRejected             *prometheus.CounterVec
+	delegatedFailures      *prometheus.CounterVec
+	delegatedRefresh       *prometheus.CounterVec
+	oidcDiscovery          *prometheus.CounterVec
+	oidcCallback           *prometheus.CounterVec
+	provisioning           *prometheus.CounterVec
+	wsDrained              prometheus.Counter
+	wsSendFailures         prometheus.Counter
+	wsActive               prometheus.Gauge
+	inboundProcess         *prometheus.CounterVec
+	inboundDuration        prometheus.Histogram
+	queueDepth             *prometheus.GaugeVec
+	queueOldestAge         *prometheus.GaugeVec
+	threadResolution       *prometheus.CounterVec
+	threadHeaderParse      *prometheus.CounterVec
+	threadNull             *prometheus.GaugeVec
+	threadViolations       *prometheus.GaugeVec
+	threadRelationship     *prometheus.GaugeVec
 
 	// legacy outbox instruments (same events the Log backend emits)
 	outboxPublished *prometheus.CounterVec
@@ -90,9 +98,11 @@ const (
 
 // Enum allowlists. Values outside these sets collapse to "other".
 var (
-	methodSet = set("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-	classSet  = set("1xx", "2xx", "3xx", "4xx", "5xx", "none")
-	smtpSet   = set("accepted", "accepted_dedup", "tempfail",
+	sendingBudgetScopeSet    = set("global_all", "account_daily", "account_shared_daily", "global_probation", "global_critical", "global_violation")
+	sendingBudgetDecisionSet = set("allow", "would_hold", "hold")
+	methodSet                = set("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+	classSet                 = set("1xx", "2xx", "3xx", "4xx", "5xx", "none")
+	smtpSet                  = set("accepted", "accepted_dedup", "tempfail",
 		"rejected_unknown_recipient", "rejected_unverified_domain", "rejected_quota",
 		"rejected_line_too_long")
 	outTermSet = set("sent", "failed_suppressed", "failed_provider",
@@ -102,8 +112,12 @@ var (
 	externalAccessStageSet = set("preflight", "acceptance", "authorization", "redemption")
 	externalAccessRouteSet = set("not_applicable", "custom_identity", "operator_approval",
 		"paid_entitlement", "restricted_recipients", "denied")
-	externalAccessModeSet = set("shadow", "enforce")
-	whSet                 = set("delivered", "retryable_failure", "exhausted",
+	externalAccessModeSet     = set("shadow", "enforce")
+	sendingFeedbackOutcomeSet = set("correlated", "dead_account", "unmatched_recipient",
+		"uncorrelated_with_marker", "uncorrelated", "duplicate")
+	sendingFeedbackBucketSet = set("delivered", "hard_bounce", "complaint", "terminal_other", "none")
+	sendingLedgerRunSet      = set("complete", "partial", "failed")
+	whSet                    = set("delivered", "retryable_failure", "exhausted",
 		"webhook_deleted", "skipped_disabled")
 	whTerminalSet = set("delivered", "e2a_failure", "endpoint_failure", "excluded")
 	whScopeSet    = set("initial", "replay", "test", "unknown")
@@ -138,7 +152,12 @@ var (
 	scopeSet = set("single", "since")
 	tableSet = set("webhook_events", "webhook_subscriber_deliveries",
 		"webhook_deliveries", "messages", "agent_identities",
-		"user_sessions", "oauth")
+		"user_sessions", "oauth",
+		// Sending-ledger retention (internal/sendingpolicy ledger janitor).
+		"sending_provider_operations", "sending_budget_reservations",
+		"sending_budget_counters", "sending_protection_notice_events",
+		"sending_protection_notice_deliveries", "account_sending_control_events",
+		"external_sending_access_events")
 	threadResolutionSet = set(
 		"api_reply", "fresh_send", "forward", "rfc_in_reply_to",
 		"rfc_references", "self_twin", "authenticated_delivery_twin",
@@ -271,6 +290,24 @@ func NewProm(build string) *Prom {
 			Name: "e2a_external_access_decisions_total",
 			Help: "External-sending-access evaluations by stage, deciding route and policy mode (shadow route=denied = sends enforcement would refuse).",
 		}, []string{"stage", "route", "mode"}),
+		sendingFeedback: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_sending_feedback_ingested_total",
+			Help: "Deletion-resistant SES feedback ingestion results by outcome and detector bucket (uncorrelated_with_marker = e2a-stamped mail with no retained correlation).",
+		}, []string{"outcome", "bucket"}),
+		sendingBudgetUsed:             prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "e2a_sending_budget_used_ratio", Help: "Global reserved (including confirmed) units divided by the effective policy limit for the current UTC day; aggregate replicas with max, not sum."}, []string{"scope"}),
+		sendingPolicyGeneration:       prometheus.NewGauge(prometheus.GaugeOpts{Name: "e2a_sending_protection_policy_generation", Help: "Sampled database policy generation, or zero for config source."}),
+		sendingPolicyMismatch:         prometheus.NewGauge(prometheus.GaugeOpts{Name: "e2a_sending_protection_policy_config_mismatch", Help: "One when the sampled database policy differs from this process's config policy; zero for config source."}),
+		sendingObservationLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{Name: "e2a_sending_budget_observation_last_success_timestamp_seconds", Help: "Unix time of the last successful policy and global-budget snapshot; zero until the first sample."}),
+		sendingBudgetDecisions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_sending_budget_decisions_total", Help: "Committed per-scope budget gate evaluations; not unique messages or sends.",
+		}, []string{"scope", "decision"}),
+		sendingBudgetDeferrals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_sending_budget_deferrals_total", Help: "Committed budget holds by deciding scope, including early reservation holds.",
+		}, []string{"scope"}),
+		sendingLedgerRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "e2a_sending_ledger_retention_runs_total",
+			Help: "Sending-ledger retention passes by outcome (partial = a table hit its per-run batch cap; failed = a table's batch failed and is retried next run). Rows deleted are on e2a_janitor_rows_deleted_total.",
+		}, []string{"outcome"}),
 		outRateDeferred: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "e2a_outbound_rate_deferred_total",
 			Help: "Outbound submissions deferred by the per-agent fire-time rate limiter (snoozed, re-fired when the window frees capacity).",
@@ -436,7 +473,7 @@ func NewProm(build string) *Prom {
 	registerer.MustRegister(
 		p.httpRequests, p.httpDuration,
 		p.smtpInbound, p.smtpDuration,
-		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred, p.externalAccess,
+		p.outQueueWait, p.outTerminal, p.outTerminalLat, p.outAttempts, p.outAttemptDur, p.outRateDeferred, p.externalAccess, p.sendingFeedback, p.sendingLedgerRuns, p.sendingBudgetDecisions, p.sendingBudgetDeferrals, p.sendingBudgetUsed, p.sendingPolicyGeneration, p.sendingPolicyMismatch, p.sendingObservationLastSuccess,
 		p.whAttempts, p.whAttemptDur, p.whTerminal, p.whNotify, p.whExpiredPending, p.whFanOutRescued, p.whDeliveryRescued, p.whFirstTryLat,
 		p.wsConnects, p.wsDisconnects, p.wsRejected, p.wsDrained, p.wsSendFailures, p.wsActive,
 		p.delegatedFailures, p.delegatedRefresh, p.oidcDiscovery, p.oidcCallback, p.provisioning,
@@ -446,6 +483,17 @@ func NewProm(build string) *Prom {
 		p.outboxPublished, p.outboxFanOut, p.outboxMatched, p.outboxNoMatch,
 		p.outboxFailures, p.redeliver, p.janitorDeleted, p.contactDue, p.notifyMissed, p.publisherLag,
 	)
+	// Export a zero baseline before the first run so increase() can count
+	// the first failure after a scrape. These outcomes are a closed set.
+	for _, outcome := range []string{"complete", "partial", "failed"} {
+		p.sendingLedgerRuns.WithLabelValues(outcome)
+	}
+	for scope := range sendingBudgetScopeSet {
+		p.sendingBudgetDeferrals.WithLabelValues(scope)
+		for decision := range sendingBudgetDecisionSet {
+			p.sendingBudgetDecisions.WithLabelValues(scope, decision)
+		}
+	}
 	return p
 }
 
@@ -511,6 +559,14 @@ func (p *Prom) OutboundRateDeferred() { p.outRateDeferred.Inc() }
 
 func (p *Prom) ExternalAccessDecision(stage, route, mode string) {
 	p.externalAccess.WithLabelValues(enum(externalAccessStageSet, stage), enum(externalAccessRouteSet, route), enum(externalAccessModeSet, mode)).Inc()
+}
+
+func (p *Prom) SendingFeedbackIngested(outcome, bucket string) {
+	p.sendingFeedback.WithLabelValues(enum(sendingFeedbackOutcomeSet, outcome), enum(sendingFeedbackBucketSet, bucket)).Inc()
+}
+
+func (p *Prom) SendingLedgerRetentionRun(outcome string) {
+	p.sendingLedgerRuns.WithLabelValues(enum(sendingLedgerRunSet, outcome)).Inc()
 }
 
 func (p *Prom) WebhookAttempt(outcome, statusClass string, seconds float64) {
@@ -704,3 +760,24 @@ func (p *Prom) SetPublisherLag(sec float64) { p.publisherLag.Set(sec) }
 
 // Compile guard.
 var _ Metrics = (*Prom)(nil)
+
+func (p *Prom) SendingBudgetDecision(scope, decision string) {
+	scope, decision = enum(sendingBudgetScopeSet, scope), enum(sendingBudgetDecisionSet, decision)
+	p.sendingBudgetDecisions.WithLabelValues(scope, decision).Inc()
+	if decision == "hold" {
+		p.sendingBudgetDeferrals.WithLabelValues(scope).Inc()
+	}
+}
+
+func (p *Prom) SendingBudgetSnapshot(usedRatio map[string]float64, generation int64, mismatch bool, observedAt float64) {
+	for _, scope := range []string{"global_all", "global_probation", "global_critical", "global_violation"} {
+		p.sendingBudgetUsed.WithLabelValues(scope).Set(usedRatio[scope])
+	}
+	p.sendingPolicyGeneration.Set(float64(generation))
+	value := float64(0)
+	if mismatch {
+		value = 1
+	}
+	p.sendingPolicyMismatch.Set(value)
+	p.sendingObservationLastSuccess.Set(observedAt)
+}

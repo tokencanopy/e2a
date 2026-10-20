@@ -109,8 +109,10 @@ func main() {
 	// Sending-protection local operator commands (Task 2). Each runs after
 	// migrations and exits without starting the server.
 	var spFlags sendingProtectionFlags
+	flag.BoolVar(&spFlags.inventory, "sending-protection-key-inventory", false, "print non-secret retained key references and permanent recipient registry as JSON, then exit")
 	flag.BoolVar(&spFlags.inspect, "sending-protection-policy", false, "print the stored runtime policy state and the hash this config's policy would activate, then exit")
-	flag.BoolVar(&spFlags.activate, "activate-sending-protection-policy", false, "CAS-activate this config's sending-protection policy (requires -expected-generation, -expected-policy-sha256, -reason), then exit")
+	flag.BoolVar(&spFlags.activate, "activate-sending-protection-policy", false, "CAS-activate the selected sending-protection policy (file, or config if absent; requires -expected-generation, -expected-policy-sha256, -reason), then exit")
+	flag.StringVar(&spFlags.policyFile, "sending-protection-policy-file", "", "reviewed runtime-policy JSON file for inspection or activation (maximum 64 KiB; no config/env overrides)")
 	flag.Int64Var(&spFlags.expectedGeneration, "expected-generation", -1, "policy generation the operator reviewed (activation CAS)")
 	flag.StringVar(&spFlags.expectedPolicySHA, "expected-policy-sha256", "", "reviewed canonical policy hash (activation CAS)")
 	flag.BoolVar(&spFlags.grandfather, "grandfather-current-sending-domains", false, "one-shot: exempt currently sending-verified domains in the same transaction as the activation")
@@ -128,6 +130,8 @@ func main() {
 	flag.BoolVar(&spFlags.approveExternal, "approve-external-sending", false, "grant an account shared-identity external sending (requires -account-id, -expected-external-sending-revision, -reason; optional -external-sending-request-id), then exit")
 	flag.BoolVar(&spFlags.revokeExternal, "revoke-external-sending", false, "revoke an account's shared-identity external sending grant (requires -account-id, -expected-external-sending-revision, -reason), then exit")
 	flag.BoolVar(&spFlags.declineExternal, "decline-external-sending-request", false, "decline a pending external sending request without changing the grant (requires -account-id, -external-sending-request-id), then exit")
+	flag.BoolVar(&spFlags.listExternal, "list-external-sending-requests", false, "list pending external sending requests (id, account, created_at, volume, current grant; add -all for every request), then exit")
+	flag.BoolVar(&spFlags.listAll, "all", false, "with -list-external-sending-requests: include decided requests")
 	flag.StringVar(&spFlags.accountID, "account-id", "", "account (user) id an external sending command acts on")
 	flag.Int64Var(&spFlags.expectedExternal, "expected-external-sending-revision", -1, "external sending access revision the operator inspected (CAS)")
 	flag.StringVar(&spFlags.requestID, "external-sending-request-id", "", "pending external sending request an approve/decline decides")
@@ -147,6 +151,9 @@ func main() {
 	flag.BoolVar(&acctFlags.escalateAbuse, "escalate-deleted-account-to-abuse", false, "after purge: write abuse-class tombstones for every identifier digest in a purged account's summary and extend the summary to the abuse hold (requires -deleted-account-id, -reason), then exit")
 	flag.IntVar(&acctFlags.holdDays, "tombstone-hold-days", 0, "hold length in days for -extend-identity-tombstones")
 	flag.Parse()
+	if err := spFlags.validateStandalone(); err != nil {
+		log.Fatalf("%v", err)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -179,6 +186,13 @@ func main() {
 	// Account trash window (trash.account_retention_days, default =
 	// retention_days; 0 = DELETE /v1/account erases immediately).
 	identity.AccountTrashRetention = time.Duration(cfg.Trash.AccountRetention()) * 24 * time.Hour
+	// Deferred erase for recent external senders
+	// (trash.recent_sender_erase_defer_days, default 14; 0 = never defer).
+	identity.RecentSenderEraseDefer = time.Duration(cfg.Trash.RecentSenderEraseDefer()) * 24 * time.Hour
+	// Recipient domains that never count as external: the configured test
+	// domains plus the shared agent domain by name (its domains row may be
+	// owned by the probe account, so the unowned-row rule alone misses it).
+	identity.EraseDeferExemptDomains = cfg.EraseDeferExemptDomainList()
 	// Identity tombstones (hosted policy). The key is env-only; a malformed
 	// value is fatal, an absent one leaves tombstone operations failing
 	// closed (signup 503, purge skipped) while the flag is on.
@@ -344,9 +358,9 @@ func main() {
 		metrics = promBackend
 	}
 	store.SetThreadMetrics(metrics)
-	// External-sending-access decisions (shadow impact / enforce refusals)
-	// as bounded counters; a no-op while the control is disabled.
-	sendingpolicy.SetExternalAccessObserver(metrics.ExternalAccessDecision)
+	// sendingpolicy's process-wide telemetry hooks: external-access
+	// decisions, feedback ingestion, and the ledger retention janitor.
+	installSendingPolicyObservers(metrics)
 	outboxWorker := webhookpub.NewOutboxWorker(pool, store).WithMetrics(metrics)
 	smtpRelay := outbound.NewSMTPRelay(&cfg.OutboundSMTP)
 	sender := outbound.NewSenderWithDKIM(smtpRelay, cfg.OutboundSMTP.FromDomain, store)
@@ -416,7 +430,8 @@ func main() {
 		// window, durable in Postgres): the cross-replica counterpart of the
 		// acceptance-time in-memory limiter, enforced immediately before
 		// provider submission so scheduled-send bursts can't exceed it.
-		rate: sendrate.NewStore(pool, time.Minute, 60),
+		rate:          sendrate.NewStore(pool, time.Minute, 60),
+		sharedDomains: nonEmpty(cfg.SharedDomain),
 	})
 	outboundJobs := outboundSending.jobs
 	registrars = append(registrars, outboundJobs)
@@ -424,6 +439,22 @@ func main() {
 	// seam with tokens from the same gate.
 	sendingGate, providerSubmitter := outboundSending.gate, outboundSending.submitter
 	registrars = append(registrars, sendramp.NewMaintenanceJobs(rampStore))
+	// Deletion-resistant feedback provenance (B8): refuse to start if any
+	// retained recipient row was signed under a key version this keyring
+	// does not hold — feedback for it could never be matched and the
+	// detector would be silently blind. The retention janitor and the
+	// consumer's accounting seam hang off the same module.
+	if outboundSending.module == nil {
+		log.Fatalf("sending policy gate is not the concrete module; feedback accounting cannot be wired")
+	}
+	if err := outboundSending.module.VerifyKeyringCoverage(ctx); err != nil {
+		log.Fatalf("Sending feedback keyring coverage: %v", err)
+	}
+	// The purge seal resolves the post-deletion horizon at purge time from
+	// the EFFECTIVE policy — the same accessor the retention janitor reads —
+	// not from the config-file policy captured here at boot.
+	store.SetFeedbackRetentionResolver(outboundSending.module.EffectiveFeedbackRetention)
+	registrars = append(registrars, outboundSending.feedbackMaintenance())
 	// Queue depth/age gauges: a 30s maintenance periodic sampling river_job
 	// per queue+state (docs/observability.md).
 	registrars = append(registrars, jobs.NewQueueStatsJobs(pool, metrics))
@@ -865,6 +896,7 @@ func main() {
 		},
 		time.Duration(cfg.Limits.CacheTTLSeconds)*time.Second,
 	)
+	enforcer.SetAccountDailyControl(outboundSending.module.AccountTrustEnabled)
 	api.SetEnforcer(enforcer)
 	// Master switch for the outbound footer; the enforcer above carries the
 	// per-account entitlement + row-less default the decision reads.
@@ -970,7 +1002,7 @@ func main() {
 	// /v1 contract, so it lives on this mux and never enters api/openapi.yaml.
 	// The verdict is refreshed on a background ticker, so this handler never
 	// competes for a pooled connection — see readyz.go for why that matters.
-	readiness := newReadinessMonitor(pool, &draining)
+	readiness := newReadinessMonitor(pool, &draining, outboundSending.module)
 	defer readiness.Stop()
 	router.HandleFunc("/readyz", readiness.handler()).Methods(http.MethodGet)
 	// /selftest — deep dependency diagnostics (health+json), auth-gated by the
@@ -982,7 +1014,8 @@ func main() {
 	// 4b). Fail-closed: the SNS signature is verified and the TopicArn must be
 	// in the configured allow-list (empty allow-list → every message is
 	// rejected, so this is inert until ops wires the topic).
-	deliveryConsumer := delivery.NewConsumer(store, deliveryEventFirer(webhookOutbox), outboundSendStore.FinalizeProviderAcceptedTx)
+	deliveryConsumer := outboundSending.armDeliveryConsumer(
+		delivery.NewConsumer(store, deliveryEventFirer(webhookOutbox), outboundSendStore.FinalizeProviderAcceptedTx))
 	deliveryVerifier := delivery.NewVerifier(cfg.DeliveryFeedback.SNSTopicARNs, delivery.HTTPCertFetcher)
 	// Public webhook receiver for AWS SNS (SES delivery/bounce/complaint). Named
 	// /webhooks/<provider> — it's an inbound third-party callback, not an internal
@@ -1132,6 +1165,10 @@ func main() {
 	// (The auto-disable janitor is now a River periodic on QueueMaintenance; the
 	// legacy SubscriberRetryWorker is gone.)
 	bgCtx, bgCancel := context.WithCancel(context.Background())
+	if promBackend != nil {
+		workerWG.Add(1)
+		go func() { defer workerWG.Done(); observeSendingBudgets(bgCtx, outboundSending.module, metrics) }()
+	}
 
 	// Outbox publisher worker: drains webhook_events → subscriber_deliveries and
 	// enqueues River delivery jobs in-tx. Skipped when fan-out runs on River

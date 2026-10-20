@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/riverqueue/river"
 
 	"github.com/tokencanopy/e2a/internal/agent"
 	"github.com/tokencanopy/e2a/internal/config"
+	"github.com/tokencanopy/e2a/internal/delivery"
+	"github.com/tokencanopy/e2a/internal/jobs"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/testutil/testdb"
 	"github.com/tokencanopy/e2a/internal/usage"
 )
@@ -45,6 +49,9 @@ func TestSendingPolicyWiring(t *testing.T) {
 	}
 	if got := composed.submitter.SESConfigurationSet(); got != "e2a-delivery-test" {
 		t.Fatalf("submitter configuration set = %q, want the deployment's — delivery feedback must stay on", got)
+	}
+	if composed.module == nil || sendingpolicy.Gate(composed.module) != composed.gate {
+		t.Fatal("the concrete module (feedback processor, keyring coverage, retention janitor) is not the composed gate")
 	}
 	if composed.jobs.Gate() != composed.gate {
 		t.Fatal("the jobs bundle does not hold the composed gate")
@@ -123,5 +130,107 @@ func TestNotificationAndPlatformMailWiring(t *testing.T) {
 	composed.armAPI(api)
 	if !api.ProviderSubmitterWired() {
 		t.Fatal("armAPI did not hand the API the submitter and gate")
+	}
+}
+
+// TestFeedbackAccountingWiring pins the two composition-root edges that are
+// invisible at runtime when they are missing. A delivery consumer without
+// the accounting seam still acks every SES notification and still runs the
+// message lifecycle, so nothing fails — the detector simply never receives
+// evidence. An unregistered retention janitor never enforces the
+// post-deletion horizon, so provenance accumulates forever. Both are one
+// line in main.go, and neither has any other test.
+func TestFeedbackAccountingWiring(t *testing.T) {
+	pool := testdb.TestDB(t)
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: "relay.invalid", Port: 587, FromDomain: "test.e2a.dev"})
+	composed := newOutboundSending(outboundSendingDeps{
+		pool:    pool,
+		relay:   relay,
+		secrets: sendingpolicy.Secrets{},
+		source:  sendingpolicy.PolicySourceConfig,
+		policy:  sendingpolicy.DisabledPolicy(),
+		// main passes nonEmpty(cfg.SharedDomain).
+		sharedDomains: nonEmpty("agents.localhost", "  "),
+	})
+	if !composed.module.ExcludesFeedbackDomain("agents.localhost") {
+		t.Fatal("the shared agent domain did not reach the feedback denominator exclusion")
+	}
+
+	bare := delivery.NewConsumer(nil, nil)
+	if bare.FeedbackProcessorWired() {
+		t.Fatal("a bare consumer must not claim an accounting seam")
+	}
+	if armed := composed.armDeliveryConsumer(bare); !armed.FeedbackProcessorWired() {
+		t.Fatal("the composition root did not install the feedback processor on the delivery consumer")
+	}
+
+	janitor := composed.feedbackMaintenance()
+	if janitor == nil {
+		t.Fatal("no feedback retention janitor composed")
+	}
+	periodics := janitor.RegisterJobs(river.NewWorkers())
+	if len(periodics) != 3 {
+		t.Fatalf("retention periodics = %d, want 3 (feedback retention + reconcile + ledger retention)", len(periodics))
+	}
+}
+
+// ledgerObserverRecorder is a full telemetry backend that records only the
+// ledger janitor's samples.
+type ledgerObserverRecorder struct {
+	telemetry.NoOp
+	mu      sync.Mutex
+	deleted map[string]int
+	runs    []string
+}
+
+func (r *ledgerObserverRecorder) JanitorRowsDeleted(table string, count int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted[table] += count
+}
+
+func (r *ledgerObserverRecorder) SendingLedgerRetentionRun(outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runs = append(r.runs, outcome)
+}
+
+// TestLedgerRetentionWiring: the composition root must both register the
+// sending-ledger janitor and route its samples to the process metrics
+// backend. Either omission is silent in production — the ledger simply grows,
+// or shrinks with no signal — so this drives the composed module's janitor
+// over a seeded expired row after installing the observers exactly as main
+// does, and requires the deletion and the run outcome to reach the backend.
+func TestLedgerRetentionWiring(t *testing.T) {
+	pool := testdb.TestDB(t)
+	if err := jobs.Migrate(context.Background(), pool); err != nil {
+		t.Fatalf("river migrate: %v", err)
+	}
+	relay := outbound.NewSMTPRelay(&config.OutboundSMTPConfig{Host: "relay.invalid", Port: 587, FromDomain: "test.e2a.dev"})
+	composed := newOutboundSending(outboundSendingDeps{
+		pool:    pool,
+		relay:   relay,
+		secrets: sendingpolicy.Secrets{},
+		source:  sendingpolicy.PolicySourceConfig,
+		policy:  sendingpolicy.DisabledPolicy(),
+	})
+
+	rec := &ledgerObserverRecorder{deleted: map[string]int{}}
+	installSendingPolicyObservers(rec)
+	t.Cleanup(func() { installSendingPolicyObservers(telemetry.NoOp{}) })
+
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO sending_budget_counters (scope, scope_id, day, daily_limit)
+		VALUES ('global_all', 'global', (now() AT TIME ZONE 'UTC')::date - 3, 5000)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sendingpolicy.NewLedgerRetentionWorker(composed.module).Work(context.Background(), &river.Job[sendingpolicy.LedgerRetentionArgs]{}); err != nil {
+		t.Fatalf("Work: %v", err)
+	}
+	if rec.deleted[sendingpolicy.LedgerTableCounters] != 1 {
+		t.Fatalf("deleted samples = %v, want the closed-day counter reported", rec.deleted)
+	}
+	if len(rec.runs) != 1 || rec.runs[0] != sendingpolicy.LedgerRunComplete {
+		t.Fatalf("run samples = %v, want one complete", rec.runs)
 	}
 }

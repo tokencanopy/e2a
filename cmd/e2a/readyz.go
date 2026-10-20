@@ -16,12 +16,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/identity"
+	"github.com/tokencanopy/e2a/internal/sendingpolicy"
 	"github.com/tokencanopy/e2a/migrations"
 )
 
 // Readiness is evaluated on a background ticker rather than inside the request,
 // and a failing probe only flips readiness once it has been failing for
-// readinessFailureGrace.
+// readinessFailureGrace. An unreadable or invalid database-source policy or
+// selected recipient registry entry fails immediately after its probe.
 //
 // The request-path version of this check was an availability hazard. It called
 // pool.Ping with a 2s deadline, so when the pool was saturated the check queued
@@ -46,6 +48,8 @@ const (
 	poolProbeTimeout = 250 * time.Millisecond
 )
 
+const readinessPolicyUnavailable = "sending protection policy unavailable"
+
 type readinessState struct {
 	ready  bool
 	reason string
@@ -57,6 +61,7 @@ type readinessMonitor struct {
 	pool     *pgxpool.Pool
 	draining *atomic.Bool
 	latest   string
+	policy   *sendingpolicy.Module
 
 	interval time.Duration
 	grace    time.Duration
@@ -85,14 +90,15 @@ type readinessMonitor struct {
 // Before that first success the instance is not ready, which preserves the
 // guarantee this check exists for: a freshly deployed instance whose migrations
 // did not apply never joins the rotation.
-func newReadinessMonitor(pool *pgxpool.Pool, draining *atomic.Bool) *readinessMonitor {
-	return newReadinessMonitorWithConfig(pool, draining,
+func newReadinessMonitor(pool *pgxpool.Pool, draining *atomic.Bool, policy *sendingpolicy.Module) *readinessMonitor {
+	return newReadinessMonitorWithConfig(pool, draining, policy,
 		readinessProbeInterval, readinessFailureGrace, readinessProbeTimeout)
 }
 
-func newReadinessMonitorWithConfig(pool *pgxpool.Pool, draining *atomic.Bool, interval, grace, timeout time.Duration) *readinessMonitor {
+func newReadinessMonitorWithConfig(pool *pgxpool.Pool, draining *atomic.Bool, policy *sendingpolicy.Module, interval, grace, timeout time.Duration) *readinessMonitor {
 	m := &readinessMonitor{
 		pool:     pool,
+		policy:   policy,
 		draining: draining,
 		latest:   latestMigration(),
 		interval: interval,
@@ -130,8 +136,9 @@ func (m *readinessMonitor) evaluate() {
 	// for transient pressure is what turned a slow database into a total
 	// outage. Before the first success lastOK is zero, so an instance that has
 	// never been ready flips immediately rather than being granted a grace
-	// period it has not earned.
-	if m.lastOK.IsZero() || now.Sub(m.lastOK) > m.grace {
+	// period it has not earned. Policy failures are not connectivity pressure:
+	// retaining a healthy verdict could admit a slot with the wrong controls.
+	if reason == readinessPolicyUnavailable || m.lastOK.IsZero() || now.Sub(m.lastOK) > m.grace {
 		m.state.Store(&readinessState{ready: false, reason: reason})
 	}
 }
@@ -206,6 +213,11 @@ func (m *readinessMonitor) probe() (string, error) {
 	}
 	if !applied {
 		return "migrations not applied", errNotApplied
+	}
+	if m.policy != nil {
+		if err := m.policy.CheckReadiness(ctx, conn); err != nil {
+			return readinessPolicyUnavailable, err
+		}
 	}
 	return "", nil
 }

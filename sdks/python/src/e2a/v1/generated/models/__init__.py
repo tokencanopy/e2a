@@ -15,6 +15,7 @@
 # import models into model package
 from e2a.v1.generated.models.api_key_export_entry import APIKeyExportEntry
 from e2a.v1.generated.models.api_key_view import APIKeyView
+from e2a.v1.generated.models.account_daily_limit import AccountDailyLimit
 from e2a.v1.generated.models.account_metrics_view import AccountMetricsView
 from e2a.v1.generated.models.account_user_view import AccountUserView
 from e2a.v1.generated.models.account_view import AccountView

@@ -22,7 +22,7 @@ import {
   invalidateAgentUnread,
   invalidateAgents,
 } from "../../../lib/swrKeys";
-import { TRASH_RETENTION_DAYS, daysLeft } from "../../../lib/trash";
+import { TRASH_RETENTION_DAYS, daysLeft, deferredCopy, isDeferred } from "../../../lib/trash";
 import type { DashboardAgent } from "../../components/types";
 
 export default function TrashPage() {
@@ -34,6 +34,9 @@ export default function TrashPage() {
 
   const [busy, setBusy] = useState<string | null>(null);
   const [rowError, setRowError] = useState<{ email: string; msg: string } | null>(null);
+  // A "Delete forever" the server deferred (the inbox emailed people outside
+  // e2a recently): it stays in the trash until purge_after.
+  const [rowNotice, setRowNotice] = useState<{ email: string; msg: string } | null>(null);
   // Two-click "Delete forever": first click arms, second click fires.
   const [armed, setArmed] = useState<string | null>(null);
 
@@ -44,8 +47,12 @@ export default function TrashPage() {
   ) => {
     setBusy(email);
     setRowError(null);
+    setRowNotice(null);
     try {
-      await op();
+      const receipt = await op();
+      if (isDeferred(receipt)) {
+        setRowNotice({ email, msg: deferredCopy("This inbox emailed people outside e2a recently", receipt.purge_after) });
+      }
       afterSuccess?.();
       await mutate(); // refresh the trash list
       void invalidateAgents(); // a restore re-adds the inbox to the live list
@@ -139,6 +146,11 @@ export default function TrashPage() {
                     </>
                   )}
                 </div>
+                {rowNotice?.email === a.email && (
+                  <div role="status" className="mt-1 text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                    {rowNotice.msg}
+                  </div>
+                )}
                 {rowError?.email === a.email && (
                   <div className="mt-1 text-[12px]" style={{ color: "var(--danger-strong)" }}>
                     {rowError.msg}

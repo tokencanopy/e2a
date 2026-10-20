@@ -1,5 +1,7 @@
 package httpapi
 
+import "time"
+
 // Uniform DELETE responses (GA review Tier-1 #54, Option B / Stripe-style).
 //
 // Every /v1 DELETE returns 200 OK with a small per-resource deletion object
@@ -31,6 +33,11 @@ type DeleteAgentResult struct {
 	Deleted         bool   `json:"deleted" doc:"Always true — the agent is no longer active. A failed delete is an error envelope, never deleted:false."`
 	Email           string `json:"email" doc:"Email address of the deleted agent."`
 	MessagesDeleted int64  `json:"messages_deleted" doc:"Number of messages permanently removed by the cascade; zero when the agent is moved to trash."`
+	// Deferred permanent delete (additive): the agent emailed external
+	// recipients recently, so permanent=true moved it to the trash instead.
+	EraseDeferred bool       `json:"erase_deferred,omitempty" doc:"True when permanent=true was requested but the agent emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being deleted now: messages_deleted is 0, and the agent is purged at purge_after unless restored before then. Absent otherwise."`
+	PurgeAfter    *time.Time `json:"purge_after,omitempty" doc:"When a deferred agent becomes eligible for permanent purge from the trash. Present only when erase_deferred is true."`
+	Message       string     `json:"message,omitempty" doc:"Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred."`
 } // @name DeleteAgentResult
 
 // Sending-identity teardown outcomes surfaced by deleteDomain. "confirmed"
@@ -82,4 +89,9 @@ type DeleteWebhookResult struct {
 type DeleteMessageResult struct {
 	Deleted bool   `json:"deleted" doc:"Always true — the message is deleted (moved to trash or purged). A failed delete is an error envelope, never deleted:false."`
 	ID      string `json:"id" doc:"ID of the deleted message."`
+	// Deferred permanent delete (additive): the message was sent to external
+	// recipients recently, so permanent=true left it in the trash.
+	EraseDeferred bool       `json:"erase_deferred,omitempty" doc:"True when permanent=true was requested but the message was sent to external recipients recently (within a deployment-configured window, 14 days by default), so it stays in the trash instead of being deleted now; it is purged at purge_after unless restored before then. Absent otherwise."`
+	PurgeAfter    *time.Time `json:"purge_after,omitempty" doc:"When a deferred message becomes eligible for permanent purge from the trash. Present only when erase_deferred is true."`
+	Message       string     `json:"message,omitempty" doc:"Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred."`
 } // @name DeleteMessageResult

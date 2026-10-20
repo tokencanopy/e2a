@@ -317,6 +317,13 @@ class AgentsResource {
    * call is itself the confirmation; the ?confirm=DELETE guard exists to
    * protect raw/curl callers (AG-6). Returns the deletion receipt
    * ({deleted:true, email, messages_deleted}).
+   *
+   * `{ permanent: true }` on an agent that emailed external recipients
+   * recently (within a deployment-configured window, 14 days by default) is
+   * not deleted at once: it is moved to the trash (or stays there) so late
+   * delivery feedback still reaches it. The call still succeeds — the receipt
+   * has `eraseDeferred: true`, `purgeAfter` and a human-readable `message`,
+   * and the agent can be restored until `purgeAfter`.
    */
   delete(email: string, opts: { permanent?: boolean } = {}): Promise<DeleteAgentResult> {
     return call(() => this.api.deleteAgent(email, "DELETE", opts.permanent));
@@ -438,7 +445,10 @@ class MessagesResource {
    * only. The typed .delete() call is itself the confirmation; the SDK supplies
    * the ?confirm=DELETE guard the raw API requires on that path (the query
    * guard exists to protect raw/curl callers). It is ignored when permanent is
-   * unset.
+   * unset. A message sent to external recipients recently (within a
+   * deployment-configured window, 14 days by default) is not deleted at once:
+   * it stays in the trash, and the receipt has `eraseDeferred: true`,
+   * `purgeAfter` and a human-readable `message`.
    *
    * A message held for review cannot be deleted (409 message_held) — resolve it
    * on the review queue first. Returns the deletion receipt ({deleted:true, id}).
@@ -906,6 +916,15 @@ class AccountResource {
     this.suppressions = new SuppressionsResource(api);
     this.apiKeys = new APIKeysResource(api);
   }
+  /**
+   * The authenticated account (whoami). On a deployment that restricts
+   * external sending, `sendingAccess` (beta) reports the account's state; its
+   * `availableUnlocks` lists the routes that deployment accepts for lifting
+   * the restriction (`"operator_approval"` — see {@link requestSendingAccess}
+   * — is always among them; `"verified_domain"` and `"paid_entitlement"` only
+   * where configured). Undefined from servers that predate the field.
+   */
+  /** Account identity and usage, including optional dailyLimit for external recipients. */
   get(): Promise<AccountView> {
     return call(() => this.api.getAccount());
   }
@@ -945,6 +964,14 @@ class AccountResource {
    * (`mode` is `"trash"` or `"permanent"`; `messagesDeleted` is 0 on the trash
    * path, with the other counts describing rows trashed/revoked/unverified
    * rather than deleted; `userDeleted` is true only for `mode: "permanent"`).
+   *
+   * `{ permanent: true }` on an account that emailed external recipients
+   * recently (within a deployment-configured window, 14 days by default) is
+   * not erased at once: it is moved to the trash like a default delete so
+   * late delivery feedback (spam complaints, bounces) still reaches it. The
+   * call still succeeds — the receipt has `mode: "trash"`,
+   * `eraseDeferred: true`, `purgeAfter` (when it will be erased) and a
+   * human-readable `message`; the owner can restore it before `purgeAfter`.
    */
   delete(opts: { permanent?: boolean } = {}): Promise<DeleteUserDataResult> {
     return call(() => this.api.deleteAccount("DELETE", opts.permanent || undefined));
@@ -962,11 +989,15 @@ class AccountResource {
   /**
    * Beta: files a request for support to review this account's external
    * sending access — the recovery path named by an
-   * `external_sending_not_enabled` error's `details.recovery_url (raw wire key)`. Idempotent
+   * `external_sending_not_enabled` error's `details.recovery_url (raw wire key)`.
+   * File ONE request; the decision is emailed to the account owner. Idempotent
    * while a request is pending: submitting again returns the SAME pending
    * request instead of creating a second one. Capped at 3 requests per 30
-   * days (`E2ARateLimitError` beyond that). Filing never grants access by
-   * itself. Account-scoped credentials only.
+   * days (`E2ARateLimitError` beyond that). Throws `E2AError` with code
+   * `conflict` (409) when the account is not currently restricted (already
+   * approved, outside the rollout, or lifted by an available unlock) —
+   * nothing is filed; do not retry. Filing never grants access by itself.
+   * Account-scoped credentials only.
    */
   requestSendingAccess(body: SendingAccessRequestInput): Promise<SendingAccessRequestView> {
     return call(() => this.api.createSendingAccessRequest(body));

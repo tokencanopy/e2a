@@ -1,8 +1,9 @@
 "use client";
 
-// Explains the external sending access restriction (beta) and hosts its two
-// recovery routes: verifying a sending domain (handled on /domains) and
-// filing a request for operator review (handled here). Reachable from the
+// Explains the external sending access restriction (beta) and hosts its
+// recovery routes: filing a request for operator review (handled here, always
+// available) and — only where the deployment's `available_unlocks` lists
+// them — verifying a sending domain (/domains) or a paid plan (/billing). Reachable from the
 // dashboard notice, the onboarding success panel, the review-queue
 // composer's warning, and a failed send's error message.
 
@@ -19,8 +20,9 @@ import {
 import { sendingAccessRequestKey } from "../../../lib/swrKeys";
 import {
   isSendingRestricted,
+  offeredUnlocks,
   parseErrorEnvelope,
-  sendingAccessEligibilityLabel,
+  sendingAccessEnabledRoute,
   sendingAccessNoticeCopy,
 } from "../../../lib/sendingAccess";
 
@@ -80,10 +82,12 @@ function RequestStatusCard({ request }: { request: SendingAccessRequest }) {
           Request declined
         </p>
         <p className="mt-1" style={{ color: "var(--fg-muted)" }}>
+          An operator declined this request. You can file a new one below with
+          more detail about your use case (up to 3 requests per 30 days), or{" "}
           <Link href="/feedback" className="underline" style={{ color: "var(--accent-strong)" }}>
-            Contact support to appeal
+            contact support
           </Link>
-          , or file a new request below.
+          .
         </p>
       </div>
     );
@@ -112,9 +116,13 @@ export default function SendingAccessPage() {
   const [rateLimited, setRateLimited] = useState(false);
 
   const restricted = isSendingRestricted(status);
-  const eligibilityLabel = sendingAccessEligibilityLabel(status);
+  const enabledRoute = sendingAccessEnabledRoute(status);
+  const billingEnabled = Boolean(BILLING_API);
   const canFileRequest = !request || request.state === "declined";
   const showForm = restricted && canFileRequest;
+  // Once external sending is enabled, the single "enabled" card already says
+  // an operator approved it; an "approved" request card would only repeat it.
+  const showRequestCard = Boolean(request) && !(request?.state === "approved" && !restricted && status?.enforcement_applies);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -165,34 +173,42 @@ export default function SendingAccessPage() {
             External sending is not restricted for this account.
           </div>
         ) : restricted ? (
-          <div className="p-4" style={cardStyle("var(--warn-bg)", "var(--warn-bg)")}>
-            <p className="text-[14px] font-semibold" style={{ color: "var(--warn-strong)" }}>
-              {sendingAccessNoticeCopy(status, { billingEnabled: Boolean(BILLING_API) }).headline}
-            </p>
-            <p className="text-[13px] mt-1.5" style={{ color: "var(--fg-muted)" }}>
-              {sendingAccessNoticeCopy(status, { billingEnabled: Boolean(BILLING_API) }).body}
-            </p>
-            <p className="text-[13px] mt-3">
-              <Link href="/domains" className="underline font-medium" style={{ color: "var(--warn-strong)" }}>
-                Verify a domain
-              </Link>
-              {BILLING_API && (
-                <>
-                  {" · "}
-                  <Link href="/billing" className="underline font-medium" style={{ color: "var(--warn-strong)" }}>
-                    Choose a paid plan
-                  </Link>
-                </>
-              )}
-            </p>
-          </div>
+          (() => {
+            const copy = sendingAccessNoticeCopy(status, { billingEnabled, formBelow: showForm });
+            const offered = offeredUnlocks(status, { billingEnabled });
+            return (
+              <div data-testid="sending-access-restricted-card" className="p-4" style={cardStyle("var(--warn-bg)", "var(--warn-bg)")}>
+                <p className="text-[14px] font-semibold" style={{ color: "var(--warn-strong)" }}>
+                  {copy.headline}
+                </p>
+                <p className="text-[13px] mt-1.5" style={{ color: "var(--fg-muted)" }}>
+                  {copy.body}
+                </p>
+                {(offered.domain || offered.paid) && (
+                  <p className="text-[13px] mt-3">
+                    {offered.domain && (
+                      <Link href="/domains" className="underline font-medium" style={{ color: "var(--warn-strong)" }}>
+                        Verify a domain
+                      </Link>
+                    )}
+                    {offered.domain && offered.paid && " · "}
+                    {offered.paid && (
+                      <Link href="/billing" className="underline font-medium" style={{ color: "var(--warn-strong)" }}>
+                        Choose a paid plan
+                      </Link>
+                    )}
+                  </p>
+                )}
+              </div>
+            );
+          })()
         ) : (
-          <div className="p-4" style={cardStyle("var(--accent)", "var(--bg-elev)")}>
+          <div data-testid="sending-access-enabled-card" className="p-4" style={cardStyle("var(--accent)", "var(--bg-elev)")}>
             <p className="text-[14px] font-semibold" style={{ color: "var(--fg)" }}>
-              No approval needed
+              External sending is enabled
             </p>
             <p className="text-[13px] mt-1.5" style={{ color: "var(--fg-muted)" }}>
-              {eligibilityLabel ?? "External sending is enabled for this account."}
+              {enabledRoute ?? "External sending is enabled for this account."}
             </p>
           </div>
         )}
@@ -205,7 +221,7 @@ export default function SendingAccessPage() {
           <p role="alert" className="text-[13px]" style={{ color: "var(--danger-strong)" }}>
             Couldn&apos;t load your request. {requestError.message}
           </p>
-        ) : request ? (
+        ) : request && showRequestCard ? (
           <RequestStatusCard request={request} />
         ) : null}
 
@@ -280,6 +296,10 @@ export default function SendingAccessPage() {
             >
               {submitting ? "Submitting…" : "Submit request"}
             </button>
+
+            <p data-testid="sending-access-review-note" className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
+              Requests are reviewed by an operator; you&apos;ll get an email when a decision is made.
+            </p>
 
             {rateLimited && (
               <p className="text-[12px]" style={{ color: "var(--warn-strong)" }}>

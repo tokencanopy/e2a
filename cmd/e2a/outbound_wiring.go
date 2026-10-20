@@ -1,14 +1,18 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tokencanopy/e2a/internal/agent"
+	"github.com/tokencanopy/e2a/internal/delivery"
 	"github.com/tokencanopy/e2a/internal/hitlnotify"
 	"github.com/tokencanopy/e2a/internal/identity"
 	"github.com/tokencanopy/e2a/internal/outbound"
 	"github.com/tokencanopy/e2a/internal/outboundsend"
 	"github.com/tokencanopy/e2a/internal/sendingpolicy"
+	"github.com/tokencanopy/e2a/internal/telemetry"
 	"github.com/tokencanopy/e2a/internal/webhooknotify"
 )
 
@@ -25,13 +29,19 @@ type outboundSendingDeps struct {
 	sesConfigSet string
 	metrics      outboundsend.Metrics
 	rate         outboundsend.RateGate
+	// sharedDomains are the deployment's shared agent domains (config
+	// shared_domain). Deliveries to agents hosted on them never count toward
+	// the outcome detector's denominator.
+	sharedDomains []string
 }
 
 // outboundSending is the composed outbound send path.
 type outboundSending struct {
 	gate sendingpolicy.Gate
 	// module is the same policy owner behind gate, exposed through its other
-	// narrow roles (external-sending-access preflight/status/requests).
+	// narrow roles: external-sending-access preflight/status/requests, the
+	// deletion-resistant feedback processor, the keyring coverage check, and
+	// the retention janitor all hang off it.
 	module    *sendingpolicy.Module
 	submitter *outbound.ProviderSubmitter
 	jobs      *outboundsend.Jobs
@@ -44,7 +54,8 @@ type outboundSending struct {
 // enqueue and authorizes every worker execution through the same gate. No
 // raw sender and no direct ramp store reach the worker from here.
 func newOutboundSending(d outboundSendingDeps) outboundSending {
-	module := sendingpolicy.NewPolicyModule(d.pool, d.secrets, d.source, d.policy)
+	module := sendingpolicy.NewPolicyModule(d.pool, d.secrets, d.source, d.policy).
+		WithFeedbackExcludedDomains(d.sharedDomains...)
 	var gate sendingpolicy.Gate = module
 	submitter := outbound.NewProviderSubmitter(d.relay, gate)
 	// Delivery feedback: tag outbound with the SES configuration set so SES
@@ -98,4 +109,50 @@ func newNotificationJobs(d notificationDeps) notificationJobs {
 func (s outboundSending) armAPI(api *agent.API) {
 	api.SetProviderSubmitter(s.submitter, s.gate)
 	api.SetExternalAccess(s.module)
+}
+
+// armDeliveryConsumer installs the deletion-resistant accounting seam on the
+// SES feedback consumer. Without it the consumer still acks and still runs
+// the message lifecycle, so the omission is silent: provider evidence for a
+// purged message is simply dropped and the detector reads as healthy.
+func (s outboundSending) armDeliveryConsumer(c *delivery.Consumer) *delivery.Consumer {
+	return c.WithFeedbackProcessor(s.module)
+}
+
+// feedbackMaintenance is the sending-protection retention registrar: the
+// janitor for feedback provenance and daily outcome aggregates, its reconcile
+// backstop, and the sending-ledger janitor (operations, attempts, day
+// counters, notice outbox, control and access audit). Unregistered, nothing
+// enforces any of those horizons and the ledger grows with every send.
+func (s outboundSending) feedbackMaintenance() *sendingpolicy.MaintenanceJobs {
+	return sendingpolicy.NewMaintenanceJobs(s.module)
+}
+
+// installSendingPolicyObservers routes sendingpolicy's process-wide telemetry
+// hooks to the process metrics backend. Each hook is a silent no-op until set,
+// so a missing line here loses a signal without failing anything — which is
+// why it is one function the wiring test calls, not three lines in main.
+func installSendingPolicyObservers(m telemetry.Metrics) {
+	// External-sending-access decisions (shadow impact / enforce refusals)
+	// as bounded counters; a no-op while the control is disabled.
+	sendingpolicy.SetExternalAccessObserver(m.ExternalAccessDecision)
+	// Deletion-resistant feedback ingestion outcomes (B8): bounded
+	// outcome × bucket counter, no address/account/id labels.
+	sendingpolicy.SetFeedbackObserver(m.SendingFeedbackIngested)
+	// Ledger retention: rows deleted per ledger table (on the shared janitor
+	// counter) and one run-outcome sample per pass.
+	sendingpolicy.SetLedgerRetentionObserver(m)
+	sendingpolicy.SetBudgetObserver(m.SendingBudgetDecision)
+}
+
+// nonEmpty returns the non-blank values, so an unset config string does not
+// become an empty-domain entry.
+func nonEmpty(values ...string) []string {
+	var out []string
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

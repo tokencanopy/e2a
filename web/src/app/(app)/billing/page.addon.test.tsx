@@ -488,7 +488,7 @@ describe("BillingPage — total-vs-delta clarity", () => {
     expect(
       screen.getByRole("button", { name: "Update to 2 add-ons" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/New monthly total:/)).toHaveTextContent(
+    expect(screen.getByText(/At next renewal:/)).toHaveTextContent(
       "$4/mo (\u22121 add-on, \u2212$2/mo)",
     );
   });

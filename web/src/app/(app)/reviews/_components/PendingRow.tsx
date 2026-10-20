@@ -39,6 +39,7 @@ import { EmailHtmlBody } from "../../../components/messages/EmailHtmlBody";
 import {
   disallowedRecipients,
   isSendingRestricted,
+  unlockAvailable,
   parseExternalSendingNotEnabledError,
   parseRecipientList,
 } from "../../../../lib/sendingAccess";
@@ -145,7 +146,7 @@ export function PendingRow({
     wantsAccessCheck ? agentsKey : null,
     () => listAgents(),
   );
-  const { data: accessDomains } = useSWR(
+  const { data: accessDomains, error: accessDomainsError } = useSWR(
     wantsAccessCheck ? domainsKey : null,
     () => listDomains().catch(() => [] as DomainInfo[]),
   );
@@ -264,17 +265,24 @@ export function PendingRow({
 
   // Client-side recipient preflight (guidance only — the server decides).
   // Skipped when the agent's own domain already has a verified custom
-  // sending identity, since the shared-identity restriction may not apply
-  // to it.
+  // sending identity AND the deployment accepts verified_domain as an
+  // unlock; where it does not (hosted: approval only), a verified domain
+  // lifts nothing and the warning must still show.
   const agentDomain = agentEmail.split("@")[1] ?? "";
   const domainRecord = accessDomains?.find((d) => d.domain === agentDomain);
   const domainSendingVerified = domainRecord
     ? outboundCapability(domainRecord) === "verified"
     : false;
+  // Decide only once the domains read has settled: before it lands we cannot
+  // tell whether a verified domain lifts the restriction, and warning early
+  // would flash a false warning on self-host deployments with one. A failed
+  // domains read falls back to "no verified domain" (warn — guidance only).
+  const domainsSettled = accessDomains !== undefined || accessDomainsError !== undefined;
   const restrictedSend =
     wantsAccessCheck &&
+    domainsSettled &&
     isSendingRestricted(accessAccount?.sending_access) &&
-    !domainSendingVerified;
+    !(domainSendingVerified && unlockAvailable(accessAccount?.sending_access, "verified_domain"));
   const candidateRecipients = editing
     ? [...parseRecipientList(to), ...parseRecipientList(cc), ...parseRecipientList(bcc)]
     : [...(msg?.to ?? []), ...(msg?.cc ?? []), ...(msg?.bcc ?? [])];

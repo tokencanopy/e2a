@@ -34,10 +34,10 @@ func withTrashDeps(c *trashCalls) func(*Deps) {
 			c.lastMessageID, c.lastMessageAgent = messageID, agentID
 			return nil
 		}
-		d.PurgeMessage = func(ctx context.Context, messageID, agentID string) error {
+		d.PurgeMessage = func(ctx context.Context, messageID, agentID string) (identity.MessagePurgeResult, error) {
 			c.purgeMsg++
 			c.lastMessageID, c.lastMessageAgent = messageID, agentID
-			return nil
+			return identity.MessagePurgeResult{}, nil
 		}
 		// Restore answers with the message view itself (the store builds it
 		// inside the restore transaction), so the fake returns the row.
@@ -55,10 +55,10 @@ func withTrashDeps(c *trashCalls) func(*Deps) {
 			c.lastAgentID = agentID
 			return nil
 		}
-		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (int64, error) {
+		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (identity.AgentPurgeResult, error) {
 			c.hardAgent++
 			c.lastAgentID = agentID
-			return 4, nil
+			return identity.AgentPurgeResult{MessagesDeleted: 4}, nil
 		}
 		// Restore answers with the LIVE agent the store read inside the
 		// restore transaction — hence sampleAgent (no deleted_at).
@@ -199,8 +199,8 @@ func TestDeleteMessagePermanent(t *testing.T) {
 
 func TestDeleteMessagePermanentNotInTrash(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.PurgeMessage = func(ctx context.Context, messageID, agentID string) error {
-			return identity.ErrNotInTrash
+		d.PurgeMessage = func(ctx context.Context, messageID, agentID string) (identity.MessagePurgeResult, error) {
+			return identity.MessagePurgeResult{}, identity.ErrNotInTrash
 		}
 	})
 	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com/messages/msg_live?permanent=true&confirm=DELETE", "good", nil)
@@ -211,8 +211,8 @@ func TestDeleteMessagePermanentNotInTrash(t *testing.T) {
 
 func TestDeleteMessagePermanentSendInProgress(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.PurgeMessage = func(ctx context.Context, messageID, agentID string) error {
-			return identity.ErrSendInProgress
+		d.PurgeMessage = func(ctx context.Context, messageID, agentID string) (identity.MessagePurgeResult, error) {
+			return identity.MessagePurgeResult{}, identity.ErrSendInProgress
 		}
 	})
 	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com/messages/msg_sending?permanent=true&confirm=DELETE", "good", nil)
@@ -444,8 +444,8 @@ func TestDeleteAgentPermanentFromTrash(t *testing.T) {
 
 func TestDeleteAgentPermanentSendInProgress(t *testing.T) {
 	srv := testServer(t, func(d *Deps) {
-		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (int64, error) {
-			return 0, identity.ErrSendInProgress
+		d.PermanentDeleteAgent = func(ctx context.Context, agentID, userID string, createdAt time.Time) (identity.AgentPurgeResult, error) {
+			return identity.AgentPurgeResult{}, identity.ErrSendInProgress
 		}
 	})
 	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com?confirm=DELETE&permanent=true", "good", nil)
@@ -715,5 +715,51 @@ func TestCreateAgentTrashedByOtherUserIsAgentTaken(t *testing.T) {
 	})
 	if code != 409 || errCode(body) != "agent_taken" {
 		t.Fatalf("want 409 agent_taken (not address_in_trash), got %d %v", code, body)
+	}
+}
+
+// A permanent agent delete deferred because the agent recently emailed
+// external recipients is a 200 receipt with the additive erase_deferred,
+// purge_after and message fields — never an error.
+func TestDeleteAgentPermanentDeferredReceipt(t *testing.T) {
+	purgeAfter := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
+	srv := testServer(t, func(d *Deps) {
+		d.PermanentDeleteAgent = func(context.Context, string, string, time.Time) (identity.AgentPurgeResult, error) {
+			return identity.AgentPurgeResult{EraseDeferred: true, PurgeAfter: &purgeAfter}, nil
+		}
+	})
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com?confirm=DELETE&permanent=true", "good", nil)
+	if code != 200 || body["deleted"] != true || body["erase_deferred"] != true || body["messages_deleted"] != float64(0) ||
+		body["purge_after"] != "2026-10-28T00:00:00Z" || body["message"] != identity.AgentEraseDeferredMessage {
+		t.Fatalf("deferred agent receipt = %d %v", code, body)
+	}
+}
+
+// A purged agent's receipt carries none of the deferral fields.
+func TestDeleteAgentPermanentPurgedReceiptOmitsDeferral(t *testing.T) {
+	var c trashCalls
+	srv := testServer(t, withTrashDeps(&c))
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com?confirm=DELETE&permanent=true", "good", nil)
+	if code != 200 {
+		t.Fatalf("status %d %v", code, body)
+	}
+	for _, k := range []string{"erase_deferred", "purge_after", "message"} {
+		if _, ok := body[k]; ok {
+			t.Fatalf("purged receipt carries %s: %v", k, body)
+		}
+	}
+}
+
+func TestDeleteMessagePermanentDeferredReceipt(t *testing.T) {
+	purgeAfter := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)
+	srv := testServer(t, func(d *Deps) {
+		d.PurgeMessage = func(context.Context, string, string) (identity.MessagePurgeResult, error) {
+			return identity.MessagePurgeResult{EraseDeferred: true, PurgeAfter: &purgeAfter}, nil
+		}
+	})
+	code, body := sendJSON(t, "DELETE", srv.URL+"/v1/agents/support%40acme.com/messages/msg_sent?permanent=true&confirm=DELETE", "good", nil)
+	if code != 200 || body["deleted"] != true || body["id"] != "msg_sent" || body["erase_deferred"] != true ||
+		body["purge_after"] != "2026-10-28T00:00:00Z" || body["message"] != identity.MessageEraseDeferredMessage {
+		t.Fatalf("deferred message receipt = %d %v", code, body)
 	}
 }

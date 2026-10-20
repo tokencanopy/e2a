@@ -4,8 +4,12 @@ import {
   parseErrorEnvelope,
   parseExternalSendingNotEnabledError,
   parseRecipientList,
+  offeredUnlocks,
   sendingAccessEligibilityLabel,
+  sendingAccessEnabledReason,
+  sendingAccessEnabledRoute,
   sendingAccessNoticeCopy,
+  sendingAccessSettingsSummary,
   type SendingAccessStatus,
 } from "./sendingAccess";
 
@@ -74,9 +78,9 @@ describe("sendingAccessEligibilityLabel", () => {
 describe("sendingAccessNoticeCopy", () => {
   it("offers the verified-email destination when owner proof exists", () => {
     const copy = sendingAccessNoticeCopy(base, { billingEnabled: false });
-    expect(copy.headline).toBe("Your inbox is ready. External sending is restricted.");
+    expect(copy.headline).toBe("External sending is restricted for this account.");
     expect(copy.body).toBe(
-      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, send from your own verified domain or request approval.",
+      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, verify your own domain or request approval.",
     );
   });
 
@@ -89,10 +93,134 @@ describe("sendingAccessNoticeCopy", () => {
     expect(copy.body).toMatch(/testing/);
   });
 
-  it("appends the paid-plan option only when the billing gate is enabled", () => {
+  it("lists all three routes as a proper list when billing is enabled and all unlocks apply", () => {
     const copy = sendingAccessNoticeCopy(base, { billingEnabled: true });
     expect(copy.body).toBe(
-      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, send from your own verified domain or request approval, activate a paid base plan.",
+      "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, verify your own domain, request approval, or activate a paid base plan.",
+    );
+  });
+
+  it.each([
+    [["operator_approval"], true, "To email other recipients, request approval."],
+    [["operator_approval", "verified_domain"], true, "To email other recipients, verify your own domain or request approval."],
+    [["operator_approval", "paid_entitlement"], true, "To email other recipients, request approval or activate a paid base plan."],
+    [["operator_approval", "paid_entitlement"], false, "To email other recipients, request approval."],
+  ])("unlocks %j (billing %s) → %s", (unlocks, billingEnabled, sentence) => {
+    const copy = sendingAccessNoticeCopy({ ...base, available_unlocks: unlocks }, { billingEnabled });
+    expect(copy.body.endsWith(sentence)).toBe(true);
+    expect(copy.headline).toBe("External sending is restricted for this account.");
+  });
+});
+
+it("says 'below' only when the request form renders under the copy", () => {
+  const approvalOnly = { ...base, available_unlocks: ["operator_approval"] };
+  expect(sendingAccessNoticeCopy(approvalOnly, { billingEnabled: false, formBelow: true }).body).toMatch(
+    /request approval below\.$/,
+  );
+  expect(sendingAccessNoticeCopy(approvalOnly, { billingEnabled: false }).body).toMatch(/request approval\.$/);
+});
+
+describe("unlock-aware grants", () => {
+  it("a paid entitlement is not a grant where paid_entitlement is not an unlock", () => {
+    const hosted = { ...base, paid_external_sending_entitled: true, available_unlocks: ["operator_approval"] };
+    expect(isSendingRestricted(hosted)).toBe(true);
+    expect(sendingAccessEligibilityLabel(hosted)).toBeNull();
+    expect(sendingAccessEnabledRoute(hosted)).toBeNull();
+  });
+
+  it("an absent list (older server) keeps the paid grant", () => {
+    expect(isSendingRestricted({ ...base, paid_external_sending_entitled: true })).toBe(false);
+  });
+
+  it("operator approval always lifts it and names the route", () => {
+    const approved = { ...base, shared_external_approved: true, available_unlocks: ["operator_approval"] };
+    expect(isSendingRestricted(approved)).toBe(false);
+    expect(sendingAccessEnabledRoute(approved)).toBe("An operator approved external sending for this account.");
+  });
+
+  it("offeredUnlocks follows the list and the billing gate", () => {
+    expect(offeredUnlocks({ ...base, available_unlocks: ["operator_approval"] }, { billingEnabled: true })).toEqual({
+      domain: false, approval: true, paid: false,
+    });
+    expect(offeredUnlocks(base, { billingEnabled: false })).toEqual({ domain: true, approval: true, paid: false });
+    expect(offeredUnlocks(base, { billingEnabled: true })).toEqual({ domain: true, approval: true, paid: true });
+  });
+});
+
+describe("sendingAccessEnabledReason", () => {
+  it("is null when enforcement doesn't apply", () => {
+    expect(sendingAccessEnabledReason({ ...base, enforcement_applies: false })).toBeNull();
+  });
+
+  it("is null while still restricted", () => {
+    expect(sendingAccessEnabledReason(base)).toBeNull();
+  });
+
+  it("names operator approval", () => {
+    expect(sendingAccessEnabledReason({ ...base, shared_external_approved: true })).toBe(
+      "operator approved",
+    );
+  });
+
+  it("names the paid plan", () => {
+    expect(sendingAccessEnabledReason({ ...base, paid_external_sending_entitled: true })).toBe(
+      "paid plan",
+    );
+  });
+
+  it("prefers operator approval when both grants are held, matching sendingAccessEnabledRoute", () => {
+    const both = { ...base, shared_external_approved: true, paid_external_sending_entitled: true };
+    expect(sendingAccessEnabledReason(both)).toBe("operator approved");
+    expect(sendingAccessEnabledRoute(both)).toBe(
+      "An operator approved external sending for this account.",
+    );
+  });
+});
+
+describe("sendingAccessSettingsSummary", () => {
+  it("is null when the deployment has no sending_access object", () => {
+    expect(sendingAccessSettingsSummary(undefined, undefined)).toBeNull();
+    expect(sendingAccessSettingsSummary(null, null)).toBeNull();
+  });
+
+  it("is Restricted with no request on file", () => {
+    expect(sendingAccessSettingsSummary(base, null)).toBe("Restricted");
+    expect(sendingAccessSettingsSummary(base, undefined)).toBe("Restricted");
+  });
+
+  it("is Restricted — request under review for a pending request", () => {
+    expect(sendingAccessSettingsSummary(base, { state: "pending" })).toBe(
+      "Restricted — request under review",
+    );
+  });
+
+  it("is Restricted — request declined for the latest declined request", () => {
+    expect(sendingAccessSettingsSummary(base, { state: "declined" })).toBe(
+      "Restricted — request declined",
+    );
+  });
+
+  it("falls back to plain Restricted for an unrecognized open-set request state", () => {
+    expect(sendingAccessSettingsSummary(base, { state: "expired" })).toBe("Restricted");
+  });
+
+  it("is Enabled — operator approved once an operator grants access", () => {
+    const approved = { ...base, shared_external_approved: true };
+    // The request being "approved" (or anything else) is irrelevant once
+    // the account itself is no longer restricted.
+    expect(sendingAccessSettingsSummary(approved, { state: "approved" })).toBe(
+      "Enabled — operator approved",
+    );
+  });
+
+  it("is Enabled — paid plan when the paid entitlement lifts the restriction", () => {
+    const entitled = { ...base, paid_external_sending_entitled: true };
+    expect(sendingAccessSettingsSummary(entitled, null)).toBe("Enabled — paid plan");
+  });
+
+  it("is plain Enabled when enforcement doesn't apply to this account", () => {
+    expect(sendingAccessSettingsSummary({ ...base, enforcement_applies: false }, null)).toBe(
+      "Enabled",
     );
   });
 });

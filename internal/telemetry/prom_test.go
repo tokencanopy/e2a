@@ -206,6 +206,12 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 	p.SetQueueOldestAge("outbound", 45.5)
 	p.ExternalAccessDecision("authorization", "denied", "shadow")
 	p.ExternalAccessDecision("preflight", "attacker-controlled", "enforce")
+	p.SendingFeedbackIngested("uncorrelated_with_marker", "complaint")
+	p.SendingFeedbackIngested("correlated", "delivered")
+	p.SendingFeedbackIngested("bob@example.test", "cor_0123")
+	p.SendingLedgerRetentionRun("complete")
+	p.SendingLedgerRetentionRun("failed")
+	p.SendingLedgerRetentionRun("op_0123")
 
 	out := scrape(t, p)
 	for _, want := range []string{
@@ -223,6 +229,12 @@ func TestPromEmitsSMTPOutboundWebhookWSSeries(t *testing.T) {
 		`e2a_outbound_rate_deferred_total 1`,
 		`e2a_external_access_decisions_total{mode="shadow",route="denied",stage="authorization"} 1`,
 		`e2a_external_access_decisions_total{mode="enforce",route="other",stage="preflight"} 1`,
+		`e2a_sending_feedback_ingested_total{bucket="complaint",build="unknown",outcome="uncorrelated_with_marker"} 1`,
+		`e2a_sending_feedback_ingested_total{bucket="delivered",build="unknown",outcome="correlated"} 1`,
+		`e2a_sending_feedback_ingested_total{bucket="other",build="unknown",outcome="other"} 1`,
+		`e2a_sending_ledger_retention_runs_total{outcome="complete"} 1`,
+		`e2a_sending_ledger_retention_runs_total{outcome="failed"} 1`,
+		`e2a_sending_ledger_retention_runs_total{outcome="other"} 1`,
 		`e2a_webhook_attempts_total{outcome="delivered",status_class="2xx"} 1`,
 		`e2a_webhook_attempts_total{outcome="retryable_failure",status_class="5xx"} 1`,
 		`e2a_webhook_delivery_terminal_total{outcome="delivered",scope="initial"} 1`,
@@ -277,6 +289,8 @@ func TestPromEmitsLegacyOutboxSeries(t *testing.T) {
 	p.OutboxFailures("lease")
 	p.RedeliverRequests("single")
 	p.JanitorRowsDeleted("webhook_events", 5)
+	p.JanitorRowsDeleted("sending_provider_operations", 3)
+	p.JanitorRowsDeleted("sending_budget_counters", 2)
 	p.NotifyMissed()
 	p.SetPublisherLag(2.5)
 
@@ -289,6 +303,8 @@ func TestPromEmitsLegacyOutboxSeries(t *testing.T) {
 		`e2a_outbox_failures_total{stage="lease"} 1`,
 		`e2a_redeliver_requests_total{scope="single"} 1`,
 		`e2a_janitor_rows_deleted_total{table="webhook_events"} 5`,
+		`e2a_janitor_rows_deleted_total{table="sending_provider_operations"} 3`,
+		`e2a_janitor_rows_deleted_total{table="sending_budget_counters"} 2`,
 		`e2a_notify_missed_total 1`,
 		`e2a_webhook_publisher_lag_seconds 2.5`,
 	} {
@@ -455,4 +471,21 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b[pos:])
+}
+
+// A zero baseline lets increase() include the first failure after a scrape,
+// instead of treating that failure as the counter's initial value.
+func TestPromInitialLedgerRetentionOutcomes(t *testing.T) {
+	p := NewProm("")
+	out := scrape(t, p)
+	for _, outcome := range []string{"complete", "partial", "failed"} {
+		want := `e2a_sending_ledger_retention_runs_total{outcome="` + outcome + `"} 0`
+		if !strings.Contains(out, want) {
+			t.Errorf("initial scrape missing zero baseline: %s", want)
+		}
+	}
+	p.SendingLedgerRetentionRun("failed")
+	if !strings.Contains(scrape(t, p), `e2a_sending_ledger_retention_runs_total{outcome="failed"} 1`) {
+		t.Error("first failure must increment the primed counter to one")
+	}
 }

@@ -31,8 +31,10 @@ describe("SendingAccessNotice", () => {
   it("shows the full banner with recovery actions when restricted", () => {
     render(<SendingAccessNotice status={restricted} />);
     expect(screen.getByTestId("sending-access-restricted-notice")).toHaveTextContent(
-      "Your inbox is ready. External sending is restricted.",
+      "External sending is restricted for this account.",
     );
+    // The headline never assumes an inbox exists (an account may have none).
+    expect(screen.getByTestId("sending-access-restricted-notice")).not.toHaveTextContent(/inbox is ready/i);
     expect(screen.getByRole("link", { name: "Verify a domain" })).toHaveAttribute(
       "href",
       "/domains",
@@ -73,5 +75,45 @@ describe("SendingAccessNotice", () => {
     expect(screen.getByTestId("sending-access-eligible")).toHaveTextContent(
       "Paid plan: external sending enabled",
     );
+  });
+
+  it("approval-only deployment: leads with the request, no domain or plan links", () => {
+    render(<SendingAccessNotice status={{ ...restricted, available_unlocks: ["operator_approval"] }} />);
+    const links = screen.getAllByRole("link").map((l) => l.textContent);
+    expect(links).toEqual(["Request approval"]);
+    // The notice links to the form; it is not "below" here.
+    expect(screen.getByText(/To email other recipients, request approval\.$/)).toBeInTheDocument();
+    expect(screen.queryByText(/below/)).not.toBeInTheDocument();
+  });
+
+  it("verified_domain listed: offers Verify a domain after Request approval", () => {
+    render(
+      <SendingAccessNotice
+        status={{ ...restricted, available_unlocks: ["operator_approval", "verified_domain"] }}
+      />,
+    );
+    const links = screen.getAllByRole("link").map((l) => l.textContent);
+    expect(links).toEqual(["Request approval", "Verify a domain"]);
+    expect(screen.getByText(/verify your own domain or request approval\./)).toBeInTheDocument();
+  });
+
+  it("paid_entitlement listed but billing disabled (self-host): no plan link or clause", () => {
+    render(
+      <SendingAccessNotice
+        status={{ ...restricted, available_unlocks: ["operator_approval", "paid_entitlement"] }}
+      />,
+    );
+    expect(screen.queryByRole("link", { name: "Choose a paid plan" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/paid base plan/)).not.toBeInTheDocument();
+  });
+
+  it("a paid entitlement does not lift the banner where paid_entitlement is not an unlock", () => {
+    render(
+      <SendingAccessNotice
+        status={{ ...restricted, paid_external_sending_entitled: true, available_unlocks: ["operator_approval"] }}
+      />,
+    );
+    expect(screen.getByTestId("sending-access-restricted-notice")).toBeInTheDocument();
+    expect(screen.queryByTestId("sending-access-eligible")).not.toBeInTheDocument();
   });
 });

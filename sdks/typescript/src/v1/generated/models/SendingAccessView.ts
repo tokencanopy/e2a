@@ -14,6 +14,10 @@ import { HttpFile } from '../http/http.js';
 
 export class SendingAccessView {
     /**
+    * The routes this deployment accepts for lifting the restriction. Open set: treat entries as strings and ignore unknown values. Known values: operator_approval (file a request with POST /v1/account/sending-access/request; an operator reviews it and the account owner is emailed the decision — always present), verified_domain (sending as the account\'s own verified custom domain reaches external recipients), paid_entitlement (a paid base plan lifts the restriction). Absent only from servers that predate the field, which accept all three.
+    */
+    'availableUnlocks'?: Array<string> | null;
+    /**
     * True when the deployment enforces external sending access for this account (enforce mode, account inside the rollout cohort, not a platform account). Stays true after approval. False when the control is disabled or in shadow mode, or the account is outside the cohort.
     */
     'enforcementApplies': boolean;
@@ -22,7 +26,7 @@ export class SendingAccessView {
     */
     'ownerRecipientVerified': boolean;
     /**
-    * True when an active paid base subscription grants external sending (hosted service). Independent of shared_external_approved.
+    * True when the account holds the billing-issued paid base entitlement (hosted service). It lifts the restriction only when available_unlocks contains paid_entitlement; otherwise it is informational. Independent of shared_external_approved.
     */
     'paidExternalSendingEntitled': boolean;
     /**
@@ -35,6 +39,12 @@ export class SendingAccessView {
     static readonly mapping: {[index: string]: string} | undefined = undefined;
 
     static readonly attributeTypeMap: Array<{name: string, baseName: string, type: string, format: string}> = [
+        {
+            "name": "availableUnlocks",
+            "baseName": "available_unlocks",
+            "type": "Array<string>",
+            "format": ""
+        },
         {
             "name": "enforcementApplies",
             "baseName": "enforcement_applies",

@@ -25,8 +25,12 @@ const sendingAccessBetaDoc = "Beta: external sending access is a platform contro
 type SendingAccessView struct {
 	EnforcementApplies          bool `json:"enforcement_applies" doc:"True when the deployment enforces external sending access for this account (enforce mode, account inside the rollout cohort, not a platform account). Stays true after approval. False when the control is disabled or in shadow mode, or the account is outside the cohort."`
 	SharedExternalApproved      bool `json:"shared_external_approved" doc:"True when an operator granted this account external sending through the shared sending identity. Reports the grant only, not whether enforcement is on."`
-	PaidExternalSendingEntitled bool `json:"paid_external_sending_entitled" doc:"True when an active paid base subscription grants external sending (hosted service). Independent of shared_external_approved."`
+	PaidExternalSendingEntitled bool `json:"paid_external_sending_entitled" doc:"True when the account holds the billing-issued paid base entitlement (hosted service). It lifts the restriction only when available_unlocks contains paid_entitlement; otherwise it is informational. Independent of shared_external_approved."`
 	OwnerRecipientVerified      bool `json:"owner_recipient_verified" doc:"True when the account's current sign-in email was verified by a trusted login, so it is an allowed destination while external sending is restricted."`
+	// AvailableUnlocks is optional on the wire only so an SDK talking to an
+	// older server (which never sends it) still parses the object; a server
+	// that emits sending_access always emits a non-empty list.
+	AvailableUnlocks []string `json:"available_unlocks,omitempty" doc:"The routes this deployment accepts for lifting the restriction. Open set: treat entries as strings and ignore unknown values. Known values: operator_approval (file a request with POST /v1/account/sending-access/request; an operator reviews it and the account owner is emailed the decision — always present), verified_domain (sending as the account's own verified custom domain reaches external recipients), paid_entitlement (a paid base plan lifts the restriction). Absent only from servers that predate the field, which accept all three."`
 }
 
 func sendingAccessView(st sendingpolicy.ExternalAccessStatus) *SendingAccessView {
@@ -35,7 +39,16 @@ func sendingAccessView(st sendingpolicy.ExternalAccessStatus) *SendingAccessView
 		SharedExternalApproved:      st.SharedExternalApproved,
 		PaidExternalSendingEntitled: st.PaidExternalSendingEntitled,
 		OwnerRecipientVerified:      st.OwnerRecipientVerified,
+		AvailableUnlocks:            unlockNames(st.AvailableUnlocks),
 	}
+}
+
+func unlockNames(unlocks []sendingpolicy.ExternalUnlock) []string {
+	out := make([]string, len(unlocks))
+	for i, u := range unlocks {
+		out[i] = string(u)
+	}
+	return out
 }
 
 // accountSendingAccess resolves the optional object for GET /v1/account. A
@@ -116,7 +129,7 @@ func (s *Server) registerSendingAccess() {
 		Description: "Files a request for support to review this account's external sending access. " +
 			"Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). " +
 			"After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). " +
-			"Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. " + sendingAccessBetaDoc,
+			"Filing a request never grants access by itself. 409 conflict when the account is not currently restricted (enforcement does not apply to it, it is already approved, or an available unlock already lifts the restriction) — nothing is filed. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. " + sendingAccessBetaDoc,
 		Security:      []map[string][]string{{"bearer": {}}},
 		DefaultStatus: http.StatusCreated,
 		// Two success statuses (201 created, 200 existing pending request),
@@ -170,6 +183,8 @@ func (s *Server) handleCreateSendingAccessRequest(ctx context.Context, in *creat
 	switch {
 	case errors.Is(err, sendingpolicy.ErrExternalAccessDisabled):
 		return nil, NewError(http.StatusNotImplemented, "not_implemented", "external sending access is not enabled on this deployment")
+	case errors.Is(err, sendingpolicy.ErrSendingAccessNotRestricted):
+		return nil, NewError(http.StatusConflict, "conflict", "external sending is not restricted for this account; there is nothing to request")
 	case errors.Is(err, sendingpolicy.ErrInvalidAccessRequest):
 		return nil, NewError(http.StatusBadRequest, "invalid_request", err.Error())
 	case errors.Is(err, sendingpolicy.ErrAccessRequestRateLimited):
@@ -182,7 +197,13 @@ func (s *Server) handleCreateSendingAccessRequest(ctx context.Context, in *creat
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
-		if s.deps.NotifySendingAccessRequest != nil {
+		if req.FromExemptAccount {
+			// A system/internal account is outside the rule, so there is
+			// nothing for an operator to decide — and the scheduled
+			// conformance suite, which runs as an internal account, would
+			// otherwise email the operator on every run.
+			log.Printf("[httpapi] sending access request %s filed by an exempt-class account; operator notification skipped", req.ID)
+		} else if s.deps.NotifySendingAccessRequest != nil {
 			// Best effort, bounded, after commit: a failed operator email must
 			// not lose the request, which is durably queued either way.
 			notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)

@@ -116,7 +116,7 @@ func (s *Server) registerAgentWrites() {
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/{email}",
 		Summary:     "Delete an agent",
-		Description: "Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account's sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.",
+		Description: "Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account's sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.",
 		Tags:        []string{"agents"},
 		Security:    []map[string][]string{{"bearer": {}}},
 	}, s.handleDeleteAgent)
@@ -189,7 +189,7 @@ type deleteAgentOutput struct{ Body DeleteAgentResult }
 type deleteAgentInput struct {
 	Address   string `path:"email"`
 	Confirm   string `query:"confirm" enum:"DELETE" required:"true" doc:"Must be the literal DELETE. The default action moves the agent to trash; permanent=true is irreversible."`
-	Permanent bool   `query:"permanent" doc:"Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents."`
+	Permanent bool   `query:"permanent" doc:"Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after."`
 }
 
 func (s *Server) handleDeleteAgent(ctx context.Context, in *deleteAgentInput) (*deleteAgentOutput, error) {
@@ -208,12 +208,12 @@ func (s *Server) handleDeleteAgent(ctx context.Context, in *deleteAgentInput) (*
 	if err != nil {
 		return nil, err
 	}
-	var messagesDeleted int64
+	var purge identity.AgentPurgeResult
 	if in.Permanent {
 		if s.deps.PermanentDeleteAgent == nil {
 			return nil, NewError(http.StatusInternalServerError, "internal_error", "delete unavailable")
 		}
-		messagesDeleted, err = s.deps.PermanentDeleteAgent(ctx, ag.ID, ag.UserID, ag.CreatedAt)
+		purge, err = s.deps.PermanentDeleteAgent(ctx, ag.ID, ag.UserID, ag.CreatedAt)
 	} else if ag.DeletedAt != nil {
 		return nil, NewError(http.StatusNotFound, "not_found", "agent not found")
 	} else {
@@ -240,11 +240,15 @@ func (s *Server) handleDeleteAgent(ctx context.Context, in *deleteAgentInput) (*
 		return nil, NewError(http.StatusInternalServerError, "internal_error", "failed to delete agent")
 	}
 	// ag.ID is the agent's email (canonical form) — echo it as the identity key.
-	return &deleteAgentOutput{Body: DeleteAgentResult{
+	res := DeleteAgentResult{
 		Deleted:         true,
 		Email:           ag.ID,
-		MessagesDeleted: messagesDeleted,
-	}}, nil
+		MessagesDeleted: purge.MessagesDeleted,
+	}
+	if purge.EraseDeferred {
+		res.EraseDeferred, res.PurgeAfter, res.Message = true, purge.PurgeAfter, identity.AgentEraseDeferredMessage
+	}
+	return &deleteAgentOutput{Body: res}, nil
 }
 
 // handleRestoreAgent brings a trashed agent back (POST

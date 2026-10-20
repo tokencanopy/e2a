@@ -33,6 +33,8 @@ class DeleteUserDataResult(BaseModel):
     api_keys_deleted: StrictInt
     deleted: StrictBool = Field(description="Always true — the account is no longer usable. A failed delete is an error envelope, never deleted:false.")
     domains_deleted: StrictInt
+    erase_deferred: Optional[StrictBool] = Field(default=None, description="True when permanent=true was requested but the account emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being erased now: mode is trash and the account is purged at purge_after. The account is already unusable; the owner can restore it by signing in before purge_after. Absent otherwise.")
+    message: Optional[StrictStr] = Field(default=None, description="Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.")
     messages_deleted: StrictInt
     mode: Optional[StrictStr] = Field(default=None, description="How the account was deleted. trash: the account is inert and restorable by signing in to the dashboard until purge_after, after which it is purged; messages_deleted is 0 and the other counts describe rows trashed, revoked or unverified. permanent: the content was erased now (?permanent=true, or a deployment with account trash disabled) and the counts are the rows removed. Open set: tolerate unknown values.")
     oauth_access_tokens_deleted: Optional[StrictInt] = None
@@ -44,7 +46,7 @@ class DeleteUserDataResult(BaseModel):
     usage_summaries_deleted: StrictInt
     user_deleted: StrictBool = Field(description="True only when the account row itself was erased (mode permanent).")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["agent_suppressions_deleted", "agent_unsubscribe_tokens_deleted", "agents_deleted", "api_keys_deleted", "deleted", "domains_deleted", "messages_deleted", "mode", "oauth_access_tokens_deleted", "oauth_auth_codes_deleted", "oauth_refresh_tokens_deleted", "purge_after", "sessions_deleted", "usage_events_deleted", "usage_summaries_deleted", "user_deleted"]
+    __properties: ClassVar[List[str]] = ["agent_suppressions_deleted", "agent_unsubscribe_tokens_deleted", "agents_deleted", "api_keys_deleted", "deleted", "domains_deleted", "erase_deferred", "message", "messages_deleted", "mode", "oauth_access_tokens_deleted", "oauth_auth_codes_deleted", "oauth_refresh_tokens_deleted", "purge_after", "sessions_deleted", "usage_events_deleted", "usage_summaries_deleted", "user_deleted"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -110,6 +112,8 @@ class DeleteUserDataResult(BaseModel):
             "api_keys_deleted": obj.get("api_keys_deleted"),
             "deleted": obj.get("deleted"),
             "domains_deleted": obj.get("domains_deleted"),
+            "erase_deferred": obj.get("erase_deferred"),
+            "message": obj.get("message"),
             "messages_deleted": obj.get("messages_deleted"),
             "mode": obj.get("mode"),
             "oauth_access_tokens_deleted": obj.get("oauth_access_tokens_deleted"),

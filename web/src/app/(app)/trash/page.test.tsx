@@ -232,4 +232,39 @@ describe("TrashPage", () => {
     });
     expect(mockInvalidateAgentUnread).not.toHaveBeenCalled();
   });
+  it("explains a deferred Delete forever and keeps the inbox in the trash", async () => {
+    mockFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/v1/agents?deleted=true" && !init?.method) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ items: [trashedAgent] }),
+        });
+      }
+      if (init?.method === "DELETE") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: () =>
+            Promise.resolve(
+              JSON.stringify({
+                deleted: true,
+                email: "support@acme.com",
+                messages_deleted: 0,
+                erase_deferred: true,
+                purge_after: "2026-10-28T12:00:00Z",
+              }),
+            ),
+        });
+      }
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("not found") });
+    });
+
+    render(<TrashPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /Delete forever/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Click again to confirm/ }));
+    const notice = await screen.findByText(/emailed people outside e2a recently/i);
+    expect(notice).toHaveTextContent(/stays in the trash until .*2026/i);
+    expect(screen.getByTestId("trash-inbox-row")).toBeInTheDocument();
+  });
 });

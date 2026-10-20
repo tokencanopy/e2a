@@ -54,6 +54,35 @@ func TestAttachments_OrderAndDecode(t *testing.T) {
 	}
 }
 
+func TestAttachmentsBase64Padding(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"two padding characters": {0x00, 0xff, 0x80, 0xfb},
+		"one padding character":  {0x00, 0xff, 0x80, 0xfb, 0xff},
+	} {
+		for encodingName, encoding := range map[string]*base64.Encoding{
+			"padded":   base64.StdEncoding,
+			"unpadded": base64.RawStdEncoding,
+		} {
+			t.Run(name+"/"+encodingName, func(t *testing.T) {
+				encoded := encoding.EncodeToString(data)
+				encoded = encoded[:4] + " \t\r\n" + encoded[4:]
+				raw := []byte("Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+					"--B\r\nContent-Type: text/plain\r\n\r\nBody\r\n" +
+					"--B\r\nContent-Type: application/octet-stream\r\n" +
+					"Content-Disposition: attachment; filename=\"sample.bin\"\r\n" +
+					"Content-Transfer-Encoding: base64\r\n\r\n" + encoded + "\r\n--B--\r\n")
+				atts := Attachments(raw)
+				if len(atts) != 1 {
+					t.Fatalf("want 1 attachment, got %d", len(atts))
+				}
+				if !bytes.Equal(atts[0].Data, data) {
+					t.Errorf("attachment bytes = %x, want %x", atts[0].Data, data)
+				}
+			})
+		}
+	}
+}
+
 // The inline image's Content-ID is captured (angle brackets stripped) so a
 // renderer can resolve an HTML `cid:` reference to it; the ordinary PDF
 // attachment carries none.

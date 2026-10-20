@@ -105,6 +105,25 @@ describe("account delete command", () => {
       expect(mockSaveConfig).toHaveBeenCalledWith({ api_key: "", key_scope: "" });
     });
 
+    it("--permanent on a recent external sender reports the deferred erase and the purge date", async () => {
+      mockAccountDelete.mockResolvedValue({
+        ...TRASH_RECEIPT,
+        eraseDeferred: true,
+        message: "kept in the trash",
+      });
+      const { accountDelete } = await import("../commands/account.js");
+      await accountDelete({ yes: true, permanent: true });
+
+      expect(mockAccountDelete).toHaveBeenCalledWith({ permanent: true });
+      const out = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
+      expect(out).toContain("Permanent erasure deferred");
+      expect(out).toContain("emailed external recipients recently");
+      expect(out).toContain("Account moved to the trash.");
+      expect(out).toContain("2026-10-26T00:00:00.000Z");
+      expect(out).not.toContain("permanently deleted");
+      expect(mockSaveConfig).toHaveBeenCalledWith({ api_key: "", key_scope: "" });
+    });
+
     it("--json prints the raw receipt and nothing else on stdout", async () => {
       mockAccountDelete.mockResolvedValue(TRASH_RECEIPT);
       const { accountDelete } = await import("../commands/account.js");

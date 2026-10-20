@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "e2a — open-source email API for applications and AI agents (MCP configuration and canonical docs).",
-    "version": "0.9.5"
+    "version": "0.9.6"
   },
   "plugins": [
     {

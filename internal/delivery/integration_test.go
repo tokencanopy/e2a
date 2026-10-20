@@ -107,10 +107,11 @@ func TestConsumerCausalSuppressionLifecycleAndEventParity(t *testing.T) {
 		detail            string
 		feedbackReason    messagelifecycle.ReasonCode
 		suppressionReason messagelifecycle.ReasonCode
+		suppressionSource string
 		eventType         string
 	}{
-		{"hard bounce", delivery.KindBounce, delivery.StatusBounced, "permanent", "550 5.1.1 no such user", messagelifecycle.ReasonDeliveryPermanentBounce, messagelifecycle.ReasonSuppressionHardBounceApplied, delivery.EventEmailBounced},
-		{"complaint", delivery.KindComplaint, delivery.StatusComplained, "", "abuse", messagelifecycle.ReasonComplaintRecipientReported, messagelifecycle.ReasonSuppressionComplaintApplied, delivery.EventEmailComplained},
+		{"hard bounce", delivery.KindBounce, delivery.StatusBounced, "permanent", "550 5.1.1 no such user", messagelifecycle.ReasonDeliveryPermanentBounce, messagelifecycle.ReasonSuppressionHardBounceApplied, "bounce", delivery.EventEmailBounced},
+		{"complaint", delivery.KindComplaint, delivery.StatusComplained, "", "abuse", messagelifecycle.ReasonComplaintRecipientReported, messagelifecycle.ReasonSuppressionComplaintApplied, "complaint", delivery.EventEmailComplained},
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,6 +147,20 @@ func TestConsumerCausalSuppressionLifecycleAndEventParity(t *testing.T) {
 			}
 			if suppressions != 1 {
 				t.Fatalf("suppressions=%d want 1", suppressions)
+			}
+			// The stored reason is the PROVIDER DIAGNOSTIC, not a derived
+			// label: it is a public field of GET /v1/account/suppressions,
+			// and an accounting layer that quietly rewrote it would change
+			// what every existing integration reads.
+			var storedReason, storedSource string
+			if err := pool.QueryRow(ctx, `SELECT reason, source FROM suppressions WHERE user_id=$1 AND address=$2`, userID, recipient).Scan(&storedReason, &storedSource); err != nil {
+				t.Fatal(err)
+			}
+			if storedReason != tc.detail {
+				t.Fatalf("suppression reason = %q, want the provider diagnostic %q", storedReason, tc.detail)
+			}
+			if storedSource != tc.suppressionSource {
+				t.Fatalf("suppression source = %q, want %q", storedSource, tc.suppressionSource)
 			}
 			var lifecycleCount int
 			if err := pool.QueryRow(ctx, `SELECT count(*) FROM message_lifecycle_transitions WHERE message_id=$1 AND reason_code=ANY($2)`, messageID, []string{string(tc.feedbackReason), string(tc.suppressionReason)}).Scan(&lifecycleCount); err != nil {

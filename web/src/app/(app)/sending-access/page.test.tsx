@@ -88,25 +88,106 @@ describe("/sending-access", () => {
 
     expect(await screen.findByRole("button", { name: "Submit request" })).toBeInTheDocument();
     expect(screen.queryByText(/under review/)).not.toBeInTheDocument();
-    expect(screen.queryByText("No approval needed")).not.toBeInTheDocument();
+    expect(screen.queryByText("External sending is enabled")).not.toBeInTheDocument();
+    expect(screen.getByText("External sending is restricted for this account.")).toBeInTheDocument();
+    expect(screen.getByTestId("sending-access-review-note")).toHaveTextContent(
+      "Requests are reviewed by an operator; you'll get an email when a decision is made.",
+    );
+  });
+
+  it("approval-only deployment: leads with the form, no domain or plan links", async () => {
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: { ...restrictedAccount.sending_access, available_unlocks: ["operator_approval"] },
+      },
+      requestGet: notFoundRequest,
+    });
+    render(<SendingAccessPage />);
+
+    expect(await screen.findByRole("button", { name: "Submit request" })).toBeInTheDocument();
+    expect(screen.getByText(/To email other recipients, request approval below\./)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Verify a domain" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Choose a paid plan" })).not.toBeInTheDocument();
+  });
+
+  it("verified_domain listed: offers Verify a domain above the form", async () => {
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: {
+          ...restrictedAccount.sending_access,
+          available_unlocks: ["operator_approval", "verified_domain"],
+        },
+      },
+      requestGet: notFoundRequest,
+    });
+    render(<SendingAccessPage />);
+
+    expect(await screen.findByRole("link", { name: "Verify a domain" })).toHaveAttribute("href", "/domains");
+    expect(screen.queryByRole("link", { name: "Choose a paid plan" })).not.toBeInTheDocument();
+  });
+
+  it("a paid entitlement that is not an unlock leaves the account restricted", async () => {
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: {
+          ...restrictedAccount.sending_access,
+          paid_external_sending_entitled: true,
+          available_unlocks: ["operator_approval"],
+        },
+      },
+      requestGet: notFoundRequest,
+    });
+    render(<SendingAccessPage />);
+
+    expect(await screen.findByRole("button", { name: "Submit request" })).toBeInTheDocument();
+    expect(screen.queryByText("External sending is enabled")).not.toBeInTheDocument();
   });
 
   it("shows the under-review state and hides the form for a pending request", async () => {
-    stage({ account: restrictedAccount, requestGet: requestView("pending") });
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: { ...restrictedAccount.sending_access, available_unlocks: ["operator_approval"] },
+      },
+      requestGet: requestView("pending"),
+    });
     render(<SendingAccessPage />);
 
     expect(await screen.findByText("Your request is under review")).toBeInTheDocument();
+    // The form is hidden while pending, so the copy must not point "below".
+    expect(screen.queryByText(/request approval below/)).not.toBeInTheDocument();
+    // The decision email makes this promise true.
+    expect(screen.getByText("We'll follow up by email once an operator decides.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Submit request" })).not.toBeInTheDocument();
   });
 
-  it("shows eligibility and the approved request, keeping history visible with no form", async () => {
+  it("approved: renders ONE enabled card naming the route, no duplicate request card, no form", async () => {
     stage({ account: eligibleAccount, requestGet: requestView("approved") });
     render(<SendingAccessPage />);
 
-    expect(await screen.findByText("No approval needed")).toBeInTheDocument();
-    expect(screen.getByText("Operator-approved external sending")).toBeInTheDocument();
-    expect(screen.getByText("Request approved")).toBeInTheDocument();
+    expect(await screen.findByText("External sending is enabled")).toBeInTheDocument();
+    expect(screen.getByText("An operator approved external sending for this account.")).toBeInTheDocument();
+    expect(screen.queryByText("No approval needed")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Loading your request…")).not.toBeInTheDocument());
+    expect(screen.queryByText("Request approved")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Submit request" })).not.toBeInTheDocument();
+  });
+
+  it("paid-plan grant (where accepted): the enabled card names the paid plan", async () => {
+    stage({
+      account: {
+        ...restrictedAccount,
+        sending_access: { ...restrictedAccount.sending_access, paid_external_sending_entitled: true },
+      },
+      requestGet: notFoundRequest,
+    });
+    render(<SendingAccessPage />);
+
+    expect(await screen.findByText("External sending is enabled")).toBeInTheDocument();
+    expect(screen.getByText("Your paid base plan includes external sending for this account.")).toBeInTheDocument();
   });
 
   it("offers a support appeal and still allows filing a new request when declined", async () => {
@@ -114,7 +195,8 @@ describe("/sending-access", () => {
     render(<SendingAccessPage />);
 
     expect(await screen.findByText("Request declined")).toBeInTheDocument();
-    const appeal = screen.getByRole("link", { name: "Contact support to appeal" });
+    expect(screen.getByText(/up to 3 requests per 30 days/)).toBeInTheDocument();
+    const appeal = screen.getByRole("link", { name: "contact support" });
     expect(appeal).toHaveAttribute("href", "/feedback");
     expect(screen.getByRole("button", { name: "Submit request" })).toBeInTheDocument();
   });

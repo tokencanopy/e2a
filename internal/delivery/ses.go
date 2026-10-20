@@ -3,6 +3,8 @@ package delivery
 import (
 	"encoding/json"
 	"fmt"
+	"net/mail"
+	"sort"
 	"strings"
 	"time"
 )
@@ -74,6 +76,13 @@ type Event struct {
 	// bounceSubType (e.g. General, NoEmail, MailboxFull).
 	BounceType    string
 	BounceSubType string
+	// ComplaintSubType is the raw SES complaintSubType (Complaint events
+	// only; empty otherwise). A suppression-list value means SES did not
+	// deliver, which the detector must not count as a genuine complaint.
+	ComplaintSubType string
+	// AttemptCorrelationID is the ProviderAttemptHeader SES echoed back from
+	// the submitted headers: the deletion-resistant correlation fallback.
+	AttemptCorrelationID string
 }
 
 // sesNotification is the SES event JSON carried in the SNS Message field.
@@ -108,6 +117,7 @@ type sesNotification struct {
 			EmailAddress string `json:"emailAddress"`
 		} `json:"complainedRecipients"`
 		ComplaintFeedbackType string `json:"complaintFeedbackType"`
+		ComplaintSubType      string `json:"complaintSubType"`
 	} `json:"complaint"`
 	Delivery *struct {
 		Recipients []string `json:"recipients"`
@@ -141,11 +151,15 @@ func ParseSESNotification(messageBody []byte) (*Event, error) {
 	}
 	ev := &Event{SESMessageID: n.Mail.MessageID}
 	for _, h := range n.Mail.Headers {
-		if strings.EqualFold(h.Name, MessageIDHeader) {
+		switch {
+		case strings.EqualFold(h.Name, MessageIDHeader) && ev.E2AMessageID == "":
 			// Defensive trim: the marker is stamped bare, but tolerate an
 			// angle-bracketed echo.
 			ev.E2AMessageID = strings.Trim(strings.TrimSpace(h.Value), "<>")
-			break
+		case strings.EqualFold(h.Name, ProviderAttemptHeader) && ev.AttemptCorrelationID == "":
+			if v := strings.TrimSpace(h.Value); validAttemptCorrelationID(v) {
+				ev.AttemptCorrelationID = v
+			}
 		}
 	}
 
@@ -178,6 +192,7 @@ func ParseSESNotification(messageBody []byte) (*Event, error) {
 	case "Complaint":
 		ev.Kind = KindComplaint
 		if n.Complaint != nil {
+			ev.ComplaintSubType = n.Complaint.ComplaintSubType
 			for _, r := range n.Complaint.ComplainedRecipients {
 				ev.Recipients = append(ev.Recipients, RecipientOutcome{
 					Address: norm(r.EmailAddress), Status: StatusComplained,
@@ -217,7 +232,48 @@ func ParseSESNotification(messageBody []byte) (*Event, error) {
 	return ev, nil
 }
 
-func norm(addr string) string { return strings.ToLower(strings.TrimSpace(addr)) }
+// norm reduces a provider-reported address to the bare, lower-cased
+// addr-spec the rest of the system stores and signs.
+//
+// It is deliberately the ONE normalizer for provider feedback: the detector
+// matches a recipient against the HMAC of the address authorization signed,
+// while the live path writes the same address into the customer's
+// suppression list. If the two disagreed, a decorated value would credit
+// the detector under the real address while suppressing a literal
+// "Bob <bob@x.test>" the customer can never send to and never clear.
+//
+// SES reports a bounced recipient from the DSN's Final-Recipient field,
+// which per RFC 3464 may carry an address-type prefix ("rfc822; bob@x.test")
+// and, in the wild, angle brackets or a display name.
+func norm(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if semi := strings.IndexByte(addr, ';'); semi >= 0 {
+		if prefix := strings.TrimSpace(addr[:semi]); isAddressType(prefix) {
+			addr = strings.TrimSpace(addr[semi+1:])
+		}
+	}
+	if parsed, err := mail.ParseAddress(addr); err == nil {
+		return strings.ToLower(strings.TrimSpace(parsed.Address))
+	}
+	return strings.ToLower(strings.Trim(addr, "<>"))
+}
+
+// isAddressType reports whether s is a DSN address-type token (letters,
+// digits and dashes) rather than part of an address. Only such a prefix is
+// stripped, so a local part containing a semicolon is left alone.
+func isAddressType(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // maxE2AMessageIDLen bounds a plausible e2a message id ("msg_" + 32 hex chars
 // today; headroom for future id shapes without accepting arbitrary strings).
@@ -241,6 +297,55 @@ func validE2AMessageID(s string) bool {
 		}
 	}
 	return true
+}
+
+// validAttemptCorrelationID reports whether s is shaped like the attempt
+// marker the adapter stamps (`cor_` + hex). Same rationale as
+// validE2AMessageID: the value came off a signed notification but originated
+// in a header block, so it is shape-checked before it becomes a lookup key.
+func validAttemptCorrelationID(s string) bool {
+	const prefix = "cor_"
+	if !strings.HasPrefix(s, prefix) || len(s) <= len(prefix) || len(s) > maxE2AMessageIDLen {
+		return false
+	}
+	for _, r := range s[len(prefix):] {
+		switch {
+		case r >= 'a' && r <= 'f', r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// FeedbackFor reduces a parsed event to the processor's input: every
+// recipient the notification named, normalized and deduplicated, plus the
+// two correlation keys and the retained subtypes.
+func (ev *Event) FeedbackFor() ProviderFeedback {
+	seen := map[string]bool{}
+	var recipients []string
+	for _, r := range ev.Recipients {
+		a := norm(r.Address)
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		recipients = append(recipients, a)
+	}
+	// Deterministic order, so a failure is reproducible and two runs over
+	// the same event report repairs in the same sequence.
+	sort.Strings(recipients)
+	return ProviderFeedback{
+		ProviderEventID:      ev.ProviderEventID,
+		OccurredAt:           ev.OccurredAt,
+		Kind:                 ev.Kind,
+		BounceType:           ev.BounceType,
+		BounceSubType:        ev.BounceSubType,
+		ComplaintSubType:     ev.ComplaintSubType,
+		ProviderMessageID:    ev.SESMessageID,
+		AttemptCorrelationID: ev.AttemptCorrelationID,
+		Recipients:           recipients,
+	}
 }
 
 // normalizeBounceType maps SES's bounceType (Permanent | Transient |

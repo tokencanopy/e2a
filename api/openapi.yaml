@@ -88,6 +88,35 @@ components:
         - scope
         - created_at
       type: object
+    AccountDailyLimit:
+      additionalProperties: true
+      properties:
+        clean_active_days:
+          format: int64
+          type: integer
+        limit:
+          format: int64
+          type: integer
+        resets_at:
+          format: date-time
+          type: string
+        shared_limit:
+          format: int64
+          type: integer
+        shared_used:
+          format: int64
+          type: integer
+        used:
+          format: int64
+          type: integer
+      required:
+        - limit
+        - used
+        - shared_limit
+        - shared_used
+        - clean_active_days
+        - resets_at
+      type: object
     AccountMetricsView:
       additionalProperties: true
       properties:
@@ -174,6 +203,9 @@ components:
       properties:
         agent_email:
           type: string
+        daily_limit:
+          $ref: "#/components/schemas/AccountDailyLimit"
+          description: External-recipient allowance for this UTC day. Used includes pending or uncertain provider submissions. Shared-identity usage is included in total usage and also bounded by shared_limit. Internal recipients (own live agents and verified owner mailbox) do not count. Omitted when this deployment does not enable the account trust ladder.
         deleted_at:
           description: When the account was moved to the trash. Absent for a live account.
           format: date-time
@@ -1310,10 +1342,20 @@ components:
         email:
           description: Email address of the deleted agent.
           type: string
+        erase_deferred:
+          description: "True when permanent=true was requested but the agent emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being deleted now: messages_deleted is 0, and the agent is purged at purge_after unless restored before then. Absent otherwise."
+          type: boolean
+        message:
+          description: Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+          type: string
         messages_deleted:
           description: Number of messages permanently removed by the cascade; zero when the agent is moved to trash.
           format: int64
           type: integer
+        purge_after:
+          description: When a deferred agent becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.
+          format: date-time
+          type: string
       required:
         - deleted
         - email
@@ -1407,8 +1449,18 @@ components:
         deleted:
           description: Always true — the message is deleted (moved to trash or purged). A failed delete is an error envelope, never deleted:false.
           type: boolean
+        erase_deferred:
+          description: True when permanent=true was requested but the message was sent to external recipients recently (within a deployment-configured window, 14 days by default), so it stays in the trash instead of being deleted now; it is purged at purge_after unless restored before then. Absent otherwise.
+          type: boolean
         id:
           description: ID of the deleted message.
+          type: string
+        message:
+          description: Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+          type: string
+        purge_after:
+          description: When a deferred message becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.
+          format: date-time
           type: string
       required:
         - deleted
@@ -1462,6 +1514,12 @@ components:
         domains_deleted:
           format: int64
           type: integer
+        erase_deferred:
+          description: "True when permanent=true was requested but the account emailed external recipients recently (within a deployment-configured window, 14 days by default), so it was moved to the trash instead of being erased now: mode is trash and the account is purged at purge_after. The account is already unusable; the owner can restore it by signing in before purge_after. Absent otherwise."
+          type: boolean
+        message:
+          description: Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.
+          type: string
         messages_deleted:
           format: int64
           type: integer
@@ -2632,6 +2690,9 @@ components:
           description: The account's usage at the time the cap was hit (matches usage.<resource>).
           format: int64
           type: integer
+        daily_limit:
+          $ref: "#/components/schemas/AccountDailyLimit"
+          description: Current external-recipient allowance, usage and reset time when the account trust ladder refuses an immediate send.
         limit:
           description: The cap that was hit (matches limits.max_<resource>).
           format: int64
@@ -2640,7 +2701,7 @@ components:
           description: The account's plan label.
           type: string
         resource:
-          description: "The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (per-UTC-day send cap; no AccountView field — resets at midnight UTC)."
+          description: "The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (daily send cap; daily_limit reports external-recipient usage on deployments with the account trust ladder — resets at midnight UTC)."
           type: string
         upgrade_url:
           description: An upgrade affordance URL, when the operator has configured one.
@@ -4467,6 +4528,13 @@ components:
     SendingAccessView:
       additionalProperties: true
       properties:
+        available_unlocks:
+          description: "The routes this deployment accepts for lifting the restriction. Open set: treat entries as strings and ignore unknown values. Known values: operator_approval (file a request with POST /v1/account/sending-access/request; an operator reviews it and the account owner is emailed the decision — always present), verified_domain (sending as the account's own verified custom domain reaches external recipients), paid_entitlement (a paid base plan lifts the restriction). Absent only from servers that predate the field, which accept all three."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         enforcement_applies:
           description: True when the deployment enforces external sending access for this account (enforce mode, account inside the rollout cohort, not a platform account). Stays true after approval. False when the control is disabled or in shadow mode, or the account is outside the cohort.
           type: boolean
@@ -4474,7 +4542,7 @@ components:
           description: True when the account's current sign-in email was verified by a trusted login, so it is an allowed destination while external sending is restricted.
           type: boolean
         paid_external_sending_entitled:
-          description: True when an active paid base subscription grants external sending (hosted service). Independent of shared_external_approved.
+          description: True when the account holds the billing-issued paid base entitlement (hosted service). It lifts the restriction only when available_unlocks contains paid_entitlement; otherwise it is informational. Independent of shared_external_approved.
           type: boolean
         shared_external_approved:
           description: True when an operator granted this account external sending through the shared sending identity. Reports the grant only, not whether enforcement is on.
@@ -4494,7 +4562,7 @@ components:
           format: int64
           type: integer
         daily_recipient_limit:
-          description: Current UTC-day recipient allowance. Zero means no ramp cap applies.
+          description: Current UTC-day recipient allowance. Zero means no per-domain ramp cap applies; account daily_limit can still apply.
           format: int64
           type: integer
         estimated_completion_at:
@@ -4512,7 +4580,7 @@ components:
           format: date-time
           type: string
         status:
-          description: "Platform-managed sending-ramp state. Open set; known values: inactive, ramping, complete, exempt."
+          description: "Platform-managed sending-ramp state. Open set; known values: inactive, ramping, complete, exempt, account_managed (the account daily_limit replaces the per-domain ramp)."
           type: string
       required:
         - status
@@ -5356,7 +5424,7 @@ openapi: 3.1.0
 paths:
   /v1/account:
     delete:
-      description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object."
+      description: "Moves the account to the trash. Requires ?confirm=DELETE. The account becomes unusable at once: every API key, OAuth grant and dashboard session is revoked, every agent is trashed (inbound mail is refused), sending stops, and every custom domain loses its verification. Signing in to the dashboard before purge_after offers a restore — keys stay revoked and domains must be re-verified — after which the account and all its data are purged permanently (the trash window is deployment-configurable; 30 days by default). Pass permanent=true to erase the account and all its data immediately instead (refused with 409 erase_held while the account's sending is paused). An account that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not erased at once even with permanent=true: it is moved to the trash like a default delete and purged at purge_after, so delivery feedback such as spam complaints that arrives after a send still reaches it; the receipt then has mode trash, erase_deferred:true, purge_after and a message, and the owner can still restore it before purge_after. On deployments that disable account trash, every deletion is permanent. Either way the account's sign-in identity may be held for a period after deletion and cannot immediately register a new account. Returns 409 send_in_progress while an outbound provider call has a fresh lease; retry after it finishes. Returns 200 with a deletion receipt (deleted:true, mode, and per-table counts) — like every delete op, which all return 200 + a deletion object."
       operationId: deleteAccount
       parameters:
         - description: Must be the literal DELETE. The default action moves the account to the trash; permanent=true is irreversible.
@@ -5369,12 +5437,12 @@ paths:
             enum:
               - DELETE
             type: string
-        - description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+        - description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
           explode: false
           in: query
           name: permanent
           schema:
-            description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible.
+            description: Erase the account and all its data immediately instead of moving it to the trash. Irreversible. An account that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
             type: boolean
       responses:
         "200":
@@ -5657,7 +5725,7 @@ paths:
         - account
       x-stability-level: beta
     post:
-      description: "Files a request for support to review this account's external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve."
+      description: "Files a request for support to review this account's external sending access. Idempotent while a request is pending: submitting again returns the existing pending request (200) instead of creating another (201). After a decline a new request may be filed as an appeal, up to 3 requests per 30 days (429 rate_limited beyond that). Filing a request never grants access by itself. 409 conflict when the account is not currently restricted (enforcement does not apply to it, it is already approved, or an available unlock already lifts the restriction) — nothing is filed. 501 not_implemented when the deployment does not enable external sending access. Account-scoped credentials only. Beta: external sending access is a platform control that ships disabled; this surface may evolve."
       operationId: createSendingAccessRequest
       requestBody:
         content:
@@ -5923,7 +5991,7 @@ paths:
         - agents
   /v1/agents/{email}:
     delete:
-      description: Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account's sending is paused). Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash.
+      description: "Move an agent the caller owns to the trash. Requires ?confirm=DELETE. A trashed agent stops receiving mail, disappears from lists, and its held messages leave the review queue; restore it via POST /v1/agents/{email}/restore within the trash retention window — 30 days by default (deployment-configurable) — after which it is purged permanently (messages included). Live message data is otherwise retained indefinitely. Pass permanent=true to skip the trash and delete irreversibly right away (accepts live and trashed agents; refused with 409 erase_held while the account's sending is paused). An agent that emailed external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once even with permanent=true: it is moved to the trash (or stays there) and purged at purge_after, so delivery feedback such as spam complaints still reaches it; the receipt then has erase_deferred:true, purge_after and a message. Returns 200 with a deletion receipt; messages_deleted is zero when the agent is moved to trash."
       operationId: deleteAgent
       parameters:
         - in: path
@@ -5941,12 +6009,12 @@ paths:
             enum:
               - DELETE
             type: string
-        - description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents.
+        - description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
           explode: false
           in: query
           name: permanent
           schema:
-            description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents.
+            description: Delete irreversibly right away instead of moving to the trash. Accepts live and trashed agents. An agent that emailed external recipients recently is moved to the trash instead (receipt erase_deferred:true) and purged at purge_after.
             type: boolean
       responses:
         "200":
@@ -6704,7 +6772,7 @@ paths:
         - messages
   /v1/agents/{email}/messages/{id}:
     delete:
-      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"). A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
+      description: Move a message to the trash. Trashed messages disappear from lists, threads, and reply targets, but can be restored via POST …/messages/{id}/restore until they are purged — 30 days after deletion by default (the trash retention window is deployment-configurable). Live message data is otherwise retained indefinitely. No confirmation is required because the default delete is reversible. Pass permanent=true with confirm=DELETE to permanently delete a message that is ALREADY in the trash ("delete forever"); a message sent to external recipients recently (within a deployment-configured window, 14 days by default) is not deleted at once — it stays in the trash and is purged at purge_after, and the receipt has erase_deferred:true, purge_after and a message. A message held for review (review_status=pending_review) cannot be deleted — resolve it in the review queue first (409 message_held). Returns 409 send_in_progress if provider submission has already started; retry after it finishes.
       operationId: deleteMessage
       parameters:
         - description: The agent's full email address.
@@ -8085,7 +8153,7 @@ paths:
         - domains
   /v1/domains/{domain}:
     delete:
-      description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown})."
+      description: "Deletes the domain (refused with 400 domain_has_agents while any live or trashed agent exists on it; an agent that emailed external recipients recently cannot be permanently deleted until its trash window ends — its permanent delete answers erase_deferred — so the domain stays blocked until that agent is purged) and commits durable teardown of its sending identity. The provider-side identity is normally removed before the response returns; otherwise sending_teardown is pending (durable retries, including provider-disabled managed identities) or manual_review (an identity exists but ownership cannot be established). Send a unique Idempotency-Key for each logical deletion and reuse that key after an ambiguous network failure: within the published key-retention window, the key is committed with an incarnation-bound receipt, follows pending to confirmed, and cannot delete a later registration of the same domain. A retry after that window is a new operation. Use a new key to delete a replacement registration. Without a key, repeating DELETE only polls while the domain remains absent and is unsafe across re-registration. Keep DNS published unless sending_teardown is confirmed; treat missing or unknown values as not confirmed. Requires ?confirm=DELETE (irreversible). Returns 200 with a deletion object ({deleted:true, domain, sending_teardown})."
       operationId: deleteDomain
       parameters:
         - in: path

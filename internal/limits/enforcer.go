@@ -40,10 +40,11 @@ type limitsReader interface {
 // check; the win from caching limits is avoiding the join into
 // account_limits, which is the costlier read.
 type DBEnforcer struct {
-	store    limitsReader
-	counter  Counter
-	defaults Defaults
-	cacheTTL time.Duration
+	accountDailyControl func(context.Context) (bool, error)
+	store               limitsReader
+	counter             Counter
+	defaults            Defaults
+	cacheTTL            time.Duration
 
 	mu    sync.Mutex
 	cache map[string]cachedLimits
@@ -222,6 +223,12 @@ func (e *DBEnforcer) CheckDomainCreate(ctx context.Context, userID string) error
 	return nil
 }
 
+// SetAccountDailyControl delegates daily enforcement to the external-recipient
+// authorization ledger. Install before serving; runtime policy reads fail closed.
+func (e *DBEnforcer) SetAccountDailyControl(f func(context.Context) (bool, error)) {
+	e.accountDailyControl = f
+}
+
 // CheckMessageSend enforces the month-flow cap and the storage stock
 // cap for an outbound send of `units` recipient-deliveries. Either
 // being exceeded blocks the operation. The flow cap is checked first
@@ -255,7 +262,14 @@ func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string, units 
 	// the self-host default and every paid shape — so the extra count read
 	// only happens for accounts that actually carry the cap. Resets at UTC
 	// midnight with the usage_summaries bucket_date.
-	if lim.MaxMessagesDay != nil {
+	accountDaily := false
+	if e.accountDailyControl != nil {
+		accountDaily, err = e.accountDailyControl(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if lim.MaxMessagesDay != nil && !accountDaily {
 		dayCount, err := e.counter.MessagesToday(ctx, userID)
 		if err != nil {
 			return err

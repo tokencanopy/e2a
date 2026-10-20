@@ -406,7 +406,7 @@ test("a Retry-After shorter than the backoff floor does not shorten the wait", a
 test("cleanup on an empty registry is a no-op", async () => {
   const { client, calls } = fakeClient(() => 204);
   const r = await cleanup(client, { sleep: noSleep });
-  assert.deepEqual(r, { attempted: 0, succeeded: 0, failed: [], completed: [] });
+  assert.deepEqual(r, { attempted: 0, succeeded: 0, failed: [], completed: [], deferred: [] });
   assert.equal(calls.length, 0);
 });
 
@@ -504,5 +504,36 @@ test("a second cleanup pass retries what the first one failed", async () => {
   const up = fakeClient(() => 204);
   const r2 = await cleanup(up.client, { attempts: 1, sleep: noSleep });
   assert.equal(r2.succeeded, 1);
+  assert.equal(getTracked().length, 0);
+});
+
+test("a deferred permanent delete is reported apart, not as succeeded, and not retried", async () => {
+  track("agent", "sent-externally@x.test");
+  track("agent", "quiet@x.test");
+  const { client, calls } = fakeClient((path) =>
+    path.includes("sent-externally")
+      ? {
+          status: 200,
+          headers: {},
+          raw: JSON.stringify({
+            deleted: true,
+            email: "sent-externally@x.test",
+            messages_deleted: 0,
+            erase_deferred: true,
+            purge_after: "2026-10-28T00:00:00Z",
+          }),
+        }
+      : { status: 200, headers: {}, raw: JSON.stringify({ deleted: true, email: "quiet@x.test", messages_deleted: 2 }) },
+  );
+
+  const r = await cleanup(client, { sleep: noSleep });
+
+  assert.equal(r.attempted, 2);
+  assert.equal(r.succeeded, 1);
+  assert.deepEqual(r.failed, []);
+  assert.deepEqual(r.deferred, [
+    { kind: "agent", id: "sent-externally@x.test", purgeAfter: "2026-10-28T00:00:00Z" },
+  ]);
+  assert.equal(calls.filter((c) => c.includes("sent-externally")).length, 1, "a deferral must not be retried");
   assert.equal(getTracked().length, 0);
 });

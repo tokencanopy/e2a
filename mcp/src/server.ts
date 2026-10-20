@@ -12,6 +12,7 @@ import { registerLegacyTools } from "./tools/legacy.js";
 import { registerContactTools } from "./tools/contacts.js";
 import { registerSuppressionTools } from "./tools/suppressions.js";
 import { registerMetricsTools } from "./tools/metrics.js";
+import { registerSendingAccessTools } from "./tools/sendingaccess.js";
 import { toolNamesForScope } from "./tools/tiers.js";
 import { isMutatingTool, MUTATING_META_KEY } from "./tools/mutating.js";
 import { resolveServerVersion } from "./version.js";
@@ -140,6 +141,7 @@ export function buildServer({
   registerContactTools(server, client);
   registerSuppressionTools(server, client);
   registerMetricsTools(server, client);
+  registerSendingAccessTools(server, client);
   registerLegacyTools(server, client);
   return server;
 }

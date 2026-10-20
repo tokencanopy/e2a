@@ -17,8 +17,9 @@ import pprint
 import re  # noqa: F401
 import json
 
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Optional
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -27,9 +28,12 @@ class DeleteMessageResult(BaseModel):
     DeleteMessageResult
     """ # noqa: E501
     deleted: StrictBool = Field(description="Always true — the message is deleted (moved to trash or purged). A failed delete is an error envelope, never deleted:false.")
+    erase_deferred: Optional[StrictBool] = Field(default=None, description="True when permanent=true was requested but the message was sent to external recipients recently (within a deployment-configured window, 14 days by default), so it stays in the trash instead of being deleted now; it is purged at purge_after unless restored before then. Absent otherwise.")
     id: StrictStr = Field(description="ID of the deleted message.")
+    message: Optional[StrictStr] = Field(default=None, description="Human-readable explanation, present when erase_deferred is true. Do not parse it; branch on erase_deferred.")
+    purge_after: Optional[datetime] = Field(default=None, description="When a deferred message becomes eligible for permanent purge from the trash. Present only when erase_deferred is true.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["deleted", "id"]
+    __properties: ClassVar[List[str]] = ["deleted", "erase_deferred", "id", "message", "purge_after"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -90,7 +94,10 @@ class DeleteMessageResult(BaseModel):
 
         _obj = cls.model_validate({
             "deleted": obj.get("deleted"),
-            "id": obj.get("id")
+            "erase_deferred": obj.get("erase_deferred"),
+            "id": obj.get("id"),
+            "message": obj.get("message"),
+            "purge_after": obj.get("purge_after")
         })
         # store additional fields in additional_properties
         for _key in obj.keys():

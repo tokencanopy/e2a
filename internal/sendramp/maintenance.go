@@ -28,7 +28,10 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) error {
 		   )`, utcDay(now).AddDate(0, 0, -35)); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return s.sweepAccounts(ctx, now)
 }
 
 type MaintenanceArgs struct{}

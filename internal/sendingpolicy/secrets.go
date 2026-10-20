@@ -86,6 +86,7 @@ func LoadSecretsFromEnv(source PolicySource, policy RuntimePolicy) (Secrets, err
 // gate. It carries commitments only: no addresses, no key material, no
 // customer data.
 type Capabilities struct {
+	KeyInventorySchema        int               `json:"sending_key_inventory_schema"`
 	SendingProtectionContract int               `json:"sending_protection_contract"`
 	RuntimePolicySource       string            `json:"runtime_policy_source"`
 	OperatorCommitments       map[string]string `json:"operator_notice_recipient_commitments"`
@@ -101,6 +102,12 @@ type Capabilities struct {
 // optional `external_sending_access` runtime-policy object.
 const PolicyFeatureExternalSendingAccess = "external_sending_access"
 
+// PolicyFeatureExternalSendingUnlocks is the capability marker for the
+// optional `external_sending_access.unlocks` key. A binary without it rejects
+// a policy carrying the key (unknown field, fail closed), so the deploy gate
+// must see it on every serving slot before activating such a policy.
+const PolicyFeatureExternalSendingUnlocks = "external_sending_unlocks"
+
 // BuildCapabilities assembles the readback. A missing operator map yields an
 // empty commitments object rather than an error: the self-host disabled mode
 // legitimately has none, and the deploy gate treats absence as absence.
@@ -110,9 +117,10 @@ func BuildCapabilities(source PolicySource, secrets Secrets) Capabilities {
 		commitments = secrets.Recipients.Commitments()
 	}
 	return Capabilities{
+		KeyInventorySchema:        1,
 		SendingProtectionContract: ContractLevel,
 		RuntimePolicySource:       string(source),
 		OperatorCommitments:       commitments,
-		PolicyFeatures:            []string{PolicyFeatureExternalSendingAccess},
+		PolicyFeatures:            []string{PolicyFeatureExternalSendingAccess, PolicyFeatureExternalSendingUnlocks},
 	}
 }

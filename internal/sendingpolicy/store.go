@@ -74,6 +74,29 @@ type Module struct {
 	configPolicy RuntimePolicy
 
 	commitAttestation func(context.Context, pgx.Tx) error
+
+	// feedbackExcludedDomains are the canonical shared agent domains whose
+	// deliveries never count toward the detector denominator (see
+	// excludedFromDenominator); nil means only the SES simulator.
+	feedbackExcludedDomains map[string]struct{}
+
+	// clock is the ingestion clock the feedback path stamps aggregates with;
+	// nil means time.Now. Tests and staging drills pin it to cross UTC days.
+	clock func() time.Time
+}
+
+// WithClock pins the module's ingestion clock (feedback day assignment and
+// retention); nil restores time.Now.
+func (m *Module) WithClock(fn func() time.Time) *Module {
+	m.clock = fn
+	return m
+}
+
+func (m *Module) now() time.Time {
+	if m.clock != nil {
+		return m.clock()
+	}
+	return time.Now()
 }
 
 // NewModule binds the module to a pool and the immutable trust roots parsed at
@@ -345,6 +368,12 @@ func (m *Module) ActivatePolicy(ctx context.Context, req ActivationRequest) (Pol
 // keeps the read/selection boundary explicit and composes with bootstrap or
 // repair tooling that might be running concurrently.
 func (m *Module) requireSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx, version int) error {
+	return m.checkSelectedOperatorRecipient(ctx, tx, version, " FOR SHARE")
+}
+
+// Readiness uses a consistent read-only snapshot; authorization and activation
+// retain their share lock through the wrapper above.
+func (m *Module) checkSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx, version int, lockClause string) error {
 	recipients := m.secrets.Recipients
 	if recipients == nil {
 		return fmt.Errorf("%w: local operator recipient map is not loaded", ErrOperatorRecipientUnavailable)
@@ -359,7 +388,7 @@ func (m *Module) requireSelectedOperatorRecipient(ctx context.Context, tx pgx.Tx
 	err := tx.QueryRow(ctx,
 		`SELECT commitment_key_id, recipient_commitment
 		   FROM sending_operator_recipient_versions
-		  WHERE logical_version = $1 FOR SHARE`, version,
+		  WHERE logical_version = $1`+lockClause, version,
 	).Scan(&registeredKeyID, &registeredCommitment)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: logical version %d is not registered",

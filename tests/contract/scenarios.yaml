@@ -3277,7 +3277,8 @@ scenarios:
   - name: external_sending_access_restricted_account
     description: >
       External sending access over the wire. The contract server enforces the
-      control with a far-future cohort cutoff, so ONLY the restricted account
+      control with a far-future cohort cutoff and the default unlock set (all
+      three, reported as available_unlocks), so ONLY the restricted account
       ({restricted_api_key}) is in the cohort. It may send to its verified
       owner email and its own live agents; any external To, Cc or Bcc refuses
       the WHOLE send with 403 external_sending_not_enabled and nothing is
@@ -3297,6 +3298,12 @@ scenarios:
             "sending_access.shared_external_approved": false
             "sending_access.paid_external_sending_entitled": false
             "sending_access.owner_recipient_verified": true
+            # The contract server leaves `unlocks` unset: the default is
+            # every unlock, reported in canonical order.
+            "sending_access.available_unlocks.length": 3
+            "sending_access.available_unlocks[0]": operator_approval
+            "sending_access.available_unlocks[1]": verified_domain
+            "sending_access.available_unlocks[2]": paid_entitlement
 
       - id: primary_account_is_outside_the_cohort
         action: request
@@ -3541,6 +3548,105 @@ scenarios:
           body_match:
             "error.code": unauthorized
 
+  # Runs as {disposable_deferred_erase_api_key}: a throwaway account the
+  # contract server seeds with a provider-accepted send to an external
+  # recipient an hour ago. Deleted exactly once per run.
+  - name: account_delete_permanent_deferred_for_recent_sender
+    description: >
+      DELETE /v1/account?permanent=true on an account that emailed an external
+      recipient recently is deferred (docs/design/account-soft-deletion.md,
+      "Deferred erase for recent senders"): a 200 trash receipt with
+      erase_deferred=true, a purge_after and a message, user_deleted=false —
+      and the key stops authenticating at once, as for any trash.
+    auth_override: "Bearer {disposable_deferred_erase_api_key}"
+    steps:
+      - id: erase_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/account?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            mode: trash
+            erase_deferred: true
+            user_deleted: false
+            messages_deleted: 0
+
+      - id: deferred_key_is_401
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 401
+          body_match:
+            "error.code": unauthorized
+
+  # Runs as {deferred_purge_api_key}: an account whose one agent has a
+  # provider-accepted send to an external recipient an hour ago. The
+  # scenario restores what it trashes, so it is re-runnable.
+  - name: permanent_agent_and_message_delete_deferred_for_recent_sender
+    description: >
+      Permanent deletion of a message sent to an external recipient recently,
+      and of the agent that sent it, is deferred to the trash
+      (docs/design/account-soft-deletion.md, "Deferred erase for recent
+      senders"): each answers 200 with erase_deferred=true, a purge_after and
+      a message, nothing is deleted, and both can be restored.
+    auth_override: "Bearer {deferred_purge_api_key}"
+    steps:
+      - id: trash_message
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge
+        expect:
+          status: 200
+          body_match:
+            deleted: true
+            id: msg_contract_deferred_purge
+
+      - id: message_purge_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge?permanent=true&confirm=DELETE
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            erase_deferred: true
+
+      - id: restore_message
+        action: request
+        method: POST
+        path: /v1/agents/deferred-purge-bot@agents.localhost/messages/msg_contract_deferred_purge/restore
+        expect:
+          status: 200
+          body_match:
+            id: msg_contract_deferred_purge
+
+      - id: agent_purge_is_deferred
+        action: request
+        method: DELETE
+        path: /v1/agents/deferred-purge-bot@agents.localhost?confirm=DELETE&permanent=true
+        expect:
+          status: 200
+          body_contains: [purge_after, message]
+          body_match:
+            deleted: true
+            email: deferred-purge-bot@agents.localhost
+            erase_deferred: true
+            messages_deleted: 0
+
+      - id: restore_agent
+        action: request
+        method: POST
+        path: /v1/agents/deferred-purge-bot@agents.localhost/restore
+        expect:
+          status: 200
+          body_match:
+            email: deferred-purge-bot@agents.localhost
+
   # ── Read-only accounts (docs/design/account-read-only.md) ──
   # Runs as the contract server's abuse-paused account ({readonly_api_key}),
   # which it seeds read-only. The scenario ends by moving that account to the
@@ -3750,3 +3856,52 @@ scenarios:
           status: 401
           body_match:
             "error.code": unauthorized
+
+  - name: account_daily_trust_limit
+    description: >
+      Account daily limits count only external recipients. The real contract
+      service has the ladder enabled; workers are stopped so no external mail
+      is submitted. An immediate 21-recipient send exceeds the initial 20
+      allowance and persists nothing. The same scenario runs in Go, TS and Python.
+    setup:
+      - register_agent:
+          email: "trust-{scenario_token}@agents.localhost"
+    steps:
+      - id: account_reports_daily_allowance
+        action: request
+        method: GET
+        path: /v1/account
+        expect:
+          status: 200
+          body_match:
+            "daily_limit.limit": 20
+            "daily_limit.used": 0
+            "daily_limit.shared_limit": 20
+            "daily_limit.shared_used": 0
+            "daily_limit.clean_active_days": 0
+          body_contains: ["daily_limit"]
+        capture:
+          daily_reset: daily_limit.resets_at
+      - id: daily_refusal_includes_snapshot
+        action: request
+        method: POST
+        path: /v1/agents/trust-{scenario_token}@agents.localhost/messages
+        body:
+          to: ["recipient-0@example.test", "recipient-1@example.test", "recipient-2@example.test", "recipient-3@example.test", "recipient-4@example.test", "recipient-5@example.test", "recipient-6@example.test", "recipient-7@example.test", "recipient-8@example.test", "recipient-9@example.test", "recipient-10@example.test", "recipient-11@example.test", "recipient-12@example.test", "recipient-13@example.test", "recipient-14@example.test", "recipient-15@example.test", "recipient-16@example.test", "recipient-17@example.test", "recipient-18@example.test", "recipient-19@example.test", "recipient-20@example.test"]
+          subject: Synthetic daily limit probe
+          text: This request must not queue mail.
+        expect:
+          status: 402
+          body_match:
+            "error.code": limit_exceeded
+            "error.details.resource": messages_day
+            "error.details.daily_limit.limit": 20
+            "error.details.daily_limit.used": 0
+            "error.details.daily_limit.resets_at": "{daily_reset}"
+    cleanup:
+      - id: delete_trust_agent
+        action: request
+        method: DELETE
+        path: /v1/agents/trust-{scenario_token}@agents.localhost?confirm=DELETE&permanent=true
+        expect:
+          status: 200

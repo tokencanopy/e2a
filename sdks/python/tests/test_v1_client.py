@@ -1952,6 +1952,31 @@ async def test_outreach_exposes_etag_and_sends_if_match(httpx_mock):
 # ── account: sending access (beta) ────────────────────────────────────────
 
 
+def test_sending_access_view_decodes_available_unlocks():
+    from e2a.v1.generated.models.sending_access_view import SendingAccessView
+
+    view = SendingAccessView.from_dict(
+        {
+            "enforcement_applies": True,
+            "shared_external_approved": False,
+            "paid_external_sending_entitled": True,
+            "owner_recipient_verified": True,
+            "available_unlocks": ["operator_approval"],
+        }
+    )
+    assert view.available_unlocks == ["operator_approval"]
+    # A server that predates the field omits it; the object still decodes.
+    legacy = SendingAccessView.from_dict(
+        {
+            "enforcement_applies": True,
+            "shared_external_approved": False,
+            "paid_external_sending_entitled": False,
+            "owner_recipient_verified": False,
+        }
+    )
+    assert legacy.available_unlocks is None
+
+
 @pytest.mark.anyio
 async def test_get_sending_access_request_reads_the_endpoint(httpx_mock):
     httpx_mock.add_response(
@@ -2061,3 +2086,95 @@ async def test_request_sending_access_rate_limited_maps_to_rate_limit_error(http
     assert ei.value.code == "rate_limited"
     assert ei.value.retryable is True
     assert ei.value.retry_after_seconds == 60
+
+
+@pytest.mark.anyio
+async def test_account_delete_permanent_deferred_receipt(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "mode": "trash",
+            "erase_deferred": True,
+            "purge_after": "2026-10-26T00:00:00Z",
+            "message": "kept in the trash",
+            "messages_deleted": 0,
+            "usage_events_deleted": 0,
+            "usage_summaries_deleted": 0,
+            "agents_deleted": 1,
+            "domains_deleted": 0,
+            "api_keys_deleted": 1,
+            "sessions_deleted": 0,
+            "agent_suppressions_deleted": 0,
+            "agent_unsubscribe_tokens_deleted": 0,
+            "user_deleted": False,
+        }
+    )
+    async with _client() as c:
+        res = await c.account.delete(permanent=True)
+    assert res.mode == "trash"
+    assert res.erase_deferred is True
+    assert res.purge_after is not None
+    assert res.user_deleted is False
+
+
+@pytest.mark.anyio
+async def test_agent_delete_trashes_by_default_and_omits_permanent(httpx_mock):
+    httpx_mock.add_response(json={"deleted": True, "email": "bot@agents.localhost", "messages_deleted": 0})
+    async with _client() as c:
+        res = await c.agents.delete("bot@agents.localhost")
+    req = httpx_mock.get_requests()[-1]
+    assert req.method == "DELETE"
+    assert "confirm=DELETE" in str(req.url)
+    assert "permanent" not in req.url.params
+    assert res.erase_deferred is None
+
+
+@pytest.mark.anyio
+async def test_agent_delete_permanent_reports_a_deferral(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "email": "bot@agents.localhost",
+            "messages_deleted": 0,
+            "erase_deferred": True,
+            "purge_after": "2026-10-26T00:00:00Z",
+            "message": "moved to the trash",
+        }
+    )
+    async with _client() as c:
+        res = await c.agents.delete("bot@agents.localhost", permanent=True)
+    req = httpx_mock.get_requests()[-1]
+    assert req.url.params["permanent"] == "true"
+    assert res.erase_deferred is True
+    assert res.purge_after is not None
+
+
+@pytest.mark.anyio
+async def test_message_delete_permanent_reports_a_deferral(httpx_mock):
+    httpx_mock.add_response(
+        json={
+            "deleted": True,
+            "id": "msg_sent",
+            "erase_deferred": True,
+            "purge_after": "2026-10-26T00:00:00Z",
+            "message": "stays in the trash",
+        }
+    )
+    async with _client() as c:
+        res = await c.messages.delete("bot@agents.localhost", "msg_sent", permanent=True)
+    assert res.erase_deferred is True
+    assert res.purge_after is not None
+
+
+@pytest.mark.anyio
+async def test_account_daily_limit_decodes_utc_reset(httpx_mock):
+    from e2a.v1.generated.models.account_view import AccountView
+    httpx_mock.add_response(json=_valid(AccountView, daily_limit={
+        "limit": 88, "used": 17, "shared_limit": 50, "shared_used": 6,
+        "clean_active_days": 1, "resets_at": "2026-01-02T00:00:00Z",
+    }))
+    async with _client() as c:
+        account = await c.account.get()
+    assert account.daily_limit.limit == 88
+    assert account.daily_limit.shared_used == 6
+    assert account.daily_limit.resets_at.isoformat() == "2026-01-02T00:00:00+00:00"

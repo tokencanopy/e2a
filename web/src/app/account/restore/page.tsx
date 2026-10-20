@@ -7,6 +7,9 @@
 //   GET  /api/account/deletion → {email, deleted_at, purge_after, purge_in_progress}
 //   POST /api/account/restore  → the same cookie becomes an ordinary session
 //   POST /api/account/erase    → permanent deletion; the server clears the cookie
+//                                 (or, for an account that emailed external
+//                                 recipients recently, erase_deferred: the
+//                                 account stays in the trash and restorable)
 //
 // Lives outside the (app) route group on purpose: the app shell would see no
 // ordinary session and bounce to the sign-in wall.
@@ -215,6 +218,9 @@ function TrashedAccount({
   const [error, setError] = useState("");
   const [restoreRefused, setRestoreRefused] = useState(false);
   const [restored, setRestored] = useState(false);
+  // Set when "erase now" was deferred: the account emailed external
+  // recipients recently, so it stays in the trash until purge_after.
+  const [eraseDeferred, setEraseDeferred] = useState<string | null>(null);
 
   const confirmHeadingRef = useRef<HTMLHeadingElement>(null);
   const eraseTriggerRef = useRef<HTMLButtonElement>(null);
@@ -277,7 +283,21 @@ function TrashedAccount({
         method: "POST",
         credentials: "include",
       });
-      if (res.ok) return onPhase({ kind: "erased" });
+      if (res.ok) {
+        const receipt = (await res.json().catch(() => null)) as {
+          erase_deferred?: boolean;
+          purge_after?: string;
+        } | null;
+        if (receipt?.erase_deferred) {
+          // Still in the trash and still restorable: stay on this screen.
+          setEraseDeferred(formatLongDate(receipt.purge_after ?? view.purge_after) || "the trash window ends");
+          returnFocusToTrigger.current = true;
+          setConfirmingErase(false);
+          setBusy(null);
+          return;
+        }
+        return onPhase({ kind: "erased" });
+      }
       const err = await readApiError(res);
       if (res.status === 401) return onPhase({ kind: "signed-out" });
       if (err.code === "purge_in_progress") return onPhase({ kind: "purging" });
@@ -354,6 +374,22 @@ function TrashedAccount({
         </p>
       )}
 
+      {eraseDeferred && (
+        <p
+          role="status"
+          className="mt-8 p-3 text-[14px] leading-[1.5]"
+          style={{
+            color: "var(--fg)",
+            background: "var(--bg-elev)",
+            borderRadius: "var(--r-md)",
+          }}
+        >
+          This account emailed people outside e2a recently, so it can&apos;t be erased right away.
+          It stays in the trash and is erased permanently after {eraseDeferred}. You can still
+          restore it until then.
+        </p>
+      )}
+
       {restored && (
         <p role="status" className="mt-8 text-[14px]" style={{ color: "var(--fg-muted)" }}>
           Restored. Opening your dashboard…
@@ -377,6 +413,7 @@ function TrashedAccount({
             type="button"
             onClick={() => {
               setError("");
+              setEraseDeferred(null);
               setConfirmingErase(true);
             }}
             disabled={busy !== null || restored}

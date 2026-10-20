@@ -32,8 +32,36 @@ describe("SendingAccessNotice (hosted, billing gate enabled)", () => {
     render(<SendingAccessNotice status={restricted} />);
     expect(
       screen.getByText(
-        "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, send from your own verified domain or request approval, activate a paid base plan.",
+        "Receive emails from anyone. Send to your verified account email or agent inboxes in this account. To email other recipients, verify your own domain, request approval, or activate a paid base plan.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("all three unlocks: Request approval, Verify a domain, Choose a paid plan", () => {
+    render(<SendingAccessNotice status={restricted} />);
+    expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual([
+      "Request approval",
+      "Verify a domain",
+      "Choose a paid plan",
+    ]);
+  });
+
+  it("hosted approval-only policy: no plan link even with billing enabled", () => {
+    render(<SendingAccessNotice status={{ ...restricted, available_unlocks: ["operator_approval"] }} />);
+    expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual(["Request approval"]);
+    expect(screen.queryByText(/paid base plan/)).not.toBeInTheDocument();
+  });
+
+  it("approval + paid: plan link and clause, no domain link", () => {
+    render(
+      <SendingAccessNotice
+        status={{ ...restricted, available_unlocks: ["operator_approval", "paid_entitlement"] }}
+      />,
+    );
+    expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual([
+      "Request approval",
+      "Choose a paid plan",
+    ]);
+    expect(screen.getByText(/request approval or activate a paid base plan\./)).toBeInTheDocument();
   });
 });

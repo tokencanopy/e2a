@@ -76,6 +76,14 @@ export async function accountDelete(opts: AccountDeleteOptions): Promise<void> {
   if (result.mode === "permanent") {
     process.stdout.write("Account permanently deleted. This cannot be undone.\n");
   } else {
+    if (result.eraseDeferred) {
+      // --permanent was asked for, but the account emailed external
+      // recipients recently: the server kept it in the trash so late
+      // delivery feedback (complaints, bounces) still reaches it.
+      process.stdout.write(
+        "Permanent erasure deferred: this account emailed external recipients recently, so it is kept in the trash until the end of the trash window before it is erased.\n",
+      );
+    }
     process.stdout.write("Account moved to the trash.\n");
     if (result.purgeAfter) {
       process.stdout.write(

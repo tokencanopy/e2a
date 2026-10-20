@@ -316,6 +316,8 @@ type Store interface {
 	// RecordHold persists the message's finite-hold class and anchor. Terminal
 	// writes clear the pair.
 	RecordHold(ctx context.Context, messageID string, class HoldClass, anchor time.Time) error
+	// RecordHoldDetail exposes a current hold diagnostic on the queued message.
+	RecordHoldDetail(ctx context.Context, messageID string, jobID int64, detail string) error
 	// MarkSent records the provider outcome monotonically from a pre-terminal
 	// state, including when trash won after ClaimSend.
 	MarkSent(ctx context.Context, messageID string, jobID int64, attempt int, occurredAt time.Time, providerMessageID, sentAs string) error
@@ -748,7 +750,14 @@ func (w *SendWorker) hold(ctx context.Context, job *river.Job[OutboundSendArgs],
 		}
 		return river.JobSnooze(delay)
 	}
-	return w.holdFinite(ctx, job, j, attempt, class, "sending_policy_hold: "+d.Reason, delay, observedAt)
+	detail := "sending_policy_hold: " + d.Reason
+	if d.DailyLimit != nil {
+		detail += fmt.Sprintf(" limit=%d used=%d shared_limit=%d shared_used=%d resets_at=%s", d.DailyLimit.Limit, d.DailyLimit.Used, d.DailyLimit.SharedLimit, d.DailyLimit.SharedUsed, d.DailyLimit.ResetsAt.Format(time.RFC3339))
+		if err := w.store.RecordHoldDetail(ctx, j.MessageID, job.ID, detail); err != nil {
+			return fmt.Errorf("record daily limit hold: %w", err)
+		}
+	}
+	return w.holdFinite(ctx, job, j, attempt, class, detail, delay, observedAt)
 }
 
 // holdFinite persists the hold state, expires the message when its derived

@@ -10,6 +10,7 @@
  * Do not edit the class manually.
  */
 
+import { AccountDailyLimit } from '../models/AccountDailyLimit.js';
 import { AccountUserView } from '../models/AccountUserView.js';
 import { LimitsCapsView } from '../models/LimitsCapsView.js';
 import { LimitsUsageView } from '../models/LimitsUsageView.js';
@@ -18,6 +19,10 @@ import { HttpFile } from '../http/http.js';
 
 export class AccountView {
     'agentEmail'?: string;
+    /**
+    * External-recipient allowance for this UTC day. Used includes pending or uncertain provider submissions. Shared-identity usage is included in total usage and also bounded by shared_limit. Internal recipients (own live agents and verified owner mailbox) do not count. Omitted when this deployment does not enable the account trust ladder.
+    */
+    'dailyLimit'?: AccountDailyLimit;
     /**
     * When the account was moved to the trash. Absent for a live account.
     */
@@ -57,6 +62,12 @@ export class AccountView {
             "name": "agentEmail",
             "baseName": "agent_email",
             "type": "string",
+            "format": ""
+        },
+        {
+            "name": "dailyLimit",
+            "baseName": "daily_limit",
+            "type": "AccountDailyLimit",
             "format": ""
         },
         {

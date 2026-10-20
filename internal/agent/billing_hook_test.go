@@ -394,3 +394,57 @@ func TestPlainDeleteOfAPausedAccountIsRefusedWhenTrashIsDisabled(t *testing.T) {
 		t.Fatal("billing was notified for a refused delete")
 	}
 }
+
+// TestDeferredPermanentDeleteNotifiesTrashNotPurge: a permanent delete of an
+// account that emailed an external recipient recently is deferred to the
+// trash, so billing hears mode "trash" at the account-state path — never the
+// cancel hook — and the account row survives.
+func TestDeferredPermanentDeleteNotifiesTrashNotPurge(t *testing.T) {
+	api, store, rec := setupCoreAPIWithBillingHook(t, "secret", http.StatusNoContent)
+	ctx := context.Background()
+	user, err := store.CreateOrGetUser(ctx, "deferred@example.test", "Test", "google-deferred@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimOrCreateDomain(ctx, "deferred.example.test", user.ID); err != nil {
+		t.Fatal(err)
+	}
+	ag, err := store.CreateAgent(ctx, "deferred-bot@deferred.example.test", "deferred.example.test", "Bot", "", "cloud", user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO messages (id, agent_id, direction, sender, recipient, subject, delivery_status, provider_accepted_at)
+			VALUES ('msg_billing_defer', $1, 'outbound', $1, 'someone@example.com', 'hi', 'sent', now())`, ag.ID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO message_recipients (id, message_id, address, kind, status)
+			VALUES ('rcpt_billing_defer', 'msg_billing_defer', 'someone@example.com', 'to', 'sent')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := api.DeleteUserDataCore(ctx, user, true)
+	if err != nil {
+		t.Fatalf("DeleteUserDataCore(permanent): %v", err)
+	}
+	if res.Mode != identity.AccountDeleteModeTrash || !res.EraseDeferred || res.UserDeleted {
+		t.Fatalf("receipt = %+v, want a deferred trash receipt", res)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var hookBody struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(rec.body, &hookBody); err != nil {
+		t.Fatalf("hook body not JSON: %v", err)
+	}
+	if hookBody.Mode != "trash" || rec.path != "/account-state" {
+		t.Fatalf("deferred erase notice = mode %q at %q, want mode trash at /account-state", hookBody.Mode, rec.path)
+	}
+	if u, err := store.GetUserByIDAnyState(ctx, user.ID); err != nil || u.DeletedAt == nil {
+		t.Fatalf("account should remain trashed: %+v err=%v", u, err)
+	}
+}

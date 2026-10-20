@@ -195,3 +195,99 @@ func TestSendingAccessDisabledSurfaces(t *testing.T) {
 		t.Fatalf("post: %d %v", code, body)
 	}
 }
+
+func TestAccountSendingAccessAvailableUnlocks(t *testing.T) {
+	for name, tc := range map[string]struct {
+		unlocks []sendingpolicy.ExternalUnlock
+		want    []any
+	}{
+		"hosted: approval only": {[]sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval}, []any{"operator_approval"}},
+		"default: all three": {
+			[]sendingpolicy.ExternalUnlock{sendingpolicy.UnlockOperatorApproval, sendingpolicy.UnlockVerifiedDomain, sendingpolicy.UnlockPaidEntitlement},
+			[]any{"operator_approval", "verified_domain", "paid_entitlement"},
+		},
+	} {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			srv := testServer(t, func(d *Deps) {
+				d.SendingAccessStatus = func(context.Context, string) (sendingpolicy.ExternalAccessStatus, error) {
+					return sendingpolicy.ExternalAccessStatus{EnforcementApplies: true, PaidExternalSendingEntitled: true, AvailableUnlocks: tc.unlocks}, nil
+				}
+			})
+			code, body := getJSON(t, srv.URL+"/v1/account", "good")
+			if code != 200 {
+				t.Fatalf("status %d", code)
+			}
+			sa, _ := body["sending_access"].(map[string]any)
+			got, _ := sa["available_unlocks"].([]any)
+			if len(got) != len(tc.want) {
+				t.Fatalf("available_unlocks = %v, want %v", sa["available_unlocks"], tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("available_unlocks = %v, want %v", got, tc.want)
+				}
+			}
+			// Additive: every existing field is still present.
+			for _, k := range []string{"enforcement_applies", "shared_external_approved", "paid_external_sending_entitled", "owner_recipient_verified"} {
+				if _, ok := sa[k]; !ok {
+					t.Fatalf("existing field %s missing: %v", k, sa)
+				}
+			}
+		})
+	}
+}
+
+// A request filed by a system/internal account (the scheduled conformance
+// suite runs as one) is outside the rule: nothing for an operator to decide,
+// so no operator email. Standard accounts keep their notification.
+func TestSendingAccessRequestSkipsOperatorNotificationForExemptClass(t *testing.T) {
+	for name, tc := range map[string]struct {
+		exempt     bool
+		wantNotify int
+	}{
+		"exempt class":   {exempt: true, wantNotify: 0},
+		"standard class": {exempt: false, wantNotify: 1},
+	} {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			notified := 0
+			srv := testServer(t, func(d *Deps) {
+				d.SubmitSendingAccessRequest = func(_ context.Context, _ string, in sendingpolicy.AccessRequestInput) (sendingpolicy.AccessRequest, bool, error) {
+					return sendingpolicy.AccessRequest{ID: "esar_x", State: "pending", UseCase: in.UseCase, Recipients: in.Recipients,
+						ExpectedDailyVolume: in.ExpectedDailyVolume, CreatedAt: time.Now().UTC(), FromExemptAccount: tc.exempt}, true, nil
+				}
+				d.NotifySendingAccessRequest = func(context.Context, string, sendingpolicy.AccessRequest) { notified++ }
+			})
+			form := map[string]any{"use_case": "x", "recipients": "y", "expected_daily_volume": 1}
+			code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/account/sending-access/request", "good", form)
+			if code != 201 {
+				t.Fatalf("create: %d %v", code, body)
+			}
+			if _, leaked := body["from_exempt_account"]; leaked {
+				t.Fatal("the exemption flag is server-internal and must not reach the wire")
+			}
+			if notified != tc.wantNotify {
+				t.Fatalf("notified %d, want %d", notified, tc.wantNotify)
+			}
+		})
+	}
+}
+
+func TestSendingAccessRequestNotRestrictedIsConflict(t *testing.T) {
+	notified := 0
+	srv := testServer(t, func(d *Deps) {
+		d.SubmitSendingAccessRequest = func(context.Context, string, sendingpolicy.AccessRequestInput) (sendingpolicy.AccessRequest, bool, error) {
+			return sendingpolicy.AccessRequest{}, false, sendingpolicy.ErrSendingAccessNotRestricted
+		}
+		d.NotifySendingAccessRequest = func(context.Context, string, sendingpolicy.AccessRequest) { notified++ }
+	})
+	form := map[string]any{"use_case": "x", "recipients": "y", "expected_daily_volume": 1}
+	code, body := sendJSON(t, http.MethodPost, srv.URL+"/v1/account/sending-access/request", "good", form)
+	if code != 409 || errCode(body) != "conflict" {
+		t.Fatalf("not restricted: %d %v", code, body)
+	}
+	if notified != 0 {
+		t.Fatal("a refused request must not notify the operator")
+	}
+}

@@ -19,6 +19,7 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
+from e2a.v1.generated.models.account_daily_limit import AccountDailyLimit
 from typing import Optional, Set
 from typing_extensions import Self
 
@@ -27,12 +28,13 @@ class LimitExceededDetails(BaseModel):
     LimitExceededDetails
     """ # noqa: E501
     current: StrictInt = Field(description="The account's usage at the time the cap was hit (matches usage.<resource>).")
+    daily_limit: Optional[AccountDailyLimit] = Field(default=None, description="Current external-recipient allowance, usage and reset time when the account trust ladder refuses an immediate send.")
     limit: StrictInt = Field(description="The cap that was hit (matches limits.max_<resource>).")
     plan_code: Optional[StrictStr] = Field(default=None, description="The account's plan label.")
-    resource: StrictStr = Field(description="The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (per-UTC-day send cap; no AccountView field — resets at midnight UTC).")
+    resource: StrictStr = Field(description="The capped resource stem. For stems with AccountView fields, key it to usage.<resource> and limits.max_<resource>. Open set: new values may be added over time, so treat these as strings and tolerate unknown values. Known values: agents, domains, messages_month, storage_bytes, messages_day (daily send cap; daily_limit reports external-recipient usage on deployments with the account trust ladder — resets at midnight UTC).")
     upgrade_url: Optional[StrictStr] = Field(default=None, description="An upgrade affordance URL, when the operator has configured one.")
     additional_properties: Dict[str, Any] = {}
-    __properties: ClassVar[List[str]] = ["current", "limit", "plan_code", "resource", "upgrade_url"]
+    __properties: ClassVar[List[str]] = ["current", "daily_limit", "limit", "plan_code", "resource", "upgrade_url"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -75,6 +77,9 @@ class LimitExceededDetails(BaseModel):
             exclude=excluded_fields,
             exclude_none=True,
         )
+        # override the default output from pydantic by calling `to_dict()` of daily_limit
+        if self.daily_limit:
+            _dict['daily_limit'] = self.daily_limit.to_dict()
         # puts key-value pairs in additional_properties in the top level
         if self.additional_properties is not None:
             for _key, _value in self.additional_properties.items():
@@ -93,6 +98,7 @@ class LimitExceededDetails(BaseModel):
 
         _obj = cls.model_validate({
             "current": obj.get("current"),
+            "daily_limit": AccountDailyLimit.from_dict(obj["daily_limit"]) if obj.get("daily_limit") is not None else None,
             "limit": obj.get("limit"),
             "plan_code": obj.get("plan_code"),
             "resource": obj.get("resource"),

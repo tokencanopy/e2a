@@ -175,7 +175,7 @@ func (s *Store) EffectiveSuppressions(ctx context.Context, userID, agentID strin
 		 UNION
 		 SELECT address FROM agent_suppressions
 		  WHERE user_id = $1 AND agent_id = $3 AND address = ANY($2)`,
-		userID, normalized, NormalizeEmail(agentID))
+		userID, suppressionLookupSet(normalized), NormalizeEmail(agentID))
 	if err != nil {
 		return nil, err
 	}

@@ -40,6 +40,7 @@ __all__ = [
     "ApiException",
     "APIKeyExportEntry",
     "APIKeyView",
+    "AccountDailyLimit",
     "AccountMetricsView",
     "AccountUserView",
     "AccountView",
@@ -238,6 +239,7 @@ from e2a.v1.generated.exceptions import ApiException as ApiException
 # import models into sdk package
 from e2a.v1.generated.models.api_key_export_entry import APIKeyExportEntry as APIKeyExportEntry
 from e2a.v1.generated.models.api_key_view import APIKeyView as APIKeyView
+from e2a.v1.generated.models.account_daily_limit import AccountDailyLimit as AccountDailyLimit
 from e2a.v1.generated.models.account_metrics_view import AccountMetricsView as AccountMetricsView
 from e2a.v1.generated.models.account_user_view import AccountUserView as AccountUserView
 from e2a.v1.generated.models.account_view import AccountView as AccountView

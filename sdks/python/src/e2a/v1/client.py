@@ -487,11 +487,27 @@ class AgentsResource:
             lambda h: self._api.put_agent_protection(email, req, _headers=h)
         )
 
-    async def delete(self, email: str) -> DeleteAgentResult:
-        # The typed .delete() call is the confirmation; the SDK supplies the
-        # ?confirm=DELETE guard the raw API requires (AG-6). Returns the deletion
-        # receipt ({deleted, email, messages_deleted}).
-        return await self._c._write_idempotent(lambda h: self._api.delete_agent(email, confirm="DELETE", _headers=h))
+    async def delete(self, email: str, *, permanent: bool = False) -> DeleteAgentResult:
+        """Move an agent to the trash (restorable via ``restore()`` within the
+        30-day window by default).
+
+        Pass ``permanent=True`` to delete irreversibly right away instead —
+        accepts live and trashed agents. An agent that emailed external
+        recipients recently (within a deployment-configured window, 14 days
+        by default) is not deleted at once: it is moved to the trash (or
+        stays there) so late delivery feedback still reaches it, and the
+        receipt has ``erase_deferred=True``, ``purge_after`` and a
+        human-readable ``message``; it can be restored until ``purge_after``.
+
+        The typed .delete() call is the confirmation; the SDK supplies the
+        ?confirm=DELETE guard the raw API requires (AG-6). Returns the
+        deletion receipt ({deleted, email, messages_deleted}).
+        """
+        return await self._c._write_idempotent(
+            lambda h: self._api.delete_agent(
+                email, confirm="DELETE", permanent=permanent or None, _headers=h
+            )
+        )
 
     async def restore(self, email: str) -> AgentView:
         """Restore an agent from the 30-day trash. Scheduled messages restored
@@ -661,7 +677,11 @@ class MessagesResource:
         in the trash ("delete forever") — irreversible, account scope only. The
         typed .delete() call is the confirmation; the SDK supplies the
         ?confirm=DELETE guard the raw API requires on that path (it is ignored
-        when permanent is unset).
+        when permanent is unset). A message sent to external recipients
+        recently (within a deployment-configured window, 14 days by default)
+        is not deleted at once: it stays in the trash, and the receipt has
+        ``erase_deferred=True``, ``purge_after`` and a human-readable
+        ``message``.
 
         A message held for review cannot be deleted (409 message_held) — resolve
         it on the review queue first. Returns the deletion receipt
@@ -1387,6 +1407,18 @@ class AccountResource:
         self.api_keys = APIKeysResource(api, client)
 
     async def get(self) -> AccountView:
+        """The authenticated account (whoami).
+
+        ``daily_limit``, when present, reports today's external-recipient
+        allowance, reserved usage, shared-identity subset and UTC reset time.
+
+        On a deployment that restricts external sending, ``sending_access``
+        (beta) reports the account's state; its ``available_unlocks`` lists
+        the routes that deployment accepts for lifting the restriction
+        (``operator_approval`` — see :meth:`request_sending_access` — is
+        always among them; ``verified_domain`` and ``paid_entitlement`` only
+        where configured). ``None`` from servers that predate the field.
+        """
         return await self._c._read(lambda h: self._api.get_account(_headers=h))
 
     async def export(self) -> UserExport:
@@ -1447,6 +1479,15 @@ class AccountResource:
         other counts describe rows trashed/revoked/unverified, not deleted);
         ``user_deleted`` is true only for ``mode="permanent"``.
 
+        ``permanent=True`` on an account that emailed external recipients
+        recently (within a deployment-configured window, 14 days by default)
+        is not erased at once: it is moved to the trash like a default
+        delete so late delivery feedback (spam complaints, bounces) still
+        reaches it. The call still succeeds — the receipt has
+        ``mode="trash"``, ``erase_deferred=True``, ``purge_after`` (when it
+        will be erased) and a human-readable ``message``; the owner can
+        restore it before ``purge_after``.
+
         Deliberately NOT retried (unlike the other DELETEs): even the
         default trash mode revokes every key/grant/session at once, and a
         transient failure should surface loudly to the caller rather than
@@ -1473,10 +1514,15 @@ class AccountResource:
     ) -> SendingAccessRequestView:
         """Beta: file a request for support to review external sending access.
 
+        File ONE request; the decision is emailed to the account owner.
         Idempotent while a request is pending — calling this again returns the
         existing pending request instead of creating another. After a decline,
         a new request may be filed as an appeal (``rate_limited`` beyond 3 per
-        30 days). Filing a request never grants access by itself.
+        30 days). Raises :class:`~e2a.v1.errors.E2AError` with code
+        ``conflict`` (409) when the account is not currently restricted
+        (already approved, outside the rollout, or lifted by an available
+        unlock) — nothing is filed; do not retry. Filing a request never
+        grants access by itself.
         Account-scoped credentials only.
 
         A first filing answers 201 and a resubmit-while-pending answers 200

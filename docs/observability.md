@@ -107,6 +107,7 @@ acceptance SLI below deliberately excludes them.
 | `e2a_outbound_attempt_duration_seconds` | histogram | — | Upstream (SES/SMTP relay) submission duration. |
 | `e2a_outbound_rate_deferred_total` | counter | — | Submissions deferred by the per-agent fire-time rate limiter (`internal/sendrate`, 60/min/agent sliding window, enforced in the send worker immediately before provider submission). A deferral snoozes the job without burning an attempt, metering, or emitting a terminal event — the message fires when the window frees capacity (re-fire spread by a deterministic per-message jitter). A sustained high rate means agents are queueing behind their own budget. Deferral loops are bounded by the 72h retry horizon, so a backlog beyond ~259,200 messages/agent/burst (60 × 60 × 72) fails its tail terminally with `send_rate_timeout` (`failed_local_retries`). |
 | `e2a_external_access_decisions_total` | counter | `stage`, `route`, `mode` | External-sending-access evaluations (`internal/sendingpolicy`), only when the control is in shadow or enforce mode. `stage` ∈ preflight/acceptance/authorization/redemption; `route` ∈ not_applicable/custom_identity/operator_approval/paid_entitlement/restricted_recipients/denied; `mode` ∈ shadow/enforce. In shadow, `route="denied"` counts the sends enforcement would refuse — the evidence for moving to enforce. No account, address or domain labels. |
+| `e2a_sending_feedback_ingested_total` | counter | `outcome`, `bucket` | Deletion-resistant SES feedback ingestion (`internal/sendingpolicy`). `outcome` ∈ correlated/dead_account/unmatched_recipient/uncorrelated_with_marker/uncorrelated/duplicate; `bucket` ∈ delivered/hard_bounce/complaint/terminal_other/none (the detector bucket actually applied; deliveries to the SES simulator, the shared agent domain, or the sender's own verified domains are `none`). One sample per recipient of a first-seen correlated event, one per uncorrelated or duplicate event. `uncorrelated_with_marker` is mail e2a stamped whose retained correlation is missing — alert on it; `dead_account` is evidence for a purged account (provenance only). No account, address, domain or id labels. |
 | `e2a_outbound_terminal_total` | counter | `outcome` | Messages reaching a terminal submission outcome, **exactly once per message**: `sent`, `failed_suppressed`, `failed_provider`, `failed_local_retries`, `failed_cancelled` (policy cancel settled by the reconciler — kept out of `failed_local_retries` so cancellations can't mask a retries-exhausted regression). A deferred final attempt is counted when the terminal reconciler settles it — as `sent` when provider-accept evidence arrived (never a false failure), else as a failure. |
 | `e2a_outbound_terminal_latency_seconds` | histogram | — | Eligibility→terminal latency per message (the terminal write's occurred_at − the **submission anchor**), observed **at most once per message**, co-located with the `e2a_outbound_terminal_total` emission so the two share their exactly-once contract (the SNS-feedback settle path is deliberately uninstrumented for both; a terminal landing before its own anchor records the count with no sample — see the SLO section). The anchor is `messages.created_at` for an ordinary send, and the latest of `created_at`, `scheduled_at`, and `reviewed_at` otherwise: a HITL hold anchors at the moment it was approved into the send pipeline, a scheduled send at its fire time. Neither wait is e2a latency, and charging them here made every hold approved after >5 min — and every send scheduled further out than the window — an automatic SLO miss. Provider-evidence settles use the evidence's accept time as occurred_at, so they measure anchor→provider-accept, not anchor→sweep. Buckets span seconds→days (the 72h retry horizon is the tail). |
 
@@ -192,11 +193,55 @@ Ambiguous anchors also emit a structured, process-wide rate-limited log (at
 most one line per minute). It contains only candidate/thread counts: no
 addresses, subjects, message content, or RFC Message-IDs.
 
+### Sending budget observation
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `e2a_sending_budget_decisions_total` | counter | `scope`, `decision` | Committed gate evaluations. Decisions: `allow`, `would_hold` (shadow), `hold` (enforced). |
+| `e2a_sending_budget_deferrals_total` | counter | `scope` | Enforced budget/trust holds; the same events as decisions with `decision="hold"`. |
+| `e2a_sending_budget_used_ratio` | gauge | `scope` | Current UTC day's reserved units (including confirmed units), divided by the effective policy limit. Global pools only. Shadow demand can exceed 1. |
+| `e2a_sending_protection_policy_generation` | gauge | — | Effective database policy generation; 0 for config source. |
+| `e2a_sending_protection_policy_config_mismatch` | gauge | — | Database policy differs from local config (1), or matches/config source (0). Intentional database activation can produce a mismatch. |
+| `e2a_sending_budget_observation_last_success_timestamp_seconds` | gauge | — | Unix timestamp of the last successful policy/counter snapshot; 0 before the first successful sample. |
+
+Decision scopes are the closed set `global_all`, `account_daily`,
+`account_shared_daily`, `global_probation`, `global_critical`, and
+`global_violation`. Unknown labels normalize to `other`. No account, operation,
+message, domain, recipient, or raw policy value is a label.
+
+Reserve reports early holds only; Consume reports each evaluated scope. Shadow
+mode reports every exceeded pool. Enforced evaluation stops at its first budget
+hold, so an earlier pool's `allow` does not mean the whole send was allowed.
+Account trust checks also report account/shared evaluations when enabled,
+including when platform budgets are disabled. If both legacy account budgets
+and account trust are enabled, both checks can report the same scope. Disabled
+legacy account/shared/probation checks emit no decisions. These counters count
+evaluations, not recipients, unique messages, or SMTP calls: retries can add
+samples, and a crash after commit but before emission can lose a sample.
+Rolled-back transactions do not emit samples. The former shadow-denial log
+containing operation identifiers is replaced by these bounded observations.
+
+Each process with Prometheus enabled samples immediately and every 30 seconds,
+with a 5-second timeout. One read-only database snapshot reads the effective
+policy and four indexed global-pool counters; it never scans account rows.
+The UTC date and observation timestamp come from PostgreSQL, matching the
+clock used by authorization. Missing counters report zero, and disabled legacy
+probation reports zero.
+Ratios use the current policy limit, not a historical limit cached in the
+counter row. `/metrics` performs no database queries. A failed sample retains
+the previous gauges and timestamp; zero or stale freshness is not evidence of
+unused capacity. Filter out stale samples before evaluating usage, and
+aggregate these shared-ledger ratios across replicas with **max**, not sum.
+Inspect generation, mismatch, and freshness separately for each serving slot.
+These observations do not change policy, enable enforcement, or establish
+readiness of the operator-recipient registry.
+
 ### Maintenance
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `e2a_janitor_rows_deleted_total` | counter | `table` | TTL sweep deletions. |
+| `e2a_janitor_rows_deleted_total` | counter | `table` | TTL sweep deletions. The sending-ledger janitor (`internal/sendingpolicy`, River periodic `sending_ledger_retention`, hourly and on start) reports here too, with `table` ∈ `sending_provider_operations`, `sending_budget_reservations`, `sending_budget_counters`, `sending_protection_notice_events`, `sending_protection_notice_deliveries`, `account_sending_control_events`, `external_sending_access_events` (retention rules: [data handling](data-handling.md)). Table names only — never an operation, account or event id. |
+| `e2a_sending_ledger_retention_runs_total` | counter | `outcome` | One sample per sending-ledger janitor pass. `complete`: every table reached its horizon. `partial`: a table hit its per-run cap (50 batches × 1,000 rows) and continues next run — expected for the first runs after rollout on a deployment with weeks of ledger backlog. `failed`: a table's batch hit its 2 s `lock_timeout` or 30 s `statement_timeout` (or lost its connection); the other tables still ran and the next hourly run retries. Alert on sustained `failed` (several consecutive hours), not on one sample; a steady `partial` that never reaches `complete` means the backlog outgrows the per-run cap. Each run also logs one `[sendingpolicy:ledger-gc]` line with per-table counts and `retained_expired_operations` — expired operations a guard is keeping (an attempt still holding capacity, a live job, an in-flight message, a pending notice); a number that only grows points at a stuck attempt or job. |
 | `e2a_notify_missed_total` | counter | — | Fallback-poll wakeups LISTEN/NOTIFY missed (reconnect churn indicator). |
 | `e2a_redeliver_requests_total` | counter | `scope` | Customer-driven webhook replays. |
 | `e2a_contact_due_events_total` | counter | `outcome` | `contact.due` sweep outcomes. `published` counts wake-ups committed to the durable outbox. `failed` counts a failed atomic claim/publish attempt (or the affected batch size when known); the transaction rolls back and River retries the job. A sustained zero `published` despite known overdue, armed engagements can indicate a stalled sweep. Alert on sustained `failed` growth or exhausted River jobs rather than treating one increment as a permanent miss. |

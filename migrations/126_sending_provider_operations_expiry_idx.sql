@@ -1,0 +1,21 @@
+-- 126_sending_provider_operations_expiry_idx.sql
+-- e2a:no-transaction
+--
+-- Access path for the sending-ledger retention janitor
+-- (internal/sendingpolicy/ledger_retention.go), which selects expired
+-- provider operations with `expires_at <= $1 ORDER BY expires_at LIMIT n`.
+-- Migration 113 gave this table only its primary key, so without this index
+-- every janitor batch would be a sequential scan of a table that gains one
+-- row per provider-bound send and has never been pruned.
+--
+-- CREATE INDEX CONCURRENTLY + e2a:no-transaction: the gate inserts and
+-- updates these rows on the hot send path, and a production deployment
+-- already holds every operation written since the gate shipped; a plain
+-- CREATE INDEX would block those writes for the whole build.
+--
+-- OPS NOTE — invalid-index recovery: an interrupted CONCURRENTLY build leaves
+-- an INVALID index that IF NOT EXISTS then skips. To recover:
+--     DROP INDEX CONCURRENTLY IF EXISTS sending_provider_operations_expiry_idx;
+-- then re-run this statement.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS sending_provider_operations_expiry_idx
+    ON sending_provider_operations (expires_at, operation_id);

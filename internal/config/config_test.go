@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -530,7 +531,7 @@ func TestSendingRampDefaultsOverridesAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load defaults: %v", err)
 	}
-	if cfg.SendingRamp.Enabled || cfg.SendingRamp.StartDaily != 50 || cfg.SendingRamp.TargetDaily != 2000 || cfg.SendingRamp.RampDays != 30 {
+	if cfg.SendingRamp.AccountTrustEnabled || cfg.SendingRamp.DisableLegacyDailyBudgets || cfg.SendingRamp.Enabled || cfg.SendingRamp.StartDaily != 50 || cfg.SendingRamp.TargetDaily != 2000 || cfg.SendingRamp.RampDays != 30 {
 		t.Fatalf("sending ramp defaults = %+v, want disabled 50/2000/30", cfg.SendingRamp)
 	}
 
@@ -1225,4 +1226,53 @@ func TestNotificationsSupportContact(t *testing.T) {
 			t.Fatal("Load accepted a non-bare support_email")
 		}
 	})
+}
+
+func loadOIDCScopesConfig(t *testing.T, yamlBody string) (*Config, error) {
+	t.Helper()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("env: \"development\"\n"+yamlBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return Load(cfgPath)
+}
+
+func TestOIDCScopes(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		env     string
+		want    []string
+		wantErr string
+	}{
+		{name: "default", want: []string{"openid"}},
+		{name: "yaml list", yaml: "oidc:\n  scopes: [openid, email]\n", want: []string{"openid", "email"}},
+		{name: "env override", yaml: "oidc:\n  scopes: [openid]\n", env: "openid, email,", want: []string{"openid", "email"}},
+		{name: "missing openid", yaml: "oidc:\n  scopes: [email]\n", wantErr: "openid"},
+		{name: "empty entry", yaml: "oidc:\n  scopes: [openid, \" \"]\n", wantErr: "empty entry"},
+		{name: "duplicate", yaml: "oidc:\n  scopes: [openid, email, openid]\n", wantErr: "duplicate"},
+		{name: "yaml entries trimmed", yaml: "oidc:\n  scopes: [\" openid \", email]\n", want: []string{"openid", "email"}},
+		{name: "internal whitespace", yaml: "oidc:\n  scopes: [openid, \"email profile\"]\n", wantErr: "whitespace"},
+		{name: "env only comma", env: ",", wantErr: "empty entry"},
+		{name: "env only commas and spaces", env: " , ", wantErr: "empty entry"},
+		{name: "env missing openid", env: "email", wantErr: "openid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("E2A_OIDC_SCOPES", tc.env)
+			cfg, err := loadOIDCScopesConfig(t, tc.yaml)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), "oidc.scopes") || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want oidc.scopes error containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.OIDC.Scopes, tc.want) {
+				t.Errorf("Scopes = %v, want %v", cfg.OIDC.Scopes, tc.want)
+			}
+		})
+	}
 }

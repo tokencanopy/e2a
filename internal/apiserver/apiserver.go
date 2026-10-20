@@ -132,7 +132,19 @@ func BuildDeps(p Params) httpapi.Deps {
 	}
 	var rampSnapshot func(context.Context, string, string, time.Time) (sendramp.Snapshot, error)
 	if p.Pool != nil {
-		rampSnapshot = sendramp.NewStore(p.Pool).Snapshot
+		legacyRamp := sendramp.NewStore(p.Pool)
+		rampSnapshot = func(ctx context.Context, user, domain string, now time.Time) (sendramp.Snapshot, error) {
+			if p.SendingAccess != nil {
+				enabled, err := p.SendingAccess.AccountTrustEnabled(ctx)
+				if err != nil {
+					return sendramp.Snapshot{}, err
+				}
+				if enabled {
+					return sendramp.Snapshot{Status: "account_managed"}, nil
+				}
+			}
+			return legacyRamp.Snapshot(ctx, user, domain, now)
+		}
 	}
 	var listMessageLifecycle httpapi.MessageLifecycleLister
 	var countAgentMetrics httpapi.AgentMetricsCounter
@@ -193,13 +205,13 @@ func BuildDeps(p Params) httpapi.Deps {
 		// Trash semantics (docs/design/trash-soft-delete.md): the default
 		// delete is soft; the hard delete sits behind ?permanent=true.
 		DeleteAgent:          p.Store.SoftDeleteAgent,
-		PermanentDeleteAgent: p.Store.DeleteAgentIncarnation,
+		PermanentDeleteAgent: p.Store.PermanentDeleteAgentIncarnation,
 		RestoreAgent:         p.Store.RestoreAgent,
 		GetAgentAnyState:     p.Store.GetAgentByIDAnyState,
 		ListDeletedAgents:    p.Store.ListDeletedAgentsByUser,
 		DeleteMessage:        p.Store.SoftDeleteMessage,
 		RestoreMessage:       p.Store.RestoreMessage,
-		PurgeMessage:         p.Store.PurgeMessage,
+		PurgeMessage:         p.Store.PurgeMessageOrDefer,
 
 		ListDomains:                  p.Store.ListDomainsByUser,
 		SendingRampSnapshot:          rampSnapshot,
@@ -342,6 +354,7 @@ func BuildDeps(p Params) httpapi.Deps {
 		Metrics:      p.Metrics,
 	}
 	if p.SendingAccess != nil {
+		deps.AccountDailyLimit = p.SendingAccess.AccountDailyLimit
 		deps.SendingAccessStatus = p.SendingAccess.ExternalAccessStatus
 		deps.SubmitSendingAccessRequest = p.SendingAccess.SubmitAccessRequest
 		deps.LatestSendingAccessRequest = p.SendingAccess.LatestAccessRequest

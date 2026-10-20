@@ -147,23 +147,26 @@ func trimContentID(raw string) string {
 	return strings.TrimSpace(s)
 }
 
-// decodeBytes reads a body applying its Content-Transfer-Encoding, returning raw
-// bytes (binary-safe — unlike decode(), which is for text bodies).
+// decodeBytes applies Content-Transfer-Encoding for both text bodies and
+// attachments, preserving the original bytes if base64 decoding fails.
 func decodeBytes(body io.Reader, cte string) []byte {
 	switch strings.ToLower(strings.TrimSpace(cte)) {
 	case "base64":
 		raw, _ := io.ReadAll(body)
+		// Be lenient with MIME whitespace and missing padding, as in piguard.
 		clean := strings.Map(func(r rune) rune {
 			if r == '\r' || r == '\n' || r == ' ' || r == '\t' {
 				return -1
 			}
 			return r
 		}, string(raw))
-		dec, err := base64.StdEncoding.DecodeString(clean)
-		if err != nil {
-			return raw // not valid base64 — hand back what we have
+		if dec, err := base64.StdEncoding.DecodeString(clean); err == nil {
+			return dec
 		}
-		return dec
+		if dec, err := base64.RawStdEncoding.DecodeString(clean); err == nil {
+			return dec
+		}
+		return raw // not valid base64 — hand back what we have
 	case "quoted-printable":
 		b, _ := io.ReadAll(quotedprintable.NewReader(body))
 		return b
