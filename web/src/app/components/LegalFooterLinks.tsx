@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { legalFooterLinks } from "../../lib/site";
 
 // Privacy/Terms links for a public-page footer that doesn't already carry
@@ -6,6 +5,11 @@ import { legalFooterLinks } from "../../lib/site";
 // legalFooterLinks() straight into its own FOOTER_LINKS). Renders nothing
 // when neither PRIVACY_URL nor TERMS_URL is configured, so a self-host or
 // staging footer looks exactly as it did before this existed.
+//
+// Every entry from legalFooterLinks() is `plain` — always a bare <a>, never
+// next/link's <Link> — because these are operator-supplied URLs that may
+// resolve outside this Next app (see the comment on legalFooterLinks in
+// lib/site.ts). Only `external` varies the target/rel.
 export function LegalFooterLinks({
   className,
   linkStyle,
@@ -17,23 +21,17 @@ export function LegalFooterLinks({
   if (links.length === 0) return null;
   return (
     <div className={className}>
-      {links.map((l) =>
-        l.external ? (
-          <a
-            key={l.label}
-            href={l.href}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={linkStyle}
-          >
-            {l.label}
-          </a>
-        ) : (
-          <Link key={l.label} href={l.href} style={linkStyle}>
-            {l.label}
-          </Link>
-        ),
-      )}
+      {links.map((l) => (
+        <a
+          key={l.label}
+          href={l.href}
+          target={l.external ? "_blank" : undefined}
+          rel={l.external ? "noopener noreferrer" : undefined}
+          style={linkStyle}
+        >
+          {l.label}
+        </a>
+      ))}
     </div>
   );
 }

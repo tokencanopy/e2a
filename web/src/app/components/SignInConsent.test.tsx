@@ -10,6 +10,12 @@ export {};
 const PRIVACY_ENV_KEY = "NEXT_PUBLIC_PRIVACY_URL";
 const TERMS_ENV_KEY = "NEXT_PUBLIC_TERMS_URL";
 
+// Legal links must never render through next/link's <Link> — see the
+// comment on LegalAnchor in SignInConsent.tsx for why (same-origin legal
+// paths can resolve outside this Next app, and <Link> prefetches the
+// route's RSC payload regardless). This mock tags anything that DOES go
+// through <Link> with a marker attribute so a Link-rendered legal link is
+// distinguishable from a plain <a> even though both render as <a> tags.
 jest.mock("next/link", () => {
   return function MockLink({
     href,
@@ -21,7 +27,7 @@ jest.mock("next/link", () => {
     [key: string]: unknown;
   }) {
     return (
-      <a href={href} {...props}>
+      <a href={href} {...props} data-next-link="true">
         {children}
       </a>
     );
@@ -91,15 +97,19 @@ describe("SignInConsent", () => {
     ).toHaveAttribute("href", "/privacy");
   });
 
-  it("renders a same-origin path as an in-app link with no target", () => {
+  it("renders a same-origin path as a plain anchor with no target", () => {
     process.env[PRIVACY_ENV_KEY] = "/privacy";
     process.env[TERMS_ENV_KEY] = "/terms";
     const { SignInConsent } = loadSignInConsent();
     render(<SignInConsent />);
     const consent = screen.getByTestId("sign-in-consent");
-    expect(
-      within(consent).getByRole("link", { name: "Terms" }),
-    ).not.toHaveAttribute("target");
+    const termsLink = within(consent).getByRole("link", { name: "Terms" });
+    expect(termsLink).not.toHaveAttribute("target");
+    // A same-origin legal path may resolve outside this Next app (the
+    // hosted deployment serves /privacy and /terms as static Caddy routes,
+    // not Next pages), so this must be a plain <a>, never next/link's
+    // <Link> — <Link> would prefetch a route this app doesn't own and 404.
+    expect(termsLink).not.toHaveAttribute("data-next-link");
   });
 
   it("opens an absolute cross-origin legal URL in a new tab", () => {

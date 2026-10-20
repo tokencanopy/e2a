@@ -103,7 +103,7 @@ describe("site config — legal links", () => {
     delete process.env[TERMS_ENV_KEY];
     const site = loadSite();
     expect(site.legalFooterLinks()).toEqual([
-      { label: "Privacy", href: "/privacy", external: false },
+      { label: "Privacy", href: "/privacy", external: false, plain: true },
     ]);
   });
 
@@ -112,7 +112,7 @@ describe("site config — legal links", () => {
     process.env[TERMS_ENV_KEY] = "/terms";
     const site = loadSite();
     expect(site.legalFooterLinks()).toEqual([
-      { label: "Terms", href: "/terms", external: false },
+      { label: "Terms", href: "/terms", external: false, plain: true },
     ]);
   });
 
@@ -121,8 +121,8 @@ describe("site config — legal links", () => {
     process.env[TERMS_ENV_KEY] = "/terms";
     const site = loadSite();
     expect(site.legalFooterLinks()).toEqual([
-      { label: "Privacy", href: "/privacy", external: false },
-      { label: "Terms", href: "/terms", external: false },
+      { label: "Privacy", href: "/privacy", external: false, plain: true },
+      { label: "Terms", href: "/terms", external: false, plain: true },
     ]);
   });
 
@@ -142,6 +142,7 @@ describe("site config — legal links", () => {
         label: "Privacy",
         href: "https://legal.example.com/privacy",
         external: true,
+        plain: true,
       },
     ]);
   });
@@ -152,7 +153,12 @@ describe("site config — legal links", () => {
     delete process.env[PRIVACY_ENV_KEY];
     const site = loadSite();
     expect(site.legalFooterLinks()).toEqual([
-      { label: "Terms", href: "https://e2a.dev/terms", external: false },
+      {
+        label: "Terms",
+        href: "https://e2a.dev/terms",
+        external: false,
+        plain: true,
+      },
     ]);
   });
 
