@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Fixed:** `e2a login` no longer accumulates an indistinguishable new API key
+on every re-authentication. The browser login URL now includes the machine's
+hostname as `device_name`; the server uses it to replace that device's own
+prior "CLI login on <hostname>" key instead of minting another one, so
+re-running `e2a login` from the same machine (or a config wipe) leaves one
+live key per device rather than growing the list forever. A hostname lookup
+failure just omits the parameter and falls back to the previous behavior for
+that login, so it can never fail the command.
+
 **Changed:** `e2a sending-access status` prints an `available unlocks: ...`
 line from the deployment's `sending_access.available_unlocks`, and both it and
 `e2a whoami` offer only the recovery routes the deployment honors. A paid plan
