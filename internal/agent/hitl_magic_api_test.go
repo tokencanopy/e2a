@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
@@ -177,6 +179,20 @@ func issuePending(t *testing.T, store *identity.Store, agentID string) *identity
 		[]string{"alice@example.com"}, nil, nil,
 		"Held", "plain body", "<p>html</p>", nil,
 		"send", "客户 1% ready", "", "", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+// issuePendingWithBody mirrors issuePending but lets the caller control
+// BodyText, for the body-preview truncation test below.
+func issuePendingWithBody(t *testing.T, store *identity.Store, agentID, bodyText string) *identity.Message {
+	t.Helper()
+	msg, err := store.CreatePendingOutboundMessage(context.Background(), agentID,
+		[]string{"alice@example.com"}, nil, nil,
+		"Held", bodyText, "", nil,
+		"send", "body-preview-cap-test", "", "", 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -839,6 +855,89 @@ func TestMagicLinkNoCacheAndSecurityHeaders(t *testing.T) {
 		if got := resp.Header.Get("X-Robots-Tag"); !strings.Contains(got, "noindex") {
 			t.Errorf("%s: X-Robots-Tag = %q, want containing noindex", path, got)
 		}
+		if got := resp.Header.Get("Content-Security-Policy"); got == "" {
+			t.Errorf("%s: Content-Security-Policy header missing", path)
+		} else {
+			for _, directive := range []string{"script-src 'none'", "default-src 'self'", "form-action 'self'"} {
+				if !strings.Contains(got, directive) {
+					t.Errorf("%s: Content-Security-Policy = %q, want containing %q", path, got, directive)
+				}
+			}
+		}
+	}
+}
+
+// --- writeMagicResult's escape contract (issue #118 item 3) ---
+//
+// writeMagicResult is the single function that renders `body` into the
+// result page; every caller must pass the raw, unescaped value. These
+// tests drive it directly (via the export_test.go seam) rather than
+// through every handler path that can reach it, since the escaping is
+// owned entirely by this one function.
+
+func TestMagicResultEscapesBodyExactlyOnce(t *testing.T) {
+	cases := map[string]string{
+		"script_tag": `<script>alert(document.cookie)</script>`,
+		"ampersand":  "Tom & Jerry",
+		"quote_attr": `"><img src=x onerror=alert(1)>`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			agent.WriteMagicMessageForTest(rec, http.StatusBadRequest, "Cannot send", body)
+			got := rec.Body.String()
+
+			if strings.Contains(got, body) {
+				t.Fatalf("result page contains the raw, unescaped body %q:\n%s", body, got)
+			}
+			want := html.EscapeString(body)
+			if !strings.Contains(got, want) {
+				t.Fatalf("result page missing the escaped body %q:\n%s", want, got)
+			}
+			if doubled := html.EscapeString(want); strings.Contains(got, doubled) {
+				t.Fatalf("result page double-escaped the body (found %q):\n%s", doubled, got)
+			}
+		})
+	}
+}
+
+// --- Confirm-page body-preview byte cap (issue #118 item 2) ---
+
+func TestTruncatePreviewBytesStaysUnderCapOnRuneBoundary(t *testing.T) {
+	// 金 is 3 bytes in UTF-8; a cap that isn't a multiple of 3 forces the
+	// truncation point to fall mid-rune unless it backs off to the last
+	// complete rune, exactly what the maintainer's own suggested
+	// `[:maxPreviewBytes/4]` snippet (rune-count, not byte-count) got wrong.
+	s := strings.Repeat("金", 10)
+	got := agent.TruncatePreviewBytesForTest(s, 7)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated string is not valid UTF-8: %q", got)
+	}
+	if !strings.HasPrefix(s, strings.TrimSuffix(got, "\n[truncated]")) {
+		t.Fatalf("truncated output is not a prefix of the input: got %q", got)
+	}
+
+	if got := agent.TruncatePreviewBytesForTest("short", 100); got != "short" {
+		t.Errorf("under the cap should be returned unchanged, got %q", got)
+	}
+}
+
+func TestMagicLinkConfirmPageCapsBodyPreview(t *testing.T) {
+	server, store, signer, _ := setupMagicLinkAPI(t)
+	a, _ := prepareHITLAgent(t, store, "preview-cap")
+	big := strings.Repeat("a", agent.MaxBodyPreviewBytesForTest*2)
+	msg := issuePendingWithBody(t, store, a.ID, big)
+
+	tok, _ := signer.Sign(msg.ID, approvaltoken.ActionApprove, time.Now().Add(1*time.Hour))
+	resp, _ := http.Get(server.URL + "/v1/approve?t=" + url.QueryEscape(tok))
+	body := readBody(t, resp)
+
+	if strings.Contains(body, big) {
+		t.Fatalf("confirm page echoed the full %d-byte body untruncated", len(big))
+	}
+	if len(body) >= len(big) {
+		t.Errorf("confirm page response is %d bytes, want well under the %d-byte body (preview should be capped at %d)",
+			len(body), len(big), agent.MaxBodyPreviewBytesForTest)
 	}
 }
 

@@ -47,6 +47,28 @@ func MarkSideEffectCommittedForTest(w http.ResponseWriter) {
 	markSideEffectCommitted(w)
 }
 
+// WriteMagicMessageForTest exposes writeMagicMessage so the external
+// agent_test package can verify the magic-link result page's HTML-escape
+// contract directly (writeMagicMessage is the single place that escapes
+// body; driving every handler path that can reach it would duplicate that
+// coverage without testing anything writeMagicMessage itself doesn't
+// already own).
+func WriteMagicMessageForTest(w http.ResponseWriter, status int, title, body string) {
+	writeMagicMessage(w, status, title, body)
+}
+
+// TruncatePreviewBytesForTest exposes truncatePreviewBytes for a direct
+// unit test of the rune-boundary-safe byte cap on the confirm page's body
+// preview.
+func TruncatePreviewBytesForTest(s string, maxBytes int) string {
+	return truncatePreviewBytes(s, maxBytes)
+}
+
+// MaxBodyPreviewBytesForTest is the confirm page's body-preview byte cap,
+// exposed so tests assert against the real constant instead of a hardcoded
+// copy that could drift from it.
+const MaxBodyPreviewBytesForTest = maxBodyPreviewBytes
+
 // BuildBlockedOutboundEventForTest exposes buildBlockedOutboundEvent (and the
 // blockAuditID soft-ref it is keyed on) so the external agent_test package can
 // drive the exact event the emit path constructs through a real outbox +
