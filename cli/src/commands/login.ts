@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
+import { hostname } from "node:os";
 import { loadConfig, saveConfig } from "../config.js";
 
 /**
@@ -108,6 +109,19 @@ function buildBrowserLoginURL(apiUrl: string, callbackUrl: string, cliState: str
   const loginUrl = new URL("/api/auth/login", apiUrl);
   loginUrl.searchParams.set("cli_callback", callbackUrl);
   loginUrl.searchParams.set("cli_state", cliState);
+  // Lets the server replace this device's own prior "CLI login" key on
+  // re-auth instead of minting an indistinguishable extra one every time
+  // (server sanitizes and ignores this if empty or unusable). os.hostname()
+  // is not documented to throw on any supported platform, but a login must
+  // never fail over a device label, so a lookup failure just omits it.
+  try {
+    const deviceName = hostname();
+    if (deviceName) {
+      loginUrl.searchParams.set("device_name", deviceName);
+    }
+  } catch {
+    // omit device_name
+  }
   return loginUrl.toString();
 }
 
