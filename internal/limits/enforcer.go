@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/tokencanopy/e2a/internal/usage"
 )
 
@@ -25,6 +27,20 @@ type Counter interface {
 // an interface so tests can supply a fake without a real Postgres pool.
 type limitsReader interface {
 	Get(ctx context.Context, userID string) (Limits, bool, error)
+}
+
+// counterTxReader is the optional transaction-scoped counter surface used by
+// ReserveMessageSendTx. Declared separately from Counter (and asserted, not
+// required) so the existing test fakes stay unchanged.
+type counterTxReader interface {
+	MessagesThisMonthTx(ctx context.Context, tx pgx.Tx, userID string) (int, error)
+	MessagesTodayTx(ctx context.Context, tx pgx.Tx, userID string) (int, error)
+}
+
+// limitsTxReader is the optional transaction-scoped limits surface used by
+// ReserveMessageSendTx; same rationale as counterTxReader.
+type limitsTxReader interface {
+	GetTx(ctx context.Context, tx pgx.Tx, userID string) (Limits, bool, error)
 }
 
 // DBEnforcer is the production Enforcer: reads account_limits + falls
@@ -119,22 +135,26 @@ func (e *DBEnforcer) Get(ctx context.Context, userID string) (Limits, error) {
 	if err != nil {
 		return Limits{}, err
 	}
-	var resolved Limits
-	if found {
-		resolved = row
-	} else {
-		resolved = Limits{
-			PlanCode:              e.defaults.PlanCode,
-			MaxAgents:             e.defaults.MaxAgents,
-			MaxDomains:            e.defaults.MaxDomains,
-			MaxMessagesMonth:      e.defaults.MaxMessagesMonth,
-			MaxMessagesDay:        e.defaults.MaxMessagesDay,
-			MaxStorageBytes:       e.defaults.MaxStorageBytes,
-			OutboundFooterEnabled: e.defaults.OutboundFooterEnabled,
-		}
-	}
+	resolved := e.resolveLimits(row, found)
 	e.cachePut(userID, resolved, gen)
 	return resolved, nil
+}
+
+// resolveLimits applies the operator Defaults when the user has no
+// account_limits row.
+func (e *DBEnforcer) resolveLimits(row Limits, found bool) Limits {
+	if found {
+		return row
+	}
+	return Limits{
+		PlanCode:              e.defaults.PlanCode,
+		MaxAgents:             e.defaults.MaxAgents,
+		MaxDomains:            e.defaults.MaxDomains,
+		MaxMessagesMonth:      e.defaults.MaxMessagesMonth,
+		MaxMessagesDay:        e.defaults.MaxMessagesDay,
+		MaxStorageBytes:       e.defaults.MaxStorageBytes,
+		OutboundFooterEnabled: e.defaults.OutboundFooterEnabled,
+	}
 }
 
 // Invalidate evicts the user's cached Limits and advances the
@@ -302,6 +322,90 @@ func (e *DBEnforcer) CheckMessageSend(ctx context.Context, userID string, units 
 		}
 	}
 	return nil
+}
+
+// ReserveMessageSendTx is the accept-time, race-proof form of the message-flow
+// check: the caller runs it inside the accept transaction, before inserting
+// the message, so the counter it reads includes every accepted-but-unmetered
+// send already committed. It takes a per-user advisory lock (keyspace 3,
+// distinct from claimOrCreateDomain's keyspaces 0/1 and
+// CreateAgentWithLimit's keyspace 2) so two simultaneous immediate sends for
+// one account cannot both read the same pre-insert total — the same shape as
+// the max_agents (#942) and max_domains (#901) fixes.
+//
+// The month and day caps are read on tx, so the lock never has to wait on a
+// second pool connection; the storage stock cap is not re-checked here because
+// it is not a flow budget and the accept-time pre-check already enforces it.
+func (e *DBEnforcer) ReserveMessageSendTx(ctx context.Context, tx pgx.Tx, userID string, units int) error {
+	if units < 1 {
+		units = 1
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 3))`, userID); err != nil {
+		return err
+	}
+	lim, err := e.limitsForTx(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	msgCount, err := e.messagesThisMonthForTx(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	if msgCount+units > lim.MaxMessagesMonth {
+		return &LimitExceededError{
+			Resource: "messages_month",
+			Limit:    lim.MaxMessagesMonth,
+			Current:  msgCount,
+			Limits:   lim,
+		}
+	}
+	if lim.MaxMessagesDay != nil {
+		dayCount, err := e.messagesTodayForTx(ctx, tx, userID)
+		if err != nil {
+			return err
+		}
+		if dayCount+units > *lim.MaxMessagesDay {
+			return &LimitExceededError{
+				Resource: "messages_day",
+				Limit:    *lim.MaxMessagesDay,
+				Current:  dayCount,
+				Limits:   lim,
+			}
+		}
+	}
+	return nil
+}
+
+// limitsForTx resolves the caps without a pool read while the reservation
+// holds its advisory lock: the cache first (the accept pre-check has normally
+// just filled it), then the transaction, and the pooled getter only for an
+// enforcer whose store has no tx form.
+func (e *DBEnforcer) limitsForTx(ctx context.Context, tx pgx.Tx, userID string) (Limits, error) {
+	if cached, _, ok := e.cacheGet(userID); ok {
+		return cached, nil
+	}
+	if r, ok := e.store.(limitsTxReader); ok {
+		row, found, err := r.GetTx(ctx, tx, userID)
+		if err != nil {
+			return Limits{}, err
+		}
+		return e.resolveLimits(row, found), nil
+	}
+	return e.Get(ctx, userID)
+}
+
+func (e *DBEnforcer) messagesThisMonthForTx(ctx context.Context, tx pgx.Tx, userID string) (int, error) {
+	if c, ok := e.counter.(counterTxReader); ok {
+		return c.MessagesThisMonthTx(ctx, tx, userID)
+	}
+	return e.counter.MessagesThisMonth(ctx, userID)
+}
+
+func (e *DBEnforcer) messagesTodayForTx(ctx context.Context, tx pgx.Tx, userID string) (int, error) {
+	if c, ok := e.counter.(counterTxReader); ok {
+		return c.MessagesTodayTx(ctx, tx, userID)
+	}
+	return e.counter.MessagesToday(ctx, userID)
 }
 
 // CheckInboundMessage enforces ONLY the storage stock cap for an inbound
