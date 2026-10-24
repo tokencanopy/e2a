@@ -12,12 +12,13 @@
 
 import { ProtectionDirectionRequest } from '../models/ProtectionDirectionRequest.js';
 import { ProtectionHoldsRequest } from '../models/ProtectionHoldsRequest.js';
+import { ProtectionOutboundRequest } from '../models/ProtectionOutboundRequest.js';
 import { HttpFile } from '../http/http.js';
 
 export class ProtectionConfigRequest {
     'holds': ProtectionHoldsRequest;
     'inbound': ProtectionDirectionRequest;
-    'outbound': ProtectionDirectionRequest;
+    'outbound': ProtectionOutboundRequest;
 
     static readonly discriminator: string | undefined = undefined;
 
@@ -39,7 +40,7 @@ export class ProtectionConfigRequest {
         {
             "name": "outbound",
             "baseName": "outbound",
-            "type": "ProtectionDirectionRequest",
+            "type": "ProtectionOutboundRequest",
             "format": ""
         }    ];
 

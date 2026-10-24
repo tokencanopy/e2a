@@ -109,6 +109,74 @@ func TestScreenOutbound_OpenAllowsBenign(t *testing.T) {
 	}
 }
 
+// TestScreenOutbound_RequireReview: require_review holds every send for review
+// regardless of the gate — an open policy with action=flag, an allowlist that
+// explicitly matches the recipient, and a non-match action of block all resolve
+// to review. Before #989, "hold everything" was only expressible by making the
+// allowlist empty so nothing matched.
+func TestScreenOutbound_RequireReview(t *testing.T) {
+	a := testScreenAPI()
+	cases := []struct {
+		name      string
+		policy    string
+		allowlist []string
+		action    string
+	}{
+		{"open gate never flags but is held anyway", identity.OutboundPolicyOpen, nil, "flag"},
+		{"matching allowlist recipient is still held", identity.OutboundPolicyAllowlist, []string{"ok@friend.com"}, "flag"},
+		{"block non-match action is overridden to review", identity.OutboundPolicyAllowlist, nil, "block"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ag := &identity.AgentIdentity{
+				Domain: "bot.example.com", ID: "bot@bot.example.com",
+				OutboundPolicy: tc.policy, OutboundAllowlist: tc.allowlist,
+				OutboundPolicyAction: tc.action, OutboundRequireReview: true,
+				OutboundScan: identity.ScanOff,
+			}
+			v := a.screenOutbound(context.Background(), ag, outbound.SendRequest{
+				To: []string{"ok@friend.com"}, Subject: "hi", Body: "benign hello",
+			})
+			if v.Applied != piguard.ActionReview {
+				t.Errorf("applied = %q, want review", v.Applied)
+			}
+			if !v.gateFlagged || v.ReviewReason != identity.ReviewReasonRecipientGate {
+				t.Errorf("gateFlagged=%v reason=%q, want a recipient_gate hold", v.gateFlagged, v.ReviewReason)
+			}
+			if v.GateAddr != "ok@friend.com" {
+				t.Errorf("gate addr = %q, want the first recipient", v.GateAddr)
+			}
+		})
+	}
+}
+
+// TestScreenOutbound_RequireReviewOffKeepsGateSemantics pins the boundary the
+// switch implicates: with require_review unset, an open gate with action=review
+// still holds nothing (the #989 gap, now expressible the other way), and the
+// empty-allowlist composition still holds every send.
+func TestScreenOutbound_RequireReviewOffKeepsGateSemantics(t *testing.T) {
+	a := testScreenAPI()
+	req := outbound.SendRequest{To: []string{"anyone@anywhere.com"}, Subject: "hi", Body: "benign hello"}
+
+	open := &identity.AgentIdentity{
+		Domain: "bot.example.com", ID: "bot@bot.example.com",
+		OutboundPolicy: identity.OutboundPolicyOpen, OutboundPolicyAction: "review",
+		OutboundScan: identity.ScanOff,
+	}
+	if v := a.screenOutbound(context.Background(), open, req); v.Applied != piguard.ActionAllow {
+		t.Errorf("open policy + review + require_review off: applied = %q, want allow", v.Applied)
+	}
+
+	emptyAllowlist := &identity.AgentIdentity{
+		Domain: "bot.example.com", ID: "bot@bot.example.com",
+		OutboundPolicy: identity.OutboundPolicyAllowlist, OutboundAllowlist: []string{},
+		OutboundPolicyAction: "review", OutboundScan: identity.ScanOff,
+	}
+	if v := a.screenOutbound(context.Background(), emptyAllowlist, req); v.Applied != piguard.ActionReview {
+		t.Errorf("empty allowlist + review must keep holding, applied = %q", v.Applied)
+	}
+}
+
 // TestScreenOutbound_Scan: outbound_scan=on flags an injection payload (Unicode
 // Tags smuggling) and combines via MoreSevere with the gate.
 func TestScreenOutbound_Scan(t *testing.T) {

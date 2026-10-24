@@ -746,7 +746,9 @@ or on the deployment's shared domain (see `GET /v1/info`).
 - `GET/PUT /v1/agents/{email}/protection` — **(beta)** read / wholesale-replace the
   agent's protection posture: inbound/outbound trust gate, content-scan
   sensitivity, and the hold-queue mechanism (TTL + expiration action). Setting the
-  outbound gate to `review` (or enabling the scan) is what turns on HITL holds.
+  outbound gate to `review`, enabling the scan, or setting `outbound.require_review`
+  is what turns on HITL holds; `require_review` holds every outbound send for
+  review regardless of the gate policy, allowlist, or non-match action.
   Account scope only. Beta — shape may change before it is declared stable.
 - `POST /v1/agents/{email}/test` — send a platform test email to the agent's own
   address to confirm inbound delivery.

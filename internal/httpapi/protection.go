@@ -64,6 +64,20 @@ type ProtectionDirectionView struct {
 	Scan ProtectionScanView `json:"scan"`
 }
 
+// ProtectionOutboundView is the outbound direction: the same gate/scan pair as
+// inbound plus the outbound-only require_review switch (#989). The flag lives on
+// its own type rather than on ProtectionDirectionView so the wire schema doesn't
+// advertise a knob only one direction honors.
+type ProtectionOutboundView struct {
+	ProtectionDirectionView
+	// RequireReview holds every outbound send for review. It short-circuits the
+	// recipient match, so policy, allowlist, and the non-match action are all
+	// ignored. Before #989 the only way to say this was an allowlist policy with
+	// an empty list and action=review: nothing matched, so the non-match action
+	// fired for every send. That composition still works; this says it outright.
+	RequireReview bool `json:"require_review,omitempty" default:"false" doc:"When true, hold every outbound send for review regardless of the gate policy, allowlist, or non-match action. A content scan can still block a message that crosses the scan block threshold."`
+}
+
 // ProtectionHoldsView is the shared review-queue mechanism for held items.
 type ProtectionHoldsView struct {
 	TTLSeconds int `json:"ttl_seconds,omitempty" minimum:"0" default:"604800" doc:"How long a held item waits before its on_expiry action fires."`
@@ -80,7 +94,7 @@ type ProtectionHoldsView struct {
 // distinct types despite the identical shape.
 type ProtectionConfigView struct {
 	Inbound  ProtectionDirectionView `json:"inbound"`
-	Outbound ProtectionDirectionView `json:"outbound"`
+	Outbound ProtectionOutboundView  `json:"outbound"`
 	Holds    ProtectionHoldsView     `json:"holds"`
 }
 
@@ -90,16 +104,20 @@ func protectionViewFromIdentity(ag *identity.AgentIdentity) ProtectionConfigView
 			Gate: ProtectionGateView{Policy: ag.InboundPolicy, Allowlist: orEmpty(ag.InboundAllowlist), Action: ag.InboundPolicyAction},
 			Scan: ProtectionScanView{Sensitivity: ag.InboundScanSensitivity},
 		},
-		Outbound: ProtectionDirectionView{
-			Gate: ProtectionGateView{Policy: ag.OutboundPolicy, Allowlist: orEmpty(ag.OutboundAllowlist), Action: ag.OutboundPolicyAction},
-			Scan: ProtectionScanView{Sensitivity: ag.OutboundScanSensitivity},
+		Outbound: ProtectionOutboundView{
+			ProtectionDirectionView: ProtectionDirectionView{
+				Gate: ProtectionGateView{Policy: ag.OutboundPolicy, Allowlist: orEmpty(ag.OutboundAllowlist), Action: ag.OutboundPolicyAction},
+				Scan: ProtectionScanView{Sensitivity: ag.OutboundScanSensitivity},
+			},
+			RequireReview: ag.OutboundRequireReview,
 		},
 		Holds: ProtectionHoldsView{TTLSeconds: ag.HITLTTLSeconds, OnExpiry: ag.HITLExpirationAction, SuppressNotifications: ag.SuppressNotifications},
 	}
 }
 
 // ProtectionGateRequest / ProtectionScanRequest / ProtectionDirectionRequest /
-// ProtectionHoldsRequest / ProtectionConfigRequest mirror the *View shapes
+// ProtectionOutboundRequest / ProtectionHoldsRequest / ProtectionConfigRequest
+// mirror the *View shapes
 // field-for-field as the PUT body. They are dedicated INPUT types (not the
 // Views) because the spec's forward-compat stance is asymmetric: request
 // schemas stay `additionalProperties: false` (strict validation — an unknown
@@ -129,6 +147,15 @@ type ProtectionDirectionRequest struct {
 	Scan ProtectionScanRequest `json:"scan"`
 }
 
+// ProtectionOutboundRequest mirrors ProtectionOutboundView for the PUT body:
+// the shared direction shape plus require_review.
+type ProtectionOutboundRequest struct {
+	ProtectionDirectionRequest
+	// RequireReview carries no enum to validate; the request schema's
+	// additionalProperties:false strictness still rejects a misspelled key.
+	RequireReview bool `json:"require_review,omitempty" default:"false" doc:"When true, hold every outbound send for review regardless of the gate policy, allowlist, or non-match action."`
+}
+
 // ProtectionHoldsRequest mirrors ProtectionHoldsView for the PUT body.
 type ProtectionHoldsRequest struct {
 	TTLSeconds            int    `json:"ttl_seconds,omitempty" minimum:"0" default:"604800" doc:"How long a held item waits before its on_expiry action fires."`
@@ -141,7 +168,7 @@ type ProtectionHoldsRequest struct {
 // from defaults.
 type ProtectionConfigRequest struct {
 	Inbound  ProtectionDirectionRequest `json:"inbound"`
-	Outbound ProtectionDirectionRequest `json:"outbound"`
+	Outbound ProtectionOutboundRequest  `json:"outbound"`
 	Holds    ProtectionHoldsRequest     `json:"holds"`
 }
 
@@ -154,6 +181,7 @@ func protectionConfigFromRequest(v ProtectionConfigRequest) identity.ProtectionC
 		OutboundGatePolicy:      v.Outbound.Gate.Policy,
 		OutboundAllowlist:       v.Outbound.Gate.Allowlist,
 		OutboundGateAction:      v.Outbound.Gate.Action,
+		OutboundRequireReview:   v.Outbound.RequireReview,
 		OutboundScanSensitivity: v.Outbound.Scan.Sensitivity,
 		HITLTTLSeconds:          v.Holds.TTLSeconds,
 		HITLExpirationAction:    v.Holds.OnExpiry,

@@ -52,6 +52,7 @@ describe("protection commands", () => {
     const put = mockReplaceProtection.mock.calls[0][1];
     expect(put.outbound.gate.action).toBe("flag");
     expect(put.outbound.scan.sensitivity).toBe("off");
+    expect(put.outbound.requireReview).toBe(false);
     // Untouched knobs survive: gate policy/allowlist, inbound, holds.
     expect(put.outbound.gate.policy).toBe("allowlist");
     expect(put.outbound.gate.allowlist).toEqual(["trusted@x.com"]);
@@ -100,6 +101,8 @@ describe("protection commands", () => {
     const put = mockReplaceProtection.mock.calls[0][1];
     expect(put.outbound.gate.action).toBe("review");
     expect(put.outbound.scan.sensitivity).toBe("medium");
+    // #989: the switch that actually holds every send, independent of the gate.
+    expect(put.outbound.requireReview).toBe(true);
   });
 
   it("NEVER writes when the read fails — a transient GET error must not reset the doc", async () => {
@@ -129,7 +132,7 @@ describe("protection commands", () => {
     await protectionGet("bot@agents.e2a.dev", {});
 
     const output = mockStdout.mock.calls.map((c: unknown[]) => c[0]).join("");
-    expect(output).toContain("outbound: gate=allowlist/review scan=medium");
+    expect(output).toContain("outbound: gate=allowlist/review scan=medium require_review=off");
     expect(output).toContain("inbound:  gate=open/review scan=high");
     expect(output).toContain("holds:    ttl=3600s on_expiry=approve");
     expect(output).toContain("notifications=enabled");
