@@ -17,6 +17,10 @@ export class VerifyDomainView {
     * Live DNS probe outcome for the domain\'s DKIM record ({selector}._domainkey.{domain}) from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Advisory diagnostic: DKIM does not gate verified. Open set; tolerate unknown values. Known values: found (a TXT at the selector carries a p= key equal to the issued one; a match wins over a stale key during rotation), missing (a keypair is issued but no p= payload is published at the selector, or the DNS lookup failed), deferred (the probe was skipped because no per-domain DKIM keypair is stored for this domain yet — legacy pre-keying rows; NOT a DNS-propagation wait), mismatch (a DKIM record IS published at the selector but its key doesn\'t match the issued one — almost always a truncated/clipped TXT: the value is ~400 chars and must be published in full, ending in \'AQAB\'; re-publish the complete DKIM record, do not just wait).
     */
     'dkim'?: string;
+    /**
+    * Set only when a probe above hit a genuine resolver failure (timeout, SERVFAIL, unreachable resolver) rather than an ordinary not-yet-published record. mx/spf/dkim still read missing in that case, but the cause is a DNS infrastructure problem, not a configuration gap: retry instead of re-publishing records.
+    */
+    'dnsError'?: string;
     'domain': string;
     /**
     * Live DNS probe outcome for the inbound MX record from THIS verification attempt — not the persisted domain state (that is dns_records[].status on GET /v1/domains/{domain}, which uses the deliberately distinct persisted vocabulary verified/pending/missing/failed). Open set; tolerate unknown values. Known values: found (an MX record on the apex domain points at the e2a relay host), missing (no apex MX points at the relay, or the DNS lookup failed). The MX probe gates verification together with the ownership TXT: verified flips true only when both are present.
@@ -37,6 +41,12 @@ export class VerifyDomainView {
         {
             "name": "dkim",
             "baseName": "dkim",
+            "type": "string",
+            "format": ""
+        },
+        {
+            "name": "dnsError",
+            "baseName": "dns_error",
             "type": "string",
             "format": ""
         },
