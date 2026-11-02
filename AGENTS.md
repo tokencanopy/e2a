@@ -307,8 +307,9 @@ manually on every API change even though the template won't remind you.
   `v1/webhook-signature.ts`.
 - **Python SDK** (`sdks/python/`): src layout, async-native (httpx), sync +
   async high-level clients over the generated base; PEP 561 `py.typed`.
-- **CLI** (`cli/`): commands login, whoami, agents, keys, protection, send,
-  reply, messages, listen, config; config in `~/.e2a/config.json`; `listen
+- **CLI** (`cli/`): commands login, whoami, doctor, agents, keys, protection,
+  contacts, suppressions, send, reply, messages, metrics, listen, config,
+  account, sending-access; config in `~/.e2a/config.json`; `listen
   --forward` proxies WebSocket messages to a local HTTP endpoint. **Exit codes
   (`cli/src/exit.ts`) are a frozen contract** — 0 ok, 1 transient, 2 usage,
   3 held-for-review, 4 auth, 5 permanent request error, 6 timeout,
