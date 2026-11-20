@@ -6291,16 +6291,17 @@ func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name, ext
 // be mapped under.
 var ErrInvalidGoogleSubject = errors.New("identity: google subject is not usable as adoption evidence")
 
-// ValidGoogleSubject bounds adoption evidence: 1..255 bytes of valid UTF-8,
-// no control characters (the Cc category), and never a synthetic
-// "bootstrap:" subject, which names a control-plane-created user rather than
-// proving anyone's identity.
+// ValidGoogleSubject bounds adoption evidence to the shape of a Google
+// account subject: 1..255 ASCII digits. Anything else is not a Google
+// identity — in particular a synthetic "bootstrap:" subject (a
+// control-plane-created user) or a seeded fixture subject such as the
+// prober's, both of which are public strings rather than proof of a person.
 func ValidGoogleSubject(s string) bool {
-	if s == "" || len(s) > 255 || !utf8.ValidString(s) || strings.HasPrefix(s, "bootstrap:") {
+	if s == "" || len(s) > 255 {
 		return false
 	}
-	for _, r := range s {
-		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
@@ -6381,9 +6382,11 @@ func (s *Store) adoptableUserTx(ctx context.Context, tx pgx.Tx, email, googleSub
 	if err != nil {
 		return nil, err
 	}
-	if holder.DeletedAt != nil || holder.GoogleSubject != googleSubject {
+	if holder.DeletedAt != nil || holder.GoogleSubject != googleSubject || holder.AccountClass != "standard" {
 		// No evidence: fall through to the evidence-less path, whose
-		// tombstone check and insert decide the answer byte-for-byte.
+		// tombstone check and insert decide the answer byte-for-byte. Only a
+		// standard customer account is adoptable; internal, system and demo
+		// accounts are never handed to an external principal.
 		return nil, nil
 	}
 	var pairMapped bool
@@ -6396,6 +6399,20 @@ func (s *Store) adoptableUserTx(ctx context.Context, tx pgx.Tx, email, googleSub
 		// A NEW mapping gets AttachExternalPrincipal's checks. A pair that is
 		// already mapped (here necessarily to someone else) skips them and
 		// surfaces as ErrExternalPrincipalConflict from the mapping insert.
+		//
+		// Adoption also binds at most one principal per issuer: a holder the
+		// issuer already maps under another ref belongs to that principal, and
+		// a second mapping would be a live delegated binding the control plane
+		// can never use (its own uniqueness refuses the second claim).
+		var issuerMapped bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM external_principal_mappings WHERE issuer = $1 AND user_id = $2)`,
+			externalIssuer, holder.ID).Scan(&issuerMapped); err != nil {
+			return nil, err
+		}
+		if issuerMapped {
+			return nil, ErrExternalPrincipalConflict
+		}
 		var readOnly bool
 		if err := tx.QueryRow(ctx, accountReadOnlySQL, holder.ID).Scan(&readOnly); err != nil {
 			return nil, err

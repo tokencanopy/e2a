@@ -437,3 +437,58 @@ func TestProvisionConcurrentAdoptionsOfOnePair(t *testing.T) {
 		}
 	}
 }
+
+// Only standard customer accounts are adoptable: a system account answers as
+// a mismatch does, and writes no mapping.
+func TestProvisionRefusesAdoptingNonStandardAccount(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	existing := newDirectSignup(t, store, "ops@example.test")
+	if err := store.SetAccountClass(ctx, existing.ID, "system"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err := store.ProvisionUserAdopting(ctx,
+		"tcusr_ops", "ops@example.test", "", testIssuer, adoptGoogleSub)
+	if !errors.Is(err, identity.ErrEmailConflict) {
+		t.Fatalf("err = %v, want ErrEmailConflict", err)
+	}
+	assertUnmapped(t, store, "tcusr_ops")
+}
+
+// Seeded fixture subjects are public strings, not Google identities.
+func TestProvisionRejectsNonGoogleSubjectShape(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	if _, err := store.CreateOrGetUser(ctx, "probe@example.test", "Probe", "e2a-prober-system"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err := store.ProvisionUserAdopting(ctx,
+		"tcusr_probe", "probe@example.test", "", testIssuer, "e2a-prober-system")
+	if !errors.Is(err, identity.ErrInvalidGoogleSubject) {
+		t.Fatalf("err = %v, want ErrInvalidGoogleSubject", err)
+	}
+	assertUnmapped(t, store, "tcusr_probe")
+}
+
+// A holder the issuer already maps under another ref is not adopted again.
+func TestProvisionRefusesSecondPrincipalFromSameIssuer(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx := context.Background()
+	newDirectSignup(t, store, "ada@example.test")
+	if _, _, _, err := store.ProvisionUserAdopting(ctx,
+		"tcusr_first", "ada@example.test", "", testIssuer, adoptGoogleSub); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err := store.ProvisionUserAdopting(ctx,
+		"tcusr_second", "ada@example.test", "", testIssuer, adoptGoogleSub)
+	if !errors.Is(err, identity.ErrExternalPrincipalConflict) {
+		t.Fatalf("err = %v, want ErrExternalPrincipalConflict", err)
+	}
+	assertUnmapped(t, store, "tcusr_second")
+}

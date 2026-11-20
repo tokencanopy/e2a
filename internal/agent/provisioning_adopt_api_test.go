@@ -146,6 +146,7 @@ func TestProvisionUser_GoogleSubjectValidation(t *testing.T) {
 		"no external_issuer":          string(withoutIssuer),
 		"oversize subject":            adoptBody("tcusr_x", "x@example.test", strings.Repeat("1", 256)),
 		"control character":           adoptBody("tcusr_x", "x@example.test", "1000\n0001"),
+		"non-numeric subject":         adoptBody("tcusr_x", "x@example.test", "e2a-prober-system"),
 	}
 	for name, body := range cases {
 		status, buf := provisionRaw(t, server, body)
