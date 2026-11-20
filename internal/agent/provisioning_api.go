@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/mail"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -27,6 +28,13 @@ type provisionUserRequest struct {
 	ExternalRef string `json:"external_ref"`
 	Email       string `json:"email"`
 	Name        string `json:"name"` // optional; '' default
+	// GoogleSubject, when present, is the identity provider's subject for
+	// the person behind external_ref (a control plane's verified Google
+	// identity). It is evidence, not a key: on an email conflict, the
+	// provision ADOPTS the existing user only if that user's google_subject
+	// equals it exactly, and otherwise answers the same email_conflict as a
+	// request without it. Requires external_issuer; never "bootstrap:".
+	GoogleSubject string `json:"google_subject"`
 }
 
 // handleProvisionUser creates an e2a user on behalf of an external control
@@ -48,7 +56,9 @@ type provisionUserRequest struct {
 //
 // Unlike the text/plain limits-invalidate surface, responses here are JSON
 // because the caller must branch on machine-readable outcomes (created vs
-// replayed vs email-conflict).
+// replayed vs adopted vs email-conflict). An adoption — an email conflict
+// resolved by an exactly matching google_subject — is the only response that
+// carries a second field ("adopted": true).
 func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	if !a.provisioningEnabled || a.provisioningSecret == "" {
 		a.recordProvisioning("not_configured", "public", http.StatusServiceUnavailable)
@@ -101,6 +111,11 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		writeProvisionError(w, http.StatusBadRequest, "invalid_issuer")
 		return
 	}
+	if req.GoogleSubject != "" && (req.ExternalIssuer == "" || !validGoogleSubject(req.GoogleSubject)) {
+		a.recordProvisioning("rejected", "authenticated", http.StatusBadRequest)
+		writeProvisionError(w, http.StatusBadRequest, "invalid_google_subject")
+		return
+	}
 	email := identity.NormalizeEmail(req.Email)
 	parsed, err := mail.ParseAddress(email)
 	if err != nil || parsed.Address != email {
@@ -109,7 +124,7 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, created, err := a.store.ProvisionUser(r.Context(), req.ExternalRef, email, req.Name, req.ExternalIssuer)
+	user, created, adopted, err := a.store.ProvisionUserAdopting(r.Context(), req.ExternalRef, email, req.Name, req.ExternalIssuer, req.GoogleSubject)
 	if errors.Is(err, identity.ErrEmailConflict) {
 		// A DIFFERENT account already holds this email. Never attach, never
 		// merge — reconciliation is the operator's/user's decision.
@@ -141,6 +156,20 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		writeProvisionError(w, http.StatusForbidden, "registration_refused")
 		return
 	}
+	if errors.Is(err, identity.ErrAccountReadOnly) {
+		// Adoption only: a read-only (abuse-paused) account takes no new
+		// sign-in principal, the same rule attach applies.
+		a.recordProvisioning("rejected", "authenticated", http.StatusForbidden)
+		writeProvisionError(w, http.StatusForbidden, identity.AccountReadOnlyCode)
+		return
+	}
+	if errors.Is(err, identity.ErrInvalidGoogleSubject) {
+		// Unreachable after the validation above; kept so a store-level
+		// refusal can never surface as a 500.
+		a.recordProvisioning("rejected", "authenticated", http.StatusBadRequest)
+		writeProvisionError(w, http.StatusBadRequest, "invalid_google_subject")
+		return
+	}
 	if errors.Is(err, identity.ErrTombstoneKeyUnavailable) {
 		a.recordProvisioning("internal_error", "authenticated", http.StatusServiceUnavailable)
 		writeProvisionError(w, http.StatusServiceUnavailable, "registration_unavailable")
@@ -159,10 +188,38 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 		outcome = "created"
 	}
+	if adopted {
+		outcome = "adopted"
+	}
 	a.recordProvisioning(outcome, "authenticated", status)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	if adopted {
+		// Only an adoption carries the flag, so every other response stays
+		// byte-identical for callers that decode {user_id} strictly.
+		_ = json.NewEncoder(w).Encode(struct {
+			UserID  string `json:"user_id"`
+			Adopted bool   `json:"adopted"`
+		}{user.ID, true})
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"user_id": user.ID})
+}
+
+// validGoogleSubject bounds adoption evidence: 1..255 bytes of valid UTF-8,
+// no control characters (the Cc category, as validExternalRef), and never a
+// synthetic "bootstrap:" subject, which would name a control-plane-created
+// user rather than prove anyone's identity.
+func validGoogleSubject(s string) bool {
+	if s == "" || len(s) > 255 || !utf8.ValidString(s) || strings.HasPrefix(s, "bootstrap:") {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *API) recordProvisioning(outcome, trust string, status int) {
