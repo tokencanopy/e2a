@@ -6286,10 +6286,26 @@ func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name, ext
 }
 
 // ErrInvalidGoogleSubject is returned by ProvisionUserAdopting when the
-// supplied Google subject cannot serve as adoption evidence: it is a
-// synthetic "bootstrap:" subject, or there is no external issuer for the
-// adopted user to be mapped under.
+// supplied Google subject cannot serve as adoption evidence (see
+// ValidGoogleSubject), or there is no external issuer for the adopted user to
+// be mapped under.
 var ErrInvalidGoogleSubject = errors.New("identity: google subject is not usable as adoption evidence")
+
+// ValidGoogleSubject bounds adoption evidence: 1..255 bytes of valid UTF-8,
+// no control characters (the Cc category), and never a synthetic
+// "bootstrap:" subject, which names a control-plane-created user rather than
+// proving anyone's identity.
+func ValidGoogleSubject(s string) bool {
+	if s == "" || len(s) > 255 || !utf8.ValidString(s) || strings.HasPrefix(s, "bootstrap:") {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
 
 // ProvisionUserAdopting is ProvisionUser plus one evidence-gated exception to
 // "never attach on an email conflict". When googleSubject is nonempty and the
@@ -6298,8 +6314,11 @@ var ErrInvalidGoogleSubject = errors.New("identity: google subject is not usable
 // (externalIssuer, externalRef) mapping is inserted or replayed for it, and
 // adopted=true. The proof is the identity provider's own subject for the same
 // person, never the email alone: a missing, different, or trashed match still
-// fails with ErrEmailConflict, indistinguishable from a request that sent no
-// subject. Replaying an adoption with the same subject is idempotent.
+// takes exactly the path a request without a subject takes, so it fails the
+// same way (ErrEmailConflict, or the tombstone refusal that precedes it).
+// Replaying an adoption with the same subject is idempotent and resolves by
+// the existing mapping first, so it survives a later change of the adopted
+// user's email.
 //
 // Adoption refuses a read-only (abuse-paused) account with ErrAccountReadOnly
 // and a tombstoned mapping subject with ErrRegistrationRefused, exactly as
@@ -6307,7 +6326,7 @@ var ErrInvalidGoogleSubject = errors.New("identity: google subject is not usable
 // "bootstrap:" value and requires a nonempty externalIssuer
 // (ErrInvalidGoogleSubject). With googleSubject == "" it is ProvisionUser.
 func (s *Store) ProvisionUserAdopting(ctx context.Context, externalRef, email, name, externalIssuer, googleSubject string) (u *User, created, adopted bool, err error) {
-	if googleSubject != "" && (externalIssuer == "" || strings.HasPrefix(googleSubject, "bootstrap:")) {
+	if googleSubject != "" && (externalIssuer == "" || !ValidGoogleSubject(googleSubject)) {
 		return nil, false, false, ErrInvalidGoogleSubject
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -6331,14 +6350,29 @@ func (s *Store) ProvisionUserAdopting(ctx context.Context, externalRef, email, n
 }
 
 // adoptableUserTx returns the live user that the adoption evidence names, or
-// (nil, nil) when no user holds the email so the caller may create one. A
-// user that holds the email but fails the evidence is ErrEmailConflict, the
-// same answer a request without evidence gets. It must run BEFORE the insert:
-// the insert's unique violation would abort the transaction.
+// (nil, nil) when it names none, so the caller continues on exactly the path
+// a request without evidence takes (create, or fail with that path's own
+// error). It must run BEFORE the insert: the insert's unique violation would
+// abort the transaction.
+//
+// Every read takes FOR SHARE, as AttachExternalPrincipal does: it conflicts
+// with the trash/restore/purge FOR NO KEY UPDATE, so an account cannot be
+// trashed between this check and the mapping insert.
 func (s *Store) adoptableUserTx(ctx context.Context, tx pgx.Tx, email, googleSubject, externalIssuer, externalRef string) (*User, error) {
-	// FOR SHARE, as AttachExternalPrincipal takes: it conflicts with the
-	// trash/restore/purge FOR NO KEY UPDATE, so an account cannot be trashed
-	// between this check and the mapping insert.
+	// Replay first, by the mapping: an earlier adoption of this pair resolves
+	// to the same user even if that user's email has since changed (an
+	// e2a.dev sign-in rewrites it), provided the evidence still names them.
+	// A replay gets no read-only or tombstone check, as attach's replay.
+	mapped, err := scanUser(tx.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users
+		 WHERE id = (SELECT user_id FROM external_principal_mappings WHERE issuer = $1 AND subject = $2)
+		 FOR SHARE`, externalIssuer, externalRef))
+	if err == nil && mapped.DeletedAt == nil && mapped.GoogleSubject == googleSubject {
+		return mapped, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
 	holder, err := scanUser(tx.QueryRow(ctx,
 		`SELECT `+userColumns+` FROM users WHERE email = $1 FOR SHARE`, email))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -6348,19 +6382,20 @@ func (s *Store) adoptableUserTx(ctx context.Context, tx pgx.Tx, email, googleSub
 		return nil, err
 	}
 	if holder.DeletedAt != nil || holder.GoogleSubject != googleSubject {
-		return nil, ErrEmailConflict
+		// No evidence: fall through to the evidence-less path, whose
+		// tombstone check and insert decide the answer byte-for-byte.
+		return nil, nil
 	}
-	var mapped bool
+	var pairMapped bool
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM external_principal_mappings WHERE issuer = $1 AND subject = $2)`,
-		externalIssuer, externalRef).Scan(&mapped); err != nil {
+		externalIssuer, externalRef).Scan(&pairMapped); err != nil {
 		return nil, err
 	}
-	if !mapped {
-		// A NEW mapping gets AttachExternalPrincipal's checks; replaying an
-		// existing one does not, so an adopted user paused afterwards still
-		// replays (and a pair mapped elsewhere still surfaces as a conflict
-		// from the mapping insert).
+	if !pairMapped {
+		// A NEW mapping gets AttachExternalPrincipal's checks. A pair that is
+		// already mapped (here necessarily to someone else) skips them and
+		// surfaces as ErrExternalPrincipalConflict from the mapping insert.
 		var readOnly bool
 		if err := tx.QueryRow(ctx, accountReadOnlySQL, holder.ID).Scan(&readOnly); err != nil {
 			return nil, err

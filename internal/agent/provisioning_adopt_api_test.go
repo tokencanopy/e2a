@@ -179,3 +179,38 @@ func TestProvisionUser_AdoptionRecordsAdoptedMetric(t *testing.T) {
 		t.Fatalf("metric = %+v, want %+v", got, want)
 	}
 }
+
+// The no-evidence answer is decided by the evidence-less path, so a wrong
+// subject matches it byte-for-byte even when that path refuses before the
+// email check (here: tombstones on, no key configured).
+func TestProvisionUser_SubjectMismatchMatchesNoSubjectWhenRegistrationUnavailable(t *testing.T) {
+	server, store := setupAttachAPI(t, attachTestIssuer)
+	directSignup(t, store, "ada@example.test")
+	store.SetTombstonePolicy(identity.TombstonePolicy{Enabled: true})
+
+	noSubject, _ := json.Marshal(map[string]string{
+		"external_issuer": attachTestIssuer, "external_ref": "tcusr_a", "email": "ada@example.test",
+	})
+	wantStatus, want := provisionRaw(t, server, string(noSubject))
+	gotStatus, got := provisionRaw(t, server, adoptBody("tcusr_a", "ada@example.test", "100000000000000000999"))
+	if wantStatus != http.StatusServiceUnavailable || gotStatus != wantStatus || string(got) != string(want) {
+		t.Fatalf("mismatch = %d %q, no-subject = %d %q; want identical 503s", gotStatus, got, wantStatus, want)
+	}
+}
+
+func TestProvisionUser_AdoptingPairMappedElsewhereIs409(t *testing.T) {
+	server, store := setupAttachAPI(t, attachTestIssuer)
+	directSignup(t, store, "ada@example.test")
+	other, err := store.BootstrapUser(context.Background(), "other@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AttachExternalPrincipal(context.Background(), attachTestIssuer, "tcusr_ada", other.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	status, buf := provisionRaw(t, server, adoptBody("tcusr_ada", "ada@example.test", adoptAPIGoogleSub))
+	if status != http.StatusConflict || decodeObject(t, buf)["error"] != "external_principal_conflict" {
+		t.Fatalf("status = %d body = %s, want 409 external_principal_conflict", status, buf)
+	}
+}

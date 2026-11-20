@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/mail"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/tokencanopy/e2a/internal/identity"
@@ -111,7 +110,7 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		writeProvisionError(w, http.StatusBadRequest, "invalid_issuer")
 		return
 	}
-	if req.GoogleSubject != "" && (req.ExternalIssuer == "" || !validGoogleSubject(req.GoogleSubject)) {
+	if req.GoogleSubject != "" && (req.ExternalIssuer == "" || !identity.ValidGoogleSubject(req.GoogleSubject)) {
 		a.recordProvisioning("rejected", "authenticated", http.StatusBadRequest)
 		writeProvisionError(w, http.StatusBadRequest, "invalid_google_subject")
 		return
@@ -127,7 +126,8 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	user, created, adopted, err := a.store.ProvisionUserAdopting(r.Context(), req.ExternalRef, email, req.Name, req.ExternalIssuer, req.GoogleSubject)
 	if errors.Is(err, identity.ErrEmailConflict) {
 		// A DIFFERENT account already holds this email. Never attach, never
-		// merge — reconciliation is the operator's/user's decision.
+		// merge — reconciliation is the operator's/user's decision. (An
+		// exactly matching google_subject was adopted and never reaches here.)
 		a.recordProvisioning("rejected", "authenticated", http.StatusConflict)
 		writeProvisionError(w, http.StatusConflict, "email_conflict")
 		return
@@ -204,22 +204,6 @@ func (a *API) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"user_id": user.ID})
-}
-
-// validGoogleSubject bounds adoption evidence: 1..255 bytes of valid UTF-8,
-// no control characters (the Cc category, as validExternalRef), and never a
-// synthetic "bootstrap:" subject, which would name a control-plane-created
-// user rather than prove anyone's identity.
-func validGoogleSubject(s string) bool {
-	if s == "" || len(s) > 255 || !utf8.ValidString(s) || strings.HasPrefix(s, "bootstrap:") {
-		return false
-	}
-	for _, r := range s {
-		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
-			return false
-		}
-	}
-	return true
 }
 
 func (a *API) recordProvisioning(outcome, trust string, status int) {
