@@ -67,7 +67,8 @@ test-e2e:
 # on :5433, like `make test`; per-package DBs make the -p 4 parallel run safe).
 # cover-check enforces the per-package floors in .testcoverage.yml. CI runs the
 # same gate via the vladopajic/go-test-coverage action.
-GO_TEST_COVERAGE_VERSION ?= v2.14.3
+# Keep this version aligned with the pinned action in .github/workflows/test.yml.
+GO_TEST_COVERAGE_VERSION ?= v2.23.0
 # -timeout 15m: atomic coverage instrumentation plus CI DB contention pushed
 # internal/identity past Go's default 10-minute per-package timeout (observed
 # in shared-DB cleanup, not a hang). 15m stays under the workflow's 18-minute

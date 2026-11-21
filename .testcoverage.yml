@@ -6,7 +6,6 @@
 # Measure locally with `make cover` (needs Postgres on :5433), then
 # `make cover-check`. Regenerate floors only when intentionally adding tests.
 profile: cover.out
-local-prefix: "github.com/tokencanopy/e2a"
 
 # No global floor — we gate specific packages, not the whole tree (many
 # packages are thin wiring or main()). Add packages here as their suites grow.
@@ -15,7 +14,7 @@ threshold:
   package: 0
   total: 0
 
-  # Paths are matched with local-prefix stripped, i.e. `internal/...`.
+# Paths are module-relative (inferred from go.mod), e.g. `internal/...`.
 override:
   # Webhook delivery + publish path — security-sensitive (SSRF guard, signing,
   # retry/backoff) and the area we want extensively covered for GA.
