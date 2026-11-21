@@ -140,7 +140,7 @@ var (
 	)
 	oidcCallbackTrustSet = set("public", "trusted")
 	provisioningSet      = set(
-		"created", "existing", "rejected", "internal_error", "not_configured",
+		"created", "existing", "adopted", "rejected", "internal_error", "not_configured",
 		"malformed_request", "unauthorized",
 	)
 	provisioningTrustSet = set("public", "authenticated")

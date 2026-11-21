@@ -6281,27 +6281,158 @@ var ErrEmailConflict = errors.New("identity: email already held by another user"
 // writes no mapping. A pair already attached to a different user aborts
 // with ErrExternalPrincipalConflict.
 func (s *Store) ProvisionUser(ctx context.Context, externalRef, email, name, externalIssuer string) (*User, bool, error) {
+	u, created, _, err := s.ProvisionUserAdopting(ctx, externalRef, email, name, externalIssuer, "")
+	return u, created, err
+}
+
+// ErrInvalidGoogleSubject is returned by ProvisionUserAdopting when the
+// supplied Google subject cannot serve as adoption evidence (see
+// ValidGoogleSubject), or there is no external issuer for the adopted user to
+// be mapped under.
+var ErrInvalidGoogleSubject = errors.New("identity: google subject is not usable as adoption evidence")
+
+// ValidGoogleSubject bounds adoption evidence to the shape of a Google
+// account subject: 1..255 ASCII digits. Anything else is not a Google
+// identity — in particular a synthetic "bootstrap:" subject (a
+// control-plane-created user) or a seeded fixture subject such as the
+// prober's, both of which are public strings rather than proof of a person.
+func ValidGoogleSubject(s string) bool {
+	if s == "" || len(s) > 255 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ProvisionUserAdopting is ProvisionUser plus one evidence-gated exception to
+// "never attach on an email conflict". When googleSubject is nonempty and the
+// requested email belongs to a live user whose google_subject is exactly
+// googleSubject, that user is ADOPTED: no row is created or changed, the
+// (externalIssuer, externalRef) mapping is inserted or replayed for it, and
+// adopted=true. The proof is the identity provider's own subject for the same
+// person, never the email alone: a missing, different, or trashed match still
+// takes exactly the path a request without a subject takes, so it fails the
+// same way (ErrEmailConflict, or the tombstone refusal that precedes it).
+// Replaying an adoption with the same subject is idempotent and resolves by
+// the existing mapping first, so it survives a later change of the adopted
+// user's email.
+//
+// Adoption refuses a read-only (abuse-paused) account with ErrAccountReadOnly
+// and a tombstoned mapping subject with ErrRegistrationRefused, exactly as
+// AttachExternalPrincipal does for a new mapping. googleSubject must not be a
+// "bootstrap:" value and requires a nonempty externalIssuer
+// (ErrInvalidGoogleSubject). With googleSubject == "" it is ProvisionUser.
+func (s *Store) ProvisionUserAdopting(ctx context.Context, externalRef, email, name, externalIssuer, googleSubject string) (u *User, created, adopted bool, err error) {
+	if googleSubject != "" && (externalIssuer == "" || !ValidGoogleSubject(googleSubject)) {
+		return nil, false, false, ErrInvalidGoogleSubject
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	defer tx.Rollback(ctx)
-	u, created, err := s.provisionUser(ctx, tx, externalRef, email, name, externalIssuer)
+	u, created, adopted, err = s.provisionUser(ctx, tx, externalRef, email, name, externalIssuer, googleSubject)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if externalIssuer != "" {
 		if err := provisionExternalPrincipalTx(ctx, tx, externalIssuer, externalRef, u.ID); err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
-	return u, created, nil
+	return u, created, adopted, nil
 }
 
-func (s *Store) provisionUser(ctx context.Context, tx pgx.Tx, externalRef, email, name, externalIssuer string) (*User, bool, error) {
+// adoptableUserTx returns the live user that the adoption evidence names, or
+// (nil, nil) when it names none, so the caller continues on exactly the path
+// a request without evidence takes (create, or fail with that path's own
+// error). It must run BEFORE the insert: the insert's unique violation would
+// abort the transaction.
+//
+// Every read takes FOR SHARE, as AttachExternalPrincipal does: it conflicts
+// with the trash/restore/purge FOR NO KEY UPDATE, so an account cannot be
+// trashed between this check and the mapping insert.
+func (s *Store) adoptableUserTx(ctx context.Context, tx pgx.Tx, email, googleSubject, externalIssuer, externalRef string) (*User, error) {
+	// Replay first, by the mapping: an earlier adoption of this pair resolves
+	// to the same user even if that user's email has since changed (an
+	// e2a.dev sign-in rewrites it), provided the evidence still names them.
+	// A replay gets no read-only or tombstone check, as attach's replay.
+	mapped, err := scanUser(tx.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users
+		 WHERE id = (SELECT user_id FROM external_principal_mappings WHERE issuer = $1 AND subject = $2)
+		 FOR SHARE`, externalIssuer, externalRef))
+	if err == nil && mapped.DeletedAt == nil && mapped.GoogleSubject == googleSubject {
+		return mapped, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	holder, err := scanUser(tx.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE email = $1 FOR SHARE`, email))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if holder.DeletedAt != nil || holder.GoogleSubject != googleSubject || holder.AccountClass != "standard" {
+		// No evidence: fall through to the evidence-less path, whose
+		// tombstone check and insert decide the answer byte-for-byte. Only a
+		// standard customer account is adoptable; internal, system and demo
+		// accounts are never handed to an external principal.
+		return nil, nil
+	}
+	var pairMapped bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM external_principal_mappings WHERE issuer = $1 AND subject = $2)`,
+		externalIssuer, externalRef).Scan(&pairMapped); err != nil {
+		return nil, err
+	}
+	if !pairMapped {
+		// A NEW mapping gets AttachExternalPrincipal's checks. A pair that is
+		// already mapped (here necessarily to someone else) skips them and
+		// surfaces as ErrExternalPrincipalConflict from the mapping insert.
+		//
+		// Adoption also binds at most one principal per issuer: a holder the
+		// issuer already maps under another ref belongs to that principal, and
+		// a second mapping would be a live delegated binding the control plane
+		// can never use (its own uniqueness refuses the second claim).
+		var issuerMapped bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM external_principal_mappings WHERE issuer = $1 AND user_id = $2)`,
+			externalIssuer, holder.ID).Scan(&issuerMapped); err != nil {
+			return nil, err
+		}
+		if issuerMapped {
+			return nil, ErrExternalPrincipalConflict
+		}
+		var readOnly bool
+		if err := tx.QueryRow(ctx, accountReadOnlySQL, holder.ID).Scan(&readOnly); err != nil {
+			return nil, err
+		}
+		if readOnly {
+			return nil, ErrAccountReadOnly
+		}
+		if err := s.checkTombstonesTx(ctx, tx, []TombstoneIdentifier{
+			{Kind: TombstoneKindLoginSubject, Value: externalPrincipalSubject(externalIssuer, externalRef)},
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return holder, nil
+}
+
+// provisionUser resolves the provision to a user and reports whether it was
+// created (a new bootstrap row) or adopted (an existing user named by the
+// Google-subject evidence). Both false is a replay of the ref's own row.
+func (s *Store) provisionUser(ctx context.Context, tx pgx.Tx, externalRef, email, name, externalIssuer, googleSubject string) (u *User, created, adopted bool, err error) {
 	subject := "bootstrap:" + externalRef
 	// A replay resolves to the existing row. A TRASHED row is refused with
 	// ErrAccountTrashed and nothing is written (no restore, no mapping): the
@@ -6311,12 +6442,21 @@ func (s *Store) provisionUser(ctx context.Context, tx pgx.Tx, externalRef, email
 		`SELECT `+userColumns+` FROM users WHERE google_subject = $1 FOR NO KEY UPDATE`, subject))
 	if err == nil {
 		if existing.DeletedAt != nil {
-			return nil, false, ErrAccountTrashed
+			return nil, false, false, ErrAccountTrashed
 		}
-		return existing, false, nil
+		return existing, false, false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, err
+		return nil, false, false, err
+	}
+	if googleSubject != "" {
+		holder, err := s.adoptableUserTx(ctx, tx, email, googleSubject, externalIssuer, externalRef)
+		if err != nil {
+			return nil, false, false, err
+		}
+		if holder != nil {
+			return holder, false, true, nil
+		}
 	}
 	ids := append([]TombstoneIdentifier{
 		{Kind: TombstoneKindLoginSubject, Value: subject},
@@ -6325,16 +6465,16 @@ func (s *Store) provisionUser(ctx context.Context, tx pgx.Tx, externalRef, email
 		ids = append(ids, TombstoneIdentifier{Kind: TombstoneKindLoginSubject, Value: externalPrincipalSubject(externalIssuer, externalRef)})
 	}
 	if err := s.checkTombstonesTx(ctx, tx, ids); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
-	u, err := scanUser(tx.QueryRow(ctx,
+	u, err = scanUser(tx.QueryRow(ctx,
 		`INSERT INTO users (id, email, name, google_subject)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (google_subject) DO NOTHING
 		 RETURNING `+userColumns,
 		generateID(), email, name, subject))
 	if err == nil {
-		return u, true, nil
+		return u, true, false, nil
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.SQLState() == "23505" {
@@ -6342,22 +6482,22 @@ func (s *Store) provisionUser(ctx context.Context, tx pgx.Tx, externalRef, email
 		// caller can collide with is email. (An id collision is astronomically
 		// unlikely and is not caller-actionable — surface it as a plain error.)
 		if pgErr.ConstraintName == "users_email_key" {
-			return nil, false, ErrEmailConflict
+			return nil, false, false, ErrEmailConflict
 		}
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	// A concurrent provision of the same ref won the insert: re-read it.
 	u, err = scanUser(tx.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE google_subject = $1`, subject))
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if u.DeletedAt != nil {
-		return nil, false, ErrAccountTrashed
+		return nil, false, false, ErrAccountTrashed
 	}
-	return u, false, nil
+	return u, false, false, nil
 }
 
 // GetUserByID loads a LIVE user: a trashed account reads as not found

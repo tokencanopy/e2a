@@ -133,7 +133,7 @@ func TestPromEmitsAllOIDCAndProvisioningOutcomeCategories(t *testing.T) {
 		p.OIDCCallback(outcome, "trusted", "4xx")
 	}
 	for _, outcome := range []string{
-		"created", "existing", "rejected", "internal_error", "not_configured",
+		"created", "existing", "adopted", "rejected", "internal_error", "not_configured",
 		"malformed_request", "unauthorized",
 	} {
 		p.Provisioning(outcome, "authenticated", "2xx")
@@ -158,6 +158,7 @@ func TestPromEmitsAllOIDCAndProvisioningOutcomeCategories(t *testing.T) {
 		`e2a_oidc_callback_total{outcome="post_login_failed",status_class="4xx",trust="trusted"} 1`,
 		`e2a_provisioning_total{outcome="created",status_class="2xx",trust="authenticated"} 1`,
 		`e2a_provisioning_total{outcome="existing",status_class="2xx",trust="authenticated"} 1`,
+		`e2a_provisioning_total{outcome="adopted",status_class="2xx",trust="authenticated"} 1`,
 		`e2a_provisioning_total{outcome="rejected",status_class="2xx",trust="authenticated"} 1`,
 		`e2a_provisioning_total{outcome="internal_error",status_class="2xx",trust="authenticated"} 1`,
 		`e2a_provisioning_total{outcome="not_configured",status_class="2xx",trust="authenticated"} 1`,

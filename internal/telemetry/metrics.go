@@ -269,7 +269,7 @@ type Metrics interface {
 	OIDCCallback(outcome, trust, statusClass string)
 
 	// Provisioning counts POST /api/internal/users/provision outcomes. outcome
-	// ∈ {created, existing, rejected, internal_error, not_configured,
+	// ∈ {created, existing, adopted, rejected, internal_error, not_configured,
 	// malformed_request, unauthorized}; trust ∈ {public, authenticated}.
 	// "authenticated" means the request HMAC was verified before the outcome.
 	// statusClass is the e2a response class. Labels are bounded enums and
