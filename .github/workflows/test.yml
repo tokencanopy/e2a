@@ -133,7 +133,7 @@ jobs:
           E2A_TEST_DATABASE_URL: postgres://e2a:e2a@localhost:5433/e2a_test?sslmode=disable
         run: go test -race -p 2 ./internal/sendramp ./internal/outboundsend
       - name: Enforce per-package coverage floors
-        uses: vladopajic/go-test-coverage@v2
+        uses: vladopajic/go-test-coverage@6890500b00a7e5862e54662c04ea9fa7c799ce1e # v2.23.0; keep Makefile aligned
         with:
           config: ./.testcoverage.yml
 
