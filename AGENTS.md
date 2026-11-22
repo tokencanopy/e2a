@@ -216,16 +216,21 @@ and records the terminal outcome.
 Key packages, grouped (name — a few words each):
 
 - Intake/parsing: `relay` SMTP intake, `emailauth`/`dkim` SPF/DKIM/DMARC
-  eval+alignment, `mailparse` RFC 5322 parsing.
+  eval+alignment, `mailparse` RFC 5322 parsing, `rfcmessageid` RFC 5322
+  Message-ID parsing/canonicalization (threading).
 - API surface: `httpapi` typed `/v1` Huma handlers (OpenAPI source of truth),
-  `apiserver` assembles the process HTTP handler.
+  `apiserver` assembles the process HTTP handler; `filterquery` parses,
+  validates, and emits boolean filter-query expressions (message search).
 - Agent identity: `agent` CRUD/HITL/REST, `agentauth` agent-identity
   JWKS/JWT, `identity`/`senderidentity` domain-ownership verification +
-  sender-identity resolution (incl. SES BYODKIM).
+  sender-identity resolution (incl. SES BYODKIM); `domainteardown` durable
+  state shared by domain deletion, sender-identity convergence, and the
+  public deletion receipt.
 - Delivery: `ws` WebSocket push hub, `loopback` agent-to-self (no network),
   `outbound`/`outboundsend` compose+send via upstream SMTP (queue-first
   River worker), `delivery` SES bounce/complaint feedback via SNS
-  (`POST /webhooks/ses`, signature-verified, fail-closed).
+  (`POST /webhooks/ses`, signature-verified, fail-closed); `suppressionsync`
+  write side of the account suppression list that provider feedback drives.
 - Inbound screening: `inboundprocess`/`inboundpolicy` async worker +
   allow/review/block decisions; `inboundscreen` shared screening core used by
   both the SMTP and loopback self-send paths; `piguard` prompt-injection/
@@ -243,7 +248,8 @@ Key packages, grouped (name — a few words each):
   (Postgres mandatory); `janitor` periodic TTL sweeps (trash, expired holds);
   `contactdue` outreach wake-up sweep — emits `contact.due` for engagements
   past `next_action_at`, on its own River queue/interval, deliberately
-  separate from the janitor's cleanup cadence.
+  separate from the janitor's cleanup cadence; `webhooknotify` sends webhook
+  endpoint health emails (warning, auto-disable).
 - Send guards & accounting: `idempotency` `Idempotency-Key` storage+replay;
   `unsubscribe` opaque per-recipient unsubscribe tokens/URLs
   (List-Unsubscribe); `usage`/`limits` usage metering + plan/account
@@ -252,7 +258,9 @@ Key packages, grouped (name — a few words each):
   enforced in the send worker immediately before provider submission);
   `sendingpolicy` authoritative sending-protection runtime policy — the sole
   provider-authorization gate (single-use, bound to one durable attempt),
-  ramp/budget composition, and operator activation.
+  ramp/budget composition, and operator activation; `sendingaccessnotice`
+  emails the account owner the operator's decision on an external
+  sending-access request.
 - Auth: `auth` API key authentication; `oauth` fosite-based MCP OAuth
   server; Google OAuth + optional generic OIDC login.
 - Misc/infra: `ratelimit`; `telemetry` (metrics interface); `logredact`
@@ -260,7 +268,9 @@ Key packages, grouped (name — a few words each):
   `emailtemplate`+`startertemplates` (server templates + starter catalog);
   `mailfrom` (custom MAIL FROM); `selftest` (prober's self-test);
   `openapicompat` (compat-gate normalization); `config` (YAML+env);
-  `testutil` (test harness); `e2e` (end-to-end suites).
+  `testutil` (test harness); `e2e` (end-to-end suites); `billingnotify`
+  delivers account trash/restore transitions to the external billing
+  service as durable River jobs.
 
 Async-migration feature flags: inbound async processing is opt-in
 (`E2A_INBOUND_MODE=async`, default `sync`) and webhook fan-out on River is
