@@ -254,7 +254,9 @@ Key packages, grouped (name — a few words each):
   provider-authorization gate (single-use, bound to one durable attempt),
   ramp/budget composition, and operator activation.
 - Auth: `auth` API key authentication; `oauth` fosite-based MCP OAuth
-  server; Google OAuth + optional generic OIDC login.
+  server; Google OAuth + optional generic OIDC login; `delegated` RFC 9068
+  delegated access-token verification for external control planes
+  (`E2A_DELEGATED_ENABLED`).
 - Misc/infra: `ratelimit`; `telemetry` (metrics interface); `logredact`
   PII redaction for process logs before centralized log shipping;
   `emailtemplate`+`startertemplates` (server templates + starter catalog);
