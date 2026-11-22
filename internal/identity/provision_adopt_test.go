@@ -492,3 +492,107 @@ func TestProvisionRefusesSecondPrincipalFromSameIssuer(t *testing.T) {
 	}
 	assertUnmapped(t, store, "tcusr_second")
 }
+
+// Different external refs must not both pass the absence check for the same
+// issuer and Google holder. Stop the first insertion after its check so the
+// second attempt overlaps deterministically. Without holder serialization both
+// requests reach this trigger; with it, the second waits on the holder instead.
+func TestProvisionConcurrentAdoptionsDifferentRefsSameIssuer(t *testing.T) {
+	pool := testutil.TestDB(t)
+	store := identity.NewStore(pool)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	existing := newDirectSignup(t, store, "concurrent-adoption@example.test")
+
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION test_adoption_insert_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(1170001);
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER test_adoption_insert_barrier
+		BEFORE INSERT ON external_principal_mappings
+		FOR EACH ROW EXECUTE FUNCTION test_adoption_insert_barrier()`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if _, err := pool.Exec(cleanupCtx, `
+			DROP TRIGGER IF EXISTS test_adoption_insert_barrier ON external_principal_mappings;
+			DROP FUNCTION IF EXISTS test_adoption_insert_barrier()`); err != nil {
+			t.Errorf("remove adoption barrier: %v", err)
+		}
+	})
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(context.Background())
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_xact_lock(1170001)`); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		user             *identity.User
+		created, adopted bool
+		err              error
+	}
+	done := make(chan result, 2)
+	for _, ref := range []string{"tcusr_concurrent_first", "tcusr_concurrent_second"} {
+		go func(ref string) {
+			u, created, adopted, err := store.ProvisionUserAdopting(ctx,
+				ref, "concurrent-adoption@example.test", "", testIssuer, adoptGoogleSub)
+			done <- result{u, created, adopted, err}
+		}(ref)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiters int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiters); err != nil {
+			t.Fatal(err)
+		}
+		if waiters == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("got %d blocked adoption requests, want two before releasing barrier", waiters)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	successes, conflicts := 0, 0
+	for range 2 {
+		select {
+		case got := <-done:
+			switch {
+			case got.err == nil:
+				successes++
+				if got.user == nil || got.user.ID != existing.ID || got.created || !got.adopted {
+					t.Errorf("successful adoption = %+v, want existing user adopted", got)
+				}
+			case errors.Is(got.err, identity.ErrExternalPrincipalConflict):
+				conflicts++
+			default:
+				t.Errorf("unexpected adoption error: %v", got.err)
+			}
+		case <-ctx.Done():
+			t.Fatal("concurrent adoptions did not finish: ", ctx.Err())
+		}
+	}
+	var mappings int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM external_principal_mappings
+		WHERE issuer = $1 AND user_id = $2`, testIssuer, existing.ID).Scan(&mappings); err != nil {
+		t.Fatal(err)
+	}
+	if successes != 1 || conflicts != 1 || mappings != 1 {
+		t.Fatalf("concurrent different-ref adoption: successes=%d conflicts=%d mappings=%d; want 1, 1, 1",
+			successes, conflicts, mappings)
+	}
+}
