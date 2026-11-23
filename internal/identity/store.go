@@ -6356,9 +6356,10 @@ func (s *Store) ProvisionUserAdopting(ctx context.Context, externalRef, email, n
 // error). It must run BEFORE the insert: the insert's unique violation would
 // abort the transaction.
 //
-// Every read takes FOR SHARE, as AttachExternalPrincipal does: it conflicts
-// with the trash/restore/purge FOR NO KEY UPDATE, so an account cannot be
-// trashed between this check and the mapping insert.
+// A matching replay holds FOR SHARE and returns immediately. New adoption
+// holds FOR NO KEY UPDATE before checking issuer ownership, serializing
+// competing refs without conflicting with the mapping insert's FK key-share
+// lock. Both modes exclude trash/restore/purge while the mapping is written.
 func (s *Store) adoptableUserTx(ctx context.Context, tx pgx.Tx, email, googleSubject, externalIssuer, externalRef string) (*User, error) {
 	// Replay first, by the mapping: an earlier adoption of this pair resolves
 	// to the same user even if that user's email has since changed (an
@@ -6367,15 +6368,16 @@ func (s *Store) adoptableUserTx(ctx context.Context, tx pgx.Tx, email, googleSub
 	mapped, err := scanUser(tx.QueryRow(ctx,
 		`SELECT `+userColumns+` FROM users
 		 WHERE id = (SELECT user_id FROM external_principal_mappings WHERE issuer = $1 AND subject = $2)
-		 FOR SHARE`, externalIssuer, externalRef))
-	if err == nil && mapped.DeletedAt == nil && mapped.GoogleSubject == googleSubject {
+		   AND google_subject = $3 AND deleted_at IS NULL
+		 FOR SHARE`, externalIssuer, externalRef, googleSubject))
+	if err == nil {
 		return mapped, nil
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
 	holder, err := scanUser(tx.QueryRow(ctx,
-		`SELECT `+userColumns+` FROM users WHERE email = $1 FOR SHARE`, email))
+		`SELECT `+userColumns+` FROM users WHERE email = $1 FOR NO KEY UPDATE`, email))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
